@@ -946,4 +946,4 @@ gUnknown_086173EC:  @ 0x086173EC
 
 	.global gUnknown_086173F0
 gUnknown_086173F0:  @ 0x086173F0
-	.incbin "baserom.gba", 0x6173F0, 0x1E8C10    @ 0x800000 - 0x6173F0
+	.incbin "baserom.gba", 0x6173F0, 0xC10    @ 0x618000 - 0x6173F0

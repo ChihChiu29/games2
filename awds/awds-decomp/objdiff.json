@@ -1,0 +1,267 @@
+{
+  "min_version": "2.3.2",
+  "target_dir": "config/AWRP00/arm9/../../../build/AWRP00",
+  "base_dir": "config/AWRP00/arm9/../../../build/AWRP00/delinks",
+  "build_base": true,
+  "build_target": false,
+  "watch_patterns": [
+    "*.c",
+    "*.cp",
+    "*.cpp",
+    "*.cxx",
+    "*.h",
+    "*.hp",
+    "*.hpp",
+    "*.hxx",
+    "*.py",
+    "*.yml",
+    "*.yaml",
+    "*.txt",
+    "*.json"
+  ],
+  "units": [
+    {
+      "name": "_dsd_gap@main_7",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@main_7.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "src/AWRP00/arm9/Sqrt",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/src/AWRP00/arm9/Sqrt.o",
+      "base_path": "config/AWRP00/arm9/../../../build/AWRP00/src/AWRP00/arm9/Sqrt.o",
+      "scratch": {
+        "platform": "nds_arm9",
+        "compiler": "mwcc_20_56",
+        "c_flags": "-O4 -proc arm946e -interworking -constpool -fp soft -opt speed -Cpp_exceptions off",
+        "ctx_path": "config/AWRP00/arm9/../../../build/AWRP00/src/AWRP00/arm9/Sqrt.ctx.c",
+        "build_ctx": true
+      },
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "source_path": "src/AWRP00/arm9/Sqrt.c",
+        "auto_generated": false
+      }
+    },
+    {
+      "name": "_dsd_gap@main_1",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@main_1.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "src/AWRP00/arm9/func_02004000",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/src/AWRP00/arm9/func_02004000.o",
+      "base_path": "config/AWRP00/arm9/../../../build/AWRP00/src/AWRP00/arm9/func_02004000.o",
+      "scratch": {
+        "platform": "nds_arm9",
+        "compiler": "mwcc_20_56",
+        "c_flags": "-O4 -proc arm946e -interworking -constpool -fp soft -opt speed -Cpp_exceptions off",
+        "ctx_path": "config/AWRP00/arm9/../../../build/AWRP00/src/AWRP00/arm9/func_02004000.ctx.c",
+        "build_ctx": true
+      },
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "source_path": "src/AWRP00/arm9/func_02004000.c",
+        "auto_generated": false
+      }
+    },
+    {
+      "name": "_dsd_gap@main_2",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@main_2.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "src/AWRP00/arm9/func_02004548",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/src/AWRP00/arm9/func_02004548.o",
+      "base_path": "config/AWRP00/arm9/../../../build/AWRP00/src/AWRP00/arm9/func_02004548.o",
+      "scratch": {
+        "platform": "nds_arm9",
+        "compiler": "mwcc_20_56",
+        "c_flags": "-O4 -proc arm946e -interworking -constpool -fp soft -opt speed -Cpp_exceptions off",
+        "ctx_path": "config/AWRP00/arm9/../../../build/AWRP00/src/AWRP00/arm9/func_02004548.ctx.c",
+        "build_ctx": true
+      },
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "source_path": "src/AWRP00/arm9/func_02004548.c",
+        "auto_generated": false
+      }
+    },
+    {
+      "name": "_dsd_gap@main_3",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@main_3.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "src/AWRP00/arm9/func_0210cf0c",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/src/AWRP00/arm9/func_0210cf0c.o",
+      "base_path": "config/AWRP00/arm9/../../../build/AWRP00/src/AWRP00/arm9/func_0210cf0c.o",
+      "scratch": {
+        "platform": "nds_arm9",
+        "compiler": "mwcc_20_56",
+        "c_flags": "-O4 -proc arm946e -interworking -constpool -fp soft -opt speed -Cpp_exceptions off",
+        "ctx_path": "config/AWRP00/arm9/../../../build/AWRP00/src/AWRP00/arm9/func_0210cf0c.ctx.s",
+        "build_ctx": true
+      },
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "source_path": "src/AWRP00/arm9/func_0210cf0c.s",
+        "auto_generated": false
+      }
+    },
+    {
+      "name": "_dsd_gap@main_4",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@main_4.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "_dsd_gap@ov000_1",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@ov000_1.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "_dsd_gap@ov001_1",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@ov001_1.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "_dsd_gap@ov002_1",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@ov002_1.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "_dsd_gap@ov003_1",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@ov003_1.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "_dsd_gap@ov004_1",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@ov004_1.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "_dsd_gap@ov005_3",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@ov005_3.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "_dsd_gap@ov006_1",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@ov006_1.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "_dsd_gap@ov007_2",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@ov007_2.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "_dsd_gap@ov008_2",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@ov008_2.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "_dsd_gap@ov009_3",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@ov009_3.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "_dsd_gap@ov010_3",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@ov010_3.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "_dsd_gap@ov011_2",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@ov011_2.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "_dsd_gap@itcm_0",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@itcm_0.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    },
+    {
+      "name": "_dsd_gap@dtcm_0",
+      "target_path": "config/AWRP00/arm9/../../../build/AWRP00/delinks/_dsd_gap@dtcm_0.o",
+      "metadata": {
+        "complete": false,
+        "reverse_fn_order": false,
+        "auto_generated": true
+      }
+    }
+  ]
+}

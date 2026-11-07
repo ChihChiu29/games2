@@ -687,5 +687,9 @@ SECTIONS
 		. = ALIGN(4); data/data-0848B688.o(.data)
 		. = ALIGN(4); src/title-screen.o(.data)
 		. = ALIGN(4); data/data-08581E70.o(.data)
-	}
+		. = ALIGN(4); src/skirmish.o(.text)
+		. = ALIGN(4); src/skirmish.o(.rodata)
+		. = 0x007FFFFF;
+		BYTE(0xFF);
+	} =0xFFFFFFFF
 }

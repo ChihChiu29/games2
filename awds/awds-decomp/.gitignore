@@ -1,0 +1,57 @@
+# User-owned ROM and archive inputs
+*.nds
+*.zip
+*.7z
+*.rar
+
+# dsd extraction, build, and target-derived output
+extract/
+build/
+*.elf
+*.map
+*.o
+*.obj
+*.a
+*.lib
+*.dol
+*.gba
+*.bin
+
+# Locally downloaded tools and proprietary toolchain payloads
+tools/dsd
+tools/objdiff-cli
+tools/dsd-ghidra/
+tools/wibo
+tools/vendor/
+tools/tool-cache/
+tools/*.exe
+license.dat
+
+# Analysis databases and scratch data
+.ghidra/
+ghidra/
+*.gpr
+*.rep
+*.gzf
+*.gdt
+scratch/
+decompme/
+*.dmp
+
+# Local credentials and generated metadata
+.env
+.env.*
+!.env.example
+*.session
+*.token
+.oauth/
+.cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp

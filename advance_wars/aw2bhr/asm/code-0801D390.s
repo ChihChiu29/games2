@@ -15156,32 +15156,30 @@ _080247D8:
 	ldr r0, _08024810 @ =0x00000A14
 	bl sub_08014E44
 	bl sub_08037B84
-	ldr r4, _08024814 @ =gUnknown_085C77A0
 	bl sub_0803866C
-	lsls r0, r0, #2
-	movs r1, #0x5c
-	muls r1, r5, r1
-	adds r0, r0, r1
-	adds r2, r4, #0
-	adds r2, #0x2c
-	adds r0, r0, r2
-	ldr r4, [r0]
-	cmp r4, #0
-	bne _08024800
-	adds r0, r1, r2
-	ldr r4, [r0]
-_08024800:
+	adds r1, r0, #0
 	ldr r0, _08024818 @ =gUnknown_03003F68
-	ldr r1, [r0]
-	adds r0, r4, #0
+	ldr r2, [r0]
+	adds r0, r5, #0
+	ldr r3, _08024814 @ =Skirmish_GetOrGenerateMapLz
+	bl _call_via_r3
+	cmp r0, #0
+	beq _0802480A
+	ldr r1, _08024818 @ =gUnknown_03003F68
+	ldr r1, [r1]
 	bl LZ77UnCompWram
+	nop
+	nop
+	nop
+	nop
+	nop
 _0802480A:
 	pop {r4, r5}
 	pop {r0}
 	bx r0
 	.align 2, 0
 _08024810: .4byte 0x00000A14
-_08024814: .4byte gUnknown_085C77A0
+_08024814: .4byte Skirmish_GetOrGenerateMapLz
 _08024818: .4byte gUnknown_03003F68
 
 	thumb_func_start sub_0802481C
@@ -15335,19 +15333,18 @@ sub_08024944: @ 0x08024944
 	lsrs r0, r0, #0x10
 	cmp r0, #0xb
 	bls _08024974
-	ldr r2, _0802496C @ =gUnknown_08610A38
-	ldr r1, _08024970 @ =gUnknown_085C77A0
-	movs r0, #0x5c
-	muls r0, r3, r0
-	adds r0, r0, r1
-	ldrh r0, [r0, #0x14]
-	lsls r0, r0, #2
-	adds r0, r0, r2
-	ldr r0, [r0]
+	adds r0, r3, #0
+	ldr r1, _0802496C @ =Skirmish_GetMapName
+	bl _call_via_r1
+	nop
+	nop
+	nop
+	nop
+	nop
 	b _08024980
 	.align 2, 0
 _08024968: .4byte 0xFF4C0000
-_0802496C: .4byte gUnknown_08610A38
+_0802496C: .4byte Skirmish_GetMapName
 _08024970: .4byte gUnknown_085C77A0
 _08024974:
 	adds r0, r3, #0
@@ -53493,15 +53490,15 @@ sub_08037448: @ 0x08037448
 	lsrs r7, r0, #0x18
 	ldr r0, _080374D0 @ =gUnknown_03003FC0
 	ldrb r0, [r0, #1]
-	cmp r0, #2
-	beq _08037474
-	cmp r0, #4
-	beq _08037474
+	cmp r0, #3
+	bne _08037474
 	adds r0, r6, #0
-	bl sub_0803CA9C
-	lsls r0, r0, #0x18
-	cmp r0, #0
-	beq _080374E0
+	ldr r1, _08037470 @ =Skirmish_PopulateMapList
+	bl _call_via_r1
+	b _080374E2
+	nop
+	.align 2, 0
+_08037470: .4byte Skirmish_PopulateMapList
 _08037474:
 	movs r5, #0
 	movs r4, #0
@@ -62892,11 +62889,11 @@ _0803BCCC: .4byte gUnknown_02028078
 
 	thumb_func_start sub_0803BCD0
 sub_0803BCD0: @ 0x0803BCD0
-	ldr r1, _0803BCD8 @ =gUnknown_03003FC0
-	strb r0, [r1, #2]
-	bx lr
+	ldr r1, _0803BCD8 @ =Skirmish_OnSelectMap
+	bx r1
+	nop
 	.align 2, 0
-_0803BCD8: .4byte gUnknown_03003FC0
+_0803BCD8: .4byte Skirmish_OnSelectMap
 
 	thumb_func_start sub_0803BCDC
 sub_0803BCDC: @ 0x0803BCDC
@@ -64841,19 +64838,19 @@ _0803CA50: .4byte gUnknown_02028030
 
 	thumb_func_start sub_0803CA54
 sub_0803CA54: @ 0x0803CA54
-	ldr r1, _0803CA6C @ =gUnknown_02028030
-	lsrs r2, r0, #3
-	adds r1, #0x12
-	adds r2, r2, r1
-	movs r1, #7
-	ands r1, r0
-	movs r0, #1
-	lsls r0, r1
-	ldrb r1, [r2]
-	ands r0, r1
-	bx lr
+	ldr r1, _0803CA6C @ =Skirmish_IsMapUnlocked
+	bx r1
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
 	.align 2, 0
-_0803CA6C: .4byte gUnknown_02028030
+_0803CA6C: .4byte Skirmish_IsMapUnlocked
 
 	thumb_func_start sub_0803CA70
 sub_0803CA70: @ 0x0803CA70

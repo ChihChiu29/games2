@@ -1,0 +1,17 @@
+    .text       start:0x02000000 end:0x02133990 kind:code align:32
+    .rodata     start:0x02133990 end:0x0216e8f4 kind:rodata align:4
+    .ctor       start:0x0216e8f4 end:0x0216e8f4 kind:rodata align:4
+    .data       start:0x0216e900 end:0x0218c4a0 kind:data align:32
+    .bss        start:0x0218c4a0 end:0x022db680 kind:bss align:32
+
+src/AWRP00/arm9/Sqrt.c:
+    .text       start:0x02000214 end:0x02000218
+
+src/AWRP00/arm9/func_02004000.c:
+    .text       start:0x02004000 end:0x02004020
+
+src/AWRP00/arm9/func_02004548.c:
+    .text       start:0x02004548 end:0x02004568
+
+src/AWRP00/arm9/func_0210cf0c.s:
+    .text       start:0x0210cf0c end:0x0210cf2a

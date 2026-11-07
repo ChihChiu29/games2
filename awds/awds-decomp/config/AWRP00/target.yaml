@@ -1,0 +1,34 @@
+version: AWRP00
+title: ADVANCEWARSP
+game_code: AWRP
+revision: 0
+image_size: 33554432
+hashes:
+  md5: e6105bc672701a516b730c31754f7859
+  sha1: 03b63875930bd8fdea50902d7d2e0a4614ac36eb
+  sha256: a16d29f4a41748999a573dc24dba1119512ae6fa558645147b42dab5f51ad50b
+layout:
+  arm9:
+    load_address: 0x02000000
+    entry: 0x02000800
+    header_size: 1652344
+    binary_size: 1623200
+    autoload_callback: 0x02000a10
+  arm7:
+    load_address: 0x02380000
+    entry: 0x02380000
+    header_size: 159528
+    binary_size: 159528
+    autoload_callback: 0x02380118
+  itcm_size: 24288
+  dtcm_size: 4832
+  dtcm_bss_start: 0x0218c4a0
+  dtcm_bss_end: 0x022db680
+  arm9_overlays: 12
+  arm7_overlays: 0
+analysis:
+  dsd_version: 0.12.0
+  initial_arm9_code_bytes: 1698382
+  initial_arm9_data_bytes: 4738200
+  initial_arm9_function_count: 7498
+  automatic_function_gap: [ov000, ov001, ov002, ov003, ov004]

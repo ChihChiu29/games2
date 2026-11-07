@@ -5031,6 +5031,13 @@ processAction(ACTION_NAMES action, SPELL_NAMES forcespell, MOB *avatar)
 	    break;
 
 	case ACTION_JUMP:
+	    if (!avatar->hasIntrinsic(INTRINSIC_JUMP) &&
+		!avatar->hasSkill(SKILL_LEAPATTACK) &&
+		avatar->getMP() < 8)
+	    {
+		avatar->formatAndReport("%U <lack> the magic to jump (8 MP).");
+		break;
+	    }
 	    success = msg_askdir("Jump where?", dx, dy, avatar->canMoveDiabolically());
 
 	    if (success)

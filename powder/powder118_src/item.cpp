@@ -194,8 +194,8 @@ ITEM::petrify(MAP *map, MOB *petrifier)
 
     if (myDefinition == ITEM_MOUNDFLESH)
     {
-	myDefinition = ITEM_BOULDER;
 	myFlag1 = (ITEMFLAG1_NAMES) (myFlag1 | ITEMFLAG1_ISBLOCKING);
+	setDefinition(ITEM_BOULDER);
 	formatAndReport("The mound of flesh hardens into a boulder.");
 	return true;
     }
@@ -213,7 +213,7 @@ ITEM::petrify(MAP *map, MOB *petrifier)
 	// This is made of flesh.  Should turn into a rock.
 	formatAndReport("%U <harden> into a rock.");
 
-	myDefinition = ITEM_ROCK;
+	setDefinition(ITEM_ROCK);
 	return true;
     }
 
@@ -234,7 +234,7 @@ ITEM::unpetrify(MAP *map, MOB *unpetrifier)
 	{
 	    // Mobless statue.
 	    formatAndReport("%U, being but a work of art, <collapse> into a meatball.");
-	    myDefinition = ITEM_MEATBALL;
+	    setDefinition(ITEM_MEATBALL);
 	    return true;
 	}
 
@@ -262,8 +262,8 @@ ITEM::unpetrify(MAP *map, MOB *unpetrifier)
     {
 	// Becomes a mound of flesh.
 	formatAndReport("%U <collapse> into a mound of flesh.");
-	myDefinition = ITEM_MOUNDFLESH;
 	myFlag1 = (ITEMFLAG1_NAMES) (myFlag1 & ~ITEMFLAG1_ISBLOCKING);
+	setDefinition(ITEM_MOUNDFLESH);
 
 	return true;
     }
@@ -279,7 +279,7 @@ ITEM::unpetrify(MAP *map, MOB *unpetrifier)
 
 	// Transforms into a meatball.
 	formatAndReport("%U <collapse>...");
-	myDefinition = ITEM_MEATBALL;
+	setDefinition(ITEM_MEATBALL);
 	formatAndReport("into %U.");
 	return true;
     }
@@ -954,12 +954,29 @@ ITEM::enchant(int delta)
 	newval = 99;
 
     myEnchantment = newval;
+    if (isFullyIdentified())
+    {
+	myIdentifyTimer = 0;
+	if (!isIdentified())
+	    markClassKnown(true);
+    }
 }
 
 void
 ITEM::makeArtifact(const char *name)
 {
     myFlag1 = (ITEMFLAG1_NAMES) (myFlag1 | ITEMFLAG1_ISARTIFACT);
+    myIdentifyTimer = 0;
+    if (getMagicType() != MAGICTYPE_WAND &&
+	getMagicType() != MAGICTYPE_SPELLBOOK &&
+	getDefinition() != ITEM_LIGHTNINGRAPIER)
+    {
+	myFlag1 = (ITEMFLAG1_NAMES) (myFlag1 & ~ITEMFLAG1_ISKNOWCHARGES);
+    }
+    if (!isPoisoned())
+    {
+	myFlag1 = (ITEMFLAG1_NAMES) (myFlag1 & ~ITEMFLAG1_ISKNOWPOISON);
+    }
 
     if (!name)
 	rename(artifact_buildname(getDefinition()));
@@ -1071,8 +1088,8 @@ ITEM::doHeartbeat(MAP *map, MOB *owner)
 	}
     }
 
-    // Self-charging wands: slowly regain charges up to their natural max.
-    if ((!owner || owner->isAvatar()) && getMagicType() == MAGICTYPE_WAND && !isCursed())
+    // Self-charging wands: slowly regain charges up to their natural max while carried by the avatar.
+    if (owner && owner->isAvatar() && getMagicType() == MAGICTYPE_WAND && !isCursed())
     {
 	const DICE &dice = glb_wanddefs[getMagicClass()].charges;
 	int maxcharges = dice.myNumdie * dice.mySides + dice.myBonus;
@@ -1085,8 +1102,8 @@ ITEM::doHeartbeat(MAP *map, MOB *owner)
 	}
     }
 
-    // Self-charging spellbooks: slowly regain pages (charges) up to their natural max.
-    if ((!owner || owner->isAvatar()) && getMagicType() == MAGICTYPE_SPELLBOOK && !isCursed())
+    // Self-charging spellbooks: slowly regain pages (charges) up to their natural max while carried by the avatar.
+    if (owner && owner->isAvatar() && getMagicType() == MAGICTYPE_SPELLBOOK && !isCursed())
     {
 	const DICE &dice = glb_spellbookdefs[getMagicClass()].charges;
 	int maxcharges = dice.myNumdie * dice.mySides + dice.myBonus;
@@ -1100,21 +1117,29 @@ ITEM::doHeartbeat(MAP *map, MOB *owner)
     }
 
     // Self-identify over time while carried by the avatar (2x faster when equipped).
-    if (owner && owner->isAvatar() && !isFullyIdentified() &&
-	myDefinition != ITEM_CORPSE && myDefinition != ITEM_BONES && myDefinition != ITEM_STATUE)
+    if (owner && owner->isAvatar() &&
+	myDefinition != ITEM_CORPSE && myDefinition != ITEM_BONES &&
+	myDefinition != ITEM_STATUE && myDefinition != ITEM_MINDACIDHAND)
     {
-	int step = (myX == 0) ? 2 : 1;
-	if (myIdentifyTimer + step >= IDENTIFY_TIME)
+	if (isFullyIdentified())
 	{
 	    myIdentifyTimer = 0;
-	    bool wasclassknown = isIdentified();
-	    markIdentified(false);
-	    if (wasclassknown || getMagicType() == MAGICTYPE_NONE)
-		owner->formatAndReport("%U <have> fully identified %r %Iu.", this);
 	}
 	else
 	{
-	    myIdentifyTimer += step;
+	    int step = (myX == 0) ? 2 : 1;
+	    if (myIdentifyTimer + step >= IDENTIFY_TIME)
+	    {
+		myIdentifyTimer = 0;
+		bool wasclassknown = isIdentified();
+		markIdentified(false);
+		if (wasclassknown || getMagicType() == MAGICTYPE_NONE)
+		    owner->formatAndReport("%U <have> fully identified %r %Iu.", this);
+	    }
+	    else
+	    {
+		myIdentifyTimer += step;
+	    }
 	}
     }
 
@@ -1312,19 +1337,64 @@ int
 ITEM::getIdentifyProgress() const
 {
     if (isFullyIdentified() || myIdentifyTimer == 0 ||
-	myDefinition == ITEM_CORPSE || myDefinition == ITEM_BONES || myDefinition == ITEM_STATUE)
+	myDefinition == ITEM_CORPSE || myDefinition == ITEM_BONES ||
+	myDefinition == ITEM_STATUE || myDefinition == ITEM_MINDACIDHAND)
     {
 	return 0;
     }
     return (myIdentifyTimer * 100) / IDENTIFY_TIME;
 }
 
+void
+ITEM::setDefinition(ITEM_NAMES def)
+{
+    if (myDefinition != def)
+    {
+	myDefinition = def;
+	if (getMagicType() != MAGICTYPE_NONE && !isIdentified())
+	{
+	    myIdentifyTimer = 0;
+	}
+	else if (isFullyIdentified())
+	{
+	    myIdentifyTimer = 0;
+	    if (!isIdentified())
+		markClassKnown(true);
+	}
+    }
+}
+
 bool
 ITEM::isFullyIdentified() const
 {
-    return isIdentified() && isKnownCursed() &&
-	   isKnownEnchant() && isKnownCharges() &&
-	   isKnownPoison();
+    if ((!isIdentified() && getMagicType() != MAGICTYPE_NONE) || !isKnownCursed())
+	return false;
+
+    if (isArtifact())
+    {
+	return isIdentified() && isKnownEnchant() && isKnownCharges() && isKnownPoison();
+    }
+
+    if ((getEnchantment() != 0 ||
+	 isBoots() || isHelmet() || isShield() ||
+	 isJacket() || isWeapon()) && !isKnownEnchant())
+    {
+	return false;
+    }
+
+    if ((getMagicType() == MAGICTYPE_WAND ||
+	 getMagicType() == MAGICTYPE_SPELLBOOK ||
+	 getDefinition() == ITEM_LIGHTNINGRAPIER) && !isKnownCharges())
+    {
+	return false;
+    }
+
+    if (isPoisoned() && !isKnownPoison())
+    {
+	return false;
+    }
+
+    return true;
 }
 
 bool
@@ -1432,18 +1502,34 @@ ITEM::markClassKnown(bool silent)
     }
 
     glb_itemid[myDefinition] = 1;
+    if (isFullyIdentified())
+    {
+	myIdentifyTimer = 0;
+    }
 }
 
 void
 ITEM::markEnchantKnown()
 {
     myFlag1 = (ITEMFLAG1_NAMES) (myFlag1 | ITEMFLAG1_ISKNOWENCHANT);
+    if (isFullyIdentified())
+    {
+	myIdentifyTimer = 0;
+	if (!isIdentified())
+	    markClassKnown(true);
+    }
 }
 
 void
 ITEM::markCursedKnown()
 {
     myFlag1 = (ITEMFLAG1_NAMES) (myFlag1 | ITEMFLAG1_ISKNOWCURSE);
+    if (isFullyIdentified())
+    {
+	myIdentifyTimer = 0;
+	if (!isIdentified())
+	    markClassKnown(true);
+    }
 }
 
 void
@@ -1459,11 +1545,18 @@ void
 ITEM::markChargesKnown()
 {
     myFlag1 = (ITEMFLAG1_NAMES) (myFlag1 | ITEMFLAG1_ISKNOWCHARGES);
+    if (isFullyIdentified())
+    {
+	myIdentifyTimer = 0;
+	if (!isIdentified())
+	    markClassKnown(true);
+    }
 }
 
 void
 ITEM::clearChargesKnown()
 {
+    myIdentifyTimer = 0;
     myFlag1 = (ITEMFLAG1_NAMES) (myFlag1 & (~ITEMFLAG1_ISKNOWCHARGES));
 }
 
@@ -1471,6 +1564,12 @@ void
 ITEM::markPoisonKnown()
 {
     myFlag1 = (ITEMFLAG1_NAMES) (myFlag1 | ITEMFLAG1_ISKNOWPOISON);
+    if (isFullyIdentified())
+    {
+	myIdentifyTimer = 0;
+	if (!isIdentified())
+	    markClassKnown(true);
+    }
 }
 
 void
@@ -1504,6 +1603,12 @@ ITEM::makePoisoned(POISON_NAMES poison, int charges)
 {
     myPoison = poison;
     myPoisonCharges = charges;
+    if (isFullyIdentified())
+    {
+	myIdentifyTimer = 0;
+	if (!isIdentified())
+	    markClassKnown(true);
+    }
 }
 
 bool
@@ -1529,6 +1634,12 @@ ITEM::applyPoison(MOB *src, MOB *target, bool force)
 				rand_dice(3, 3, 0) );
 
     myPoisonCharges--;
+    if (isFullyIdentified())
+    {
+	myIdentifyTimer = 0;
+	if (!isIdentified())
+	    markClassKnown(true);
+    }
 }
 
 bool
@@ -2181,7 +2292,8 @@ ITEM::pageDescription(bool brief) const
     gfx_pager_separator();
 
     if (!isFullyIdentified() &&
-	myDefinition != ITEM_CORPSE && myDefinition != ITEM_BONES && myDefinition != ITEM_STATUE)
+	myDefinition != ITEM_CORPSE && myDefinition != ITEM_BONES &&
+	myDefinition != ITEM_STATUE && myDefinition != ITEM_MINDACIDHAND)
     {
 	int pct = (myIdentifyTimer * 100) / IDENTIFY_TIME;
 	int rem = IDENTIFY_TIME - myIdentifyTimer;
@@ -2211,8 +2323,10 @@ ITEM::pageDescription(bool brief) const
 	    gfx_pager_addtext("Recharge: +1 page every 10 turns");
 	else if (isKnownCursed())
 	    gfx_pager_addtext("Recharge: +1 page every 20 turns");
-	else
+	else if (isKnownNotCursed())
 	    gfx_pager_addtext("Recharge: +1 page every 20 turns (10 if holy)");
+	else
+	    gfx_pager_addtext("Recharge: +1 page every 20 turns (10 if holy, 0 if evil)");
 	gfx_pager_newline();
     }
     else if (getMagicType() == MAGICTYPE_WAND)
@@ -2234,8 +2348,10 @@ ITEM::pageDescription(bool brief) const
 	    gfx_pager_addtext("Recharge: +1 charge every 5 turns");
 	else if (isKnownCursed())
 	    gfx_pager_addtext("Recharge: +1 charge every 10 turns");
-	else
+	else if (isKnownNotCursed())
 	    gfx_pager_addtext("Recharge: +1 charge every 10 turns (5 if holy)");
+	else
+	    gfx_pager_addtext("Recharge: +1 charge every 10 turns (5 if holy, 0 if evil)");
 	gfx_pager_newline();
     }
 
@@ -2578,6 +2694,12 @@ ITEM::mergeStack(ITEM *item)
 	markPoisonKnown();
     if (item->myIdentifyTimer > myIdentifyTimer)
 	myIdentifyTimer = item->myIdentifyTimer;
+    if (isFullyIdentified())
+    {
+	myIdentifyTimer = 0;
+	if (!isIdentified())
+	    markClassKnown(true);
+    }
 }
 
 ITEM *
@@ -2930,21 +3052,21 @@ ITEM::ignite(MOB *igniter, bool *interesting)
     {
 	formatAndReport(igniter, "%U <catch> on fire!");
 
-	myDefinition = ITEM_FLAMESWORD;
+	setDefinition(ITEM_FLAMESWORD);
 	return false;
     }
 
     if (getDefinition() == ITEM_ICEMACE)
     {
 	formatAndReport(igniter, "%U <return> to room temperature.");
-	myDefinition = ITEM_MACE;
+	setDefinition(ITEM_MACE);
 	return false;
     }
 
     if (getDefinition() == ITEM_ARROW)
     {
 	formatAndReport(igniter, "%U <catch> on fire!");
-	myDefinition = ITEM_FIREARROW;
+	setDefinition(ITEM_FIREARROW);
 	return false;
     }
 
@@ -2953,10 +3075,10 @@ ITEM::ignite(MOB *igniter, bool *interesting)
     {
 	formatAndReport(igniter, "%U <catch> on fire!");
 
-	myDefinition = ITEM_TORCH;
 	// Set our shield flag.
 	myFlag1 = (ITEMFLAG1_NAMES) 
 	    (myFlag1 | glb_itemdefs[ITEM_TORCH].flag1);
+	setDefinition(ITEM_TORCH);
 	return false;
     }
 
@@ -2984,9 +3106,9 @@ ITEM::electrify(int points, MOB *shocker, bool *interesting)
     {
 	formatAndReport(shocker, "%U <be> filled with electricity!");
 
-	myDefinition = ITEM_LIGHTNINGRAPIER;
 	addCharges(points);
 	clearChargesKnown();
+	setDefinition(ITEM_LIGHTNINGRAPIER);
 	return false;
     }
 
@@ -3047,28 +3169,28 @@ ITEM::douse(MOB *douser, bool *interesting)
     if (getDefinition() == ITEM_FLAMESWORD)
     {
 	formatAndReport(douser, "%U <be> extinguished.");
-	myDefinition = ITEM_LONGSWORD;
+	setDefinition(ITEM_LONGSWORD);
     }
     else if (getDefinition() == ITEM_FIREARROW)
     {
 	formatAndReport(douser, "%U <be> extinguished.");
-	myDefinition = ITEM_ARROW;
+	setDefinition(ITEM_ARROW);
     }
     // As do torches.
     else if (getDefinition() == ITEM_TORCH)
     {
 	formatAndReport(douser, "%U <be> extinguished.");
-	myDefinition = ITEM_CLUB;
 	// Clear out the isshield flag.
 	myFlag1 = (ITEMFLAG1_NAMES) 
 	    (myFlag1 & ~glb_itemdefs[ITEM_TORCH].flag1);
+	setDefinition(ITEM_CLUB);
     }
     // Empty bottles fill.  This may seem odd as smashing one bottle may
     // fill ten, but the same happens with dipping.
     else if (getDefinition() == ITEM_BOTTLE)
     {
 	formatAndReport(douser, "%U <be> filled.");
-	myDefinition = ITEM_WATER;
+	setDefinition(ITEM_WATER);
     }
     else
     {

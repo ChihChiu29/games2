@@ -2413,13 +2413,13 @@ MOB::doHeartbeat()
 		    myHP += (hunger > HUNGER_NORMAL) ? 4 : 3;
 		    if (myHP > getMaxHP())
 			myHP = getMaxHP();
-		    if (speed_matchheartbeat(10))
+		    if (speed_matchheartbeat((hunger > HUNGER_NORMAL) ? 10 : 20))
 			starve(1);
 		}
 		else if (speed_matchheartbeat(2) || (hunger > HUNGER_NORMAL))
 		{
 		    myHP++;
-		    if (speed_matchheartbeat(10))
+		    if (speed_matchheartbeat((hunger > HUNGER_NORMAL) ? 10 : 20))
 			starve(1);
 		}
 	    }
@@ -2434,7 +2434,7 @@ MOB::doHeartbeat()
 		    myHP += (hunger > HUNGER_NORMAL) ? 3 : 2;
 		    if (myHP > getMaxHP())
 			myHP = getMaxHP();
-		    if (speed_matchheartbeat(10))
+		    if (speed_matchheartbeat((hunger > HUNGER_NORMAL) ? 10 : 80))
 			starve(1);
 		}
 		else
@@ -2442,8 +2442,6 @@ MOB::doHeartbeat()
 		    myHP += 1;
 		    if (myHP > getMaxHP())
 			myHP = getMaxHP();
-		    if (speed_matchheartbeat(10))
-			starve(1);
 		}
 	    }
 	    else if (hunger > HUNGER_HUNGRY)
@@ -2452,7 +2450,7 @@ MOB::doHeartbeat()
 		if (speed_matchheartbeat(8) || (hunger > HUNGER_NORMAL))
 		{
 		    myHP++;
-		    if (speed_matchheartbeat(10))
+		    if (speed_matchheartbeat((hunger > HUNGER_NORMAL) ? 10 : 80))
 			starve(1);
 		}
 	    }
@@ -2468,13 +2466,13 @@ MOB::doHeartbeat()
 		myHP += 2;
 		if (myHP > getMaxHP())
 		    myHP = getMaxHP();
-		if (speed_matchheartbeat(10))
+		if (speed_matchheartbeat(20))
 		    starve(1);
 	    }
 	    else if (speed_matchheartbeat(2))
 	    {
 		myHP++;
-		if (speed_matchheartbeat(10))
+		if (speed_matchheartbeat(20))
 		    starve(1);
 	    }
 	}
@@ -2490,7 +2488,7 @@ MOB::doHeartbeat()
 	    {
 		if (master->hasIntrinsic(INTRINSIC_DRESSED_CLERIC))
 		{
-		    myHP += 2;
+		    myHP += master->isAvatar() ? 2 : 1;
 		    if (myHP > getMaxHP())
 			myHP = getMaxHP();
 		    if (speed_matchheartbeat(10))
@@ -2517,7 +2515,7 @@ MOB::doHeartbeat()
 		myMP += 5;
 		if (myMP > getMaxMP())
 		    myMP = getMaxMP();
-		if (speed_matchheartbeat(10))
+		if (speed_matchheartbeat(20))
 		    starve(1);
 	    }
 	    else
@@ -2526,7 +2524,7 @@ MOB::doHeartbeat()
 		myMP += speed_matchheartbeat(2) ? 3 : 2;
 		if (myMP > getMaxMP())
 		    myMP = getMaxMP();
-		if (speed_matchheartbeat(10))
+		if (speed_matchheartbeat(40))
 		    starve(1);
 	    }
 
@@ -2547,7 +2545,7 @@ MOB::doHeartbeat()
 		if (speed_matchheartbeat(2))
 		{
 		    myMP++;
-		    if (speed_matchheartbeat(10))
+		    if (speed_matchheartbeat(20))
 			starve(1);
 		}
 	    }
@@ -2556,7 +2554,7 @@ MOB::doHeartbeat()
 		if (speed_matchheartbeat(4))
 		{
 		    myMP++;
-		    if (speed_matchheartbeat(10))
+		    if (speed_matchheartbeat(40))
 			starve(1);
 		}
 	    }

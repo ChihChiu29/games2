@@ -173,8 +173,7 @@ public:
     
     ITEM_NAMES		 getDefinition() const 
 			 { return (ITEM_NAMES) myDefinition; }
-    void		 setDefinition(ITEM_NAMES def)
-			 { myDefinition = def; }
+    void		 setDefinition(ITEM_NAMES def);
     ITEMTYPE_NAMES	 getItemType() const;
 
     const ITEM_DEF	&defn() const { return defn(getDefinition()); }

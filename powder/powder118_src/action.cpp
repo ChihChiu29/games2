@@ -379,7 +379,7 @@ MOB::actionJump(int dx, int dy)
 	}
 	if (myMP < jump_mp_cost)
 	{
-	    formatAndReport("%U <lack> the magic to jump.");
+	    formatAndReport("%U <lack> the magic to jump (8 MP).");
 	    return false;
 	}
     }
@@ -418,6 +418,11 @@ MOB::actionJump(int dx, int dy)
     }
 
     applyConfusion(dx, dy);
+    if (!dx && !dy)
+    {
+	formatAndReport("%U <jump> on the spot.");
+	return true;
+    }
 
     // Verify the square they will jump over is passable.
     nx = getX() + dx;
@@ -2965,7 +2970,7 @@ MOB::actionEat(int ix, int iy)
 	    const u8		*spells;
 	    int  		 min_range, max_range;
 
-	    if (!canDigest(item) || glb_itemdefs[item->getDefinition()].isquest)
+	    if (!canDigest(item) || glb_itemdefs[item->getDefinition()].isquest || !item->getCharges())
 	    {
 		// If you can't actually eat the book, you shouldn't
 		// gain the bonus.
@@ -3302,7 +3307,8 @@ MOB::actionRead(int ix, int iy)
     // There is no objection to readding equipped scrolls.
     // Perhaps we should give a bonus some day?
 
-    if (item->getStackCount() > 1)
+    if (item->getStackCount() > 1 &&
+	(item->getMagicType() != MAGICTYPE_SPELLBOOK || item->getCharges() > 0))
     {
 	itemstack = item;
 	item = itemstack->splitStack(1);
@@ -3569,13 +3575,7 @@ MOB::actionRead(int ix, int iy)
 	
 	doread = true;
 	
-	// Print the read message...
-	formatAndReport("%U <read> %IU.", item);
-
 	magicclass = item->getMagicClass();
-
-	// Apply any contact poison.
-	item->applyPoison(this, this);
 
 	// Ask the user what to read.
 	if (!isAvatar())
@@ -3594,6 +3594,12 @@ MOB::actionRead(int ix, int iy)
 	}
 	else
 	{
+	    // Print the read message...
+	    formatAndReport("%U <read> %IU.", item);
+
+	    // Apply any contact poison.
+	    item->applyPoison(this, this);
+
 	    // Autoid spellbooks when the avatar can read their table of contents.
 	    if (isAvatar())
 		item->markClassKnown();
@@ -3828,6 +3834,7 @@ MOB::actionRead(int ix, int iy)
 	    {
 		doread = false;
 		item->markChargesKnown();
+		item->markNotCursedKnown(true);
 		formatAndReport("The ink of %IU fades and begins to recharge.", item);
 	    }
 	}
@@ -4254,7 +4261,8 @@ MOB::actionZap(int ix, int iy, int dx, int dy, int dz)
     wand = getItem(ix, iy);
 
     // If the wand was in a stack, unpeel it from the stack before zapping.
-    if (wand->getStackCount() > 1)
+    if (wand->getStackCount() > 1 &&
+	(wand->getMagicType() != MAGICTYPE_WAND || wand->getCharges() > 0 || wand->isCursed()))
     {
 	int		sx, sy;
 	
@@ -4457,7 +4465,7 @@ MOB::actionCast(SPELL_NAMES spell, int dx, int dy, int dz)
 		{
 		    formatAndReport("The backsplash drenches %r %Iu!", item);
 
-		    if (ix != 0 && rand_chance(10) && item->canDissolve())
+		    if ((!isAvatar() || (ix != 0 && rand_chance(10))) && item->canDissolve())
 		    {
 			// Peel off one instance if stacked, otherwise
 			// take the whole thing.

@@ -30,7 +30,7 @@
 
 // #pragma pack(push, 1)
 
-int glbVersion = 118;
+int glbVersion = 119;
 int glbSaveCount = 0;
 bool glbIsNewGame = false;
 bool glbRNGValid = false;

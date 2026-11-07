@@ -1,0 +1,28 @@
+# Object, dependency, linker, and ROM output files
+*.o
+*.d
+*.elf
+*.map
+*.gba
+*.sav
+
+# Support tool binaries
+powder118_src/support/bmp2c/bmp2c
+powder118_src/support/encyclopedia2c/encyclopedia2c
+powder118_src/support/enummaker/enummaker
+powder118_src/support/map2c/map2c
+powder118_src/support/tile2c/tile2c
+powder118_src/support/txt2c/txt2c
+
+# Premake generated sources and headers
+powder118_src/credits.cpp
+powder118_src/license.cpp
+powder118_src/encyclopedia.cpp
+powder118_src/encyclopedia.h
+powder118_src/glbdef.cpp
+powder118_src/glbdef.h
+powder118_src/rooms/*.cpp
+powder118_src/rooms/allrooms.h
+powder118_src/gfx/**/*.c
+powder118_src/gfx/*.c
+powder118_src/gfx/akoi3x/sprite16_3x.bmp

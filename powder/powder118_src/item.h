@@ -411,6 +411,9 @@ public:
     bool 		 fallInHole(MAP * curLevel, bool mapownsitem,
 				    MOB *dropper);
 
+    static const int	 IDENTIFY_TIME = 150;
+    int			 getIdentifyProgress() const;
+
 protected:
     // This data must be kept as limitted as possible, as there
     // are a lot of items.
@@ -423,6 +426,7 @@ protected:
     u8			 myCharges;
     u8			 myPoison;
     u8			 myPoisonCharges;
+    u8			 myIdentifyTimer;
     ITEMFLAG1_NAMES	 myFlag1;
 
     MOBREF		 myCorpseMob;

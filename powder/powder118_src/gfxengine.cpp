@@ -1942,8 +1942,29 @@ gfx_updateinventoryline(MOB *mob)
     }
     item = mob->getItem(glb_invx, glb_invy);
     if (item)
-	gfx_printtext(0, 18,
-		      gram_capitalize(item->getName(false, false, true)));
+    {
+	BUF buf = gram_capitalize(item->getName(false, false, true));
+	int pct = item->getIdentifyProgress();
+	if (pct > 0)
+	{
+	    BUF tmp;
+	    tmp.sprintf(" [%d%%]", pct);
+	    if (buf.strlen() + tmp.strlen() <= 30)
+	    {
+		buf.strcat(tmp);
+		gfx_printtext(0, 18, buf);
+	    }
+	    else
+	    {
+		gfx_printtext(0, 18, buf);
+		gfx_printtext(30 - tmp.strlen(), 18, tmp);
+	    }
+	}
+	else
+	{
+	    gfx_printtext(0, 18, buf);
+	}
+    }
     else if (glb_invx == 0)
     {
 	ITEMSLOT_NAMES slot = (ITEMSLOT_NAMES) glb_invy;

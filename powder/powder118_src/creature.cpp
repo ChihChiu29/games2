@@ -2366,19 +2366,20 @@ MOB::doHeartbeat()
     //
     // Consume food.
     //
-    starve(1);
+    if (speed_matchheartbeat(10))
+	starve(1);
 
     // Bonus food consumption for specific intrinsics.
     // This only takes effect when the intrinsic comes from wearing an
     // item.
     if (hasIntrinsic(INTRINSIC_INVISIBLE))
     {
-	if (getSourceOfIntrinsic(INTRINSIC_INVISIBLE))
+	if (getSourceOfIntrinsic(INTRINSIC_INVISIBLE) && speed_matchheartbeat(10))
 	    starve(1);
     }
     if (hasIntrinsic(INTRINSIC_REGENERATION))
     {
-	if (getSourceOfIntrinsic(INTRINSIC_REGENERATION))
+	if (getSourceOfIntrinsic(INTRINSIC_REGENERATION) && speed_matchheartbeat(10))
 	    starve(1);
     }
     
@@ -2406,31 +2407,32 @@ MOB::doHeartbeat()
 	    if (allowregen ||
 		(intrinsicFromWhat(INTRINSIC_REGENERATION) & INTRINSIC_FROM_TEMPORARY))
 	    {
-		// We want to regen every turn if full even if
-		// ring of regen is on.  Otherwise a ring becomes less
-		// useful when full.
-		if (speed_matchheartbeat(2) || (hunger > HUNGER_NORMAL))
-		{
-		    myHP++;
+		// Enhanced regeneration: +3 HP per heartbeat (+4 if Full)
+		myHP += (hunger > HUNGER_NORMAL) ? 4 : 3;
+		if (myHP > getMaxHP())
+		    myHP = getMaxHP();
+		if (speed_matchheartbeat(10))
 		    starve(1);
-		}
 	    }
 	}
 	else if (allowregen)
 	{
-	    // Every 8th turn, at random...
+	    // Faster baseline HP regeneration
 	    if (hunger > HUNGER_HUNGRY)
 	    {
-		if (speed_matchheartbeat(8))
-		{
+		myHP += (hunger > HUNGER_NORMAL) ? 3 : 2;
+		if (myHP > getMaxHP())
+		    myHP = getMaxHP();
+		if (speed_matchheartbeat(10))
 		    starve(1);
-		    myHP++;
-		}
-		else if (hunger > HUNGER_NORMAL)
-		{
-		    myHP++;
+	    }
+	    else
+	    {
+		myHP += 1;
+		if (myHP > getMaxHP())
+		    myHP = getMaxHP();
+		if (speed_matchheartbeat(10))
 		    starve(1);
-		}
 	    }
 	}
 
@@ -2438,12 +2440,12 @@ MOB::doHeartbeat()
 		&& allowregen 
 		&& hasIntrinsic(INTRINSIC_DRESSED_FIGHTER))
 	{
-	    // Fighters get half regen!  Yowzers!
-	    if (speed_matchheartbeat(2))
-	    {
-		myHP++;
+	    // Fighters get bonus regen!  Yowzers!
+	    myHP += 2;
+	    if (myHP > getMaxHP())
+		myHP = getMaxHP();
+	    if (speed_matchheartbeat(10))
 		starve(1);
-	    }
 	}
 
 	// If we are tame and our owner is dressed like a cleric
@@ -2457,8 +2459,11 @@ MOB::doHeartbeat()
 	    {
 		if (master->hasIntrinsic(INTRINSIC_DRESSED_CLERIC))
 		{
-		    myHP++;
-		    starve(1);
+		    myHP += 2;
+		    if (myHP > getMaxHP())
+			myHP = getMaxHP();
+		    if (speed_matchheartbeat(10))
+			starve(1);
 		}
 	    }
 	}
@@ -2473,30 +2478,33 @@ MOB::doHeartbeat()
     // Regain magic...
     if (myMP < getMaxMP() && hunger > HUNGER_STARVING)
     {
-	// Regain every turn.
+	// Regain every turn (10x faster than original).
 	if (hunger > HUNGER_HUNGRY)
 	{
-	    if (speed_matchheartbeat(2))
-	    {
-		myMP++;
+	    myMP += 5;
+	    if (myMP > getMaxMP())
+		myMP = getMaxMP();
+	    if (speed_matchheartbeat(10))
 		starve(1);
-	    }
 	}
 	else
 	{
-	    // Hungry players gain at half rate.
-	    if (speed_matchheartbeat(4))
-	    {
-		myMP++;
+	    // Hungry players gain at half rate (10x faster than original).
+	    myMP += speed_matchheartbeat(2) ? 3 : 2;
+	    if (myMP > getMaxMP())
+		myMP = getMaxMP();
+	    if (speed_matchheartbeat(10))
 		starve(1);
-	    }
 	}
 	
 	// Wizards get bonus magic!  Yowzers!
 	if (myMP < getMaxMP() && hasIntrinsic(INTRINSIC_DRESSED_WIZARD))
 	{
-	    myMP++;
-	    starve(1);
+	    myMP += 10;
+	    if (myMP > getMaxMP())
+		myMP = getMaxMP();
+	    if (speed_matchheartbeat(10))
+		starve(1);
 	}
     }
 
@@ -4209,7 +4217,7 @@ MOB::receiveDamage(const ATTACK_DEF *attack, MOB *src, ITEM *weapon,
 	    && (style == ATTACKSTYLE_MELEE || style == ATTACKSTYLE_THROWN)
 	    && !weapon->isArtifact())
     {
-	if (rand_chance(1))
+	if (rand_chance(0))
 	{
 	    if (src)
 		src->formatAndReport("%R %Iu <I:dull>.", weapon);
@@ -4224,8 +4232,8 @@ MOB::receiveDamage(const ATTACK_DEF *attack, MOB *src, ITEM *weapon,
 	    && (style == ATTACKSTYLE_MELEE || style == ATTACKSTYLE_THROWN)
 	    && !weapon->isArtifact())
     {
-	// Gold is a lot more malleable
-	if (rand_chance(10))
+	// Gold is a lot more malleable (reduced from 10% to 1%)
+	if (rand_chance(1))
 	{
 	    if (src)
 		src->formatAndReport("%R %Iu <I:dull>.", weapon);
@@ -9323,10 +9331,12 @@ MOB::submergeItemEffects(SQUARE_NAMES tile)
 		destroy = item->douse();
 		break;
 	    case SQUARE_LAVA:
-		destroy = item->ignite();
+		if (rand_chance(10))
+		    destroy = item->ignite();
 		break;
 	    case SQUARE_ACID:
-		destroy = item->dissolve();
+		if (rand_chance(10))
+		    destroy = item->dissolve();
 		break;
 	    default:
 		break;

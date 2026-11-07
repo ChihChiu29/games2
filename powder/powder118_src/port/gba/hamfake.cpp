@@ -195,7 +195,7 @@ ham_SetBgMode(u8 mode)
     switch (mode)
     {
 	case 3:
-	    REG_DISPCNT = MODE_3;
+	    REG_DISPCNT = MODE_3 | BG2_ON;
 	    break;
 
 	case 0:
@@ -204,7 +204,8 @@ ham_SetBgMode(u8 mode)
 			BG0_ON |
 			BG1_ON |
 			BG2_ON |
-			BG3_ON;
+			BG3_ON |
+			WIN0_ON;
 
 	    // Reset the top of our vram.
 	    ham_vramtop = 0;
@@ -289,7 +290,7 @@ ham_InitTileEmptySet(u16 entries, u8 colormode, u8 onlybaseblock)
     else
 	vramsize *= 8 * 8;
 
-    tileinfo->blockid = ham_AllocateVramBlock(vramsize, 0x2000);
+    tileinfo->blockid = ham_AllocateVramBlock(vramsize, 0x4000);
     
     return tileinfo;
 }

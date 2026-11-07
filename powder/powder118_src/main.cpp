@@ -1633,7 +1633,7 @@ intro_screen()
 	for (int y = 2; y < 19; y++)
 	    gfx_cleartextline(y);
 	
-	gfx_printtext(10, 1, "POWDER 118"); 
+	gfx_printtext(10, 1, "POWDER 119"); 
 
 	gfx_printtext(30 - strlen(get_glb_author()), 19,
 		    get_glb_author());
@@ -2256,8 +2256,6 @@ rebuild_all()
     if (!glbStressTest)
     {
 	hamfake_rebuildScreen();
-
-	introMessage();
 
 	avatar->reportMessage("Welcome to POWDER!");
 

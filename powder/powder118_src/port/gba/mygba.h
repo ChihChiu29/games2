@@ -25,7 +25,7 @@ typedef unsigned char u8;
 typedef signed char s8;
 typedef unsigned short u16;
 typedef signed short s16;
-#if 1
+#if 0
 typedef unsigned int u32;
 typedef signed int s32;
 #else
@@ -45,9 +45,14 @@ typedef int32_t	s32;
 #include "hamfake.h"
 
 #include <string.h>
+#include <strings.h>
 #include <malloc.h>
 #include <stdlib.h>
 #include <stdio.h>
+
+#ifndef stricmp
+#define stricmp(a, b) strcasecmp(a, b)
+#endif
 
 #endif
 

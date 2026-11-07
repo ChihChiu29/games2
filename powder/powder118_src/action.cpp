@@ -361,11 +361,21 @@ MOB::actionJump(int dx, int dy)
     int		tile;
     bool	leapattack = false;
     bool	singlestep = false;
+    const int	jump_mp_cost = 8;
+    bool	free_jump = hasIntrinsic(INTRINSIC_JUMP) || hasSkill(SKILL_LEAPATTACK);
 
-    if (!hasIntrinsic(INTRINSIC_JUMP))
+    if (!free_jump)
     {
-	formatAndReport("%U cannot jump very far.");
-	return false;
+	if (!isAvatar())
+	{
+	    formatAndReport("%U cannot jump very far.");
+	    return false;
+	}
+	if (myMP < jump_mp_cost)
+	{
+	    formatAndReport("%U <lack> the magic to jump.");
+	    return false;
+	}
     }
 
     // If we are standing on liquid, we can only jump if we have water walk
@@ -448,6 +458,11 @@ MOB::actionJump(int dx, int dy)
 
 	// Do a leap attack!
 	leapattack = true;
+    }
+
+    if (!free_jump)
+    {
+	myMP -= jump_mp_cost;
     }
 
     // Report that we are leaping.
@@ -3562,6 +3577,13 @@ MOB::actionRead(int ix, int iy)
 	    UT_ASSERT(!"Reading not supported for non-avatar!");
 	    doread = false;
 	}
+	else if (!item->getCharges())
+	{
+	    item->markChargesKnown();
+	    formatAndReport("The ink of %IU is currently faded and recharging.", item);
+	    doread = false;
+	    costturn = false;
+	}
 	else
 	{
 	    int		 num_options;
@@ -3793,10 +3815,16 @@ MOB::actionRead(int ix, int iy)
 		    }
 		}
 	    }
-	    else
+	    else if (item->isCursed())
 	    {
 		doread = true;
 		formatAndReport("%IU <I:fade> away.", item);
+	    }
+	    else
+	    {
+		doread = false;
+		item->markChargesKnown();
+		formatAndReport("The ink of %IU fades and begins to recharge.", item);
 	    }
 	}
     }
@@ -4425,7 +4453,7 @@ MOB::actionCast(SPELL_NAMES spell, int dx, int dy, int dz)
 		{
 		    formatAndReport("The backsplash drenches %r %Iu!", item);
 
-		    if (item->canDissolve())
+		    if (ix != 0 && rand_chance(10) && item->canDissolve())
 		    {
 			// Peel off one instance if stacked, otherwise
 			// take the whole thing.

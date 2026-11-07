@@ -67,7 +67,6 @@ CPPFILES	:=	gbamain.cpp \
 			../../assert.cpp \
 			../../ai.cpp \
 			../../artifact.cpp \
-			../../bmp.cpp \
 			../../build.cpp \
 			../../buf.cpp \
 			../../control.cpp \

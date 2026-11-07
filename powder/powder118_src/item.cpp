@@ -179,6 +179,7 @@ ITEM::createClone() const
     clone->myCharges = myCharges;
     clone->myPoison = myPoison;
     clone->myPoisonCharges = myPoisonCharges;
+    clone->myIdentifyTimer = myIdentifyTimer;
     clone->myFlag1 = myFlag1;
     clone->myCorpseMob.setMob(0);
 
@@ -483,11 +484,11 @@ ITEM::doBreak(int dc, MOB *breaker, MOB *owner, MAP *map, int x, int y)
 	// Blessed arrows much less likely to break than cursed.
 	int		chance;
 
-	chance = 10;
+	chance = 1;
 	if (isCursed())
-	    chance = 50;
+	    chance = 5;
 	if (isBlessed())
-	    chance = 1;
+	    chance = 0;
 
 	// A bit more likely to break...
 	if (getDefinition() == ITEM_FIREARROW)
@@ -643,6 +644,7 @@ ITEM::create(ITEM_NAMES definition, bool allowartifact, bool nocurse)
 
     item->myPoison = POISON_NONE;
     item->myPoisonCharges = 0;
+    item->myIdentifyTimer = 0;
 
     // Determine cursed state...
     CURSECHANCE_NAMES	cursechance;
@@ -1069,6 +1071,53 @@ ITEM::doHeartbeat(MAP *map, MOB *owner)
 	}
     }
 
+    // Self-charging wands: slowly regain charges up to their natural max.
+    if (getMagicType() == MAGICTYPE_WAND && !isCursed())
+    {
+	const DICE &dice = glb_wanddefs[getMagicClass()].charges;
+	int maxcharges = dice.myNumdie * dice.mySides + dice.myBonus;
+	if (maxcharges < 5)
+	    maxcharges = 5;
+	int rate = isBlessed() ? 5 : 10;
+	if (myCharges < maxcharges && speed_matchheartbeat(rate))
+	{
+	    myCharges++;
+	}
+    }
+
+    // Self-charging spellbooks: slowly regain pages (charges) up to their natural max.
+    if (getMagicType() == MAGICTYPE_SPELLBOOK && !isCursed())
+    {
+	const DICE &dice = glb_spellbookdefs[getMagicClass()].charges;
+	int maxcharges = dice.myNumdie * dice.mySides + dice.myBonus;
+	if (maxcharges < 3)
+	    maxcharges = 3;
+	int rate = isBlessed() ? 10 : 20;
+	if (myCharges < maxcharges && speed_matchheartbeat(rate))
+	{
+	    myCharges++;
+	}
+    }
+
+    // Self-identify over time while carried by the avatar (2x faster when equipped).
+    if (owner && owner->isAvatar() && !isFullyIdentified() &&
+	myDefinition != ITEM_CORPSE && myDefinition != ITEM_BONES && myDefinition != ITEM_STATUE)
+    {
+	int step = (myX == 0) ? 2 : 1;
+	if (myIdentifyTimer + step >= IDENTIFY_TIME)
+	{
+	    myIdentifyTimer = 0;
+	    bool wasclassknown = isIdentified();
+	    markIdentified(false);
+	    if (wasclassknown || getMagicType() == MAGICTYPE_NONE)
+		owner->formatAndReport("%U <have> fully identified %r %Iu.", this);
+	}
+	else
+	{
+	    myIdentifyTimer += step;
+	}
+    }
+
     return true;
 }
 
@@ -1259,6 +1308,17 @@ ITEM::isCarryIntrinsic() const
     return glb_itemdefs[myDefinition].iscarryintrinsic;
 }
 
+int
+ITEM::getIdentifyProgress() const
+{
+    if (isFullyIdentified() || myIdentifyTimer == 0 ||
+	myDefinition == ITEM_CORPSE || myDefinition == ITEM_BONES || myDefinition == ITEM_STATUE)
+    {
+	return 0;
+    }
+    return (myIdentifyTimer * 100) / IDENTIFY_TIME;
+}
+
 bool
 ITEM::isFullyIdentified() const
 {
@@ -1344,6 +1404,7 @@ ITEM::setInventory(bool isinventory)
 void
 ITEM::markIdentified(bool silent) 
 {
+    myIdentifyTimer = 0;
     markEnchantKnown();
     markCursedKnown();
     markChargesKnown();
@@ -2119,6 +2180,61 @@ ITEM::pageDescription(bool brief) const
     // Add the boring stats.
     gfx_pager_separator();
 
+    if (!isFullyIdentified() &&
+	myDefinition != ITEM_CORPSE && myDefinition != ITEM_BONES && myDefinition != ITEM_STATUE)
+    {
+	int pct = (myIdentifyTimer * 100) / IDENTIFY_TIME;
+	int rem = IDENTIFY_TIME - myIdentifyTimer;
+	if (myX == 0 && isInventory())
+	    rem = (rem + 1) / 2;
+	buf.sprintf("Auto-ID: %d%% (%d turns left)", pct, rem);
+	gfx_pager_addtext(buf);
+	gfx_pager_newline();
+    }
+
+    if (getMagicType() == MAGICTYPE_SPELLBOOK)
+    {
+	const DICE &dice = glb_spellbookdefs[getMagicClass()].charges;
+	int maxcharges = dice.myNumdie * dice.mySides + dice.myBonus;
+	if (maxcharges < 3)
+	    maxcharges = 3;
+	if (isKnownCharges())
+	    buf.sprintf("Pages (Charges): %d / %d", myCharges, maxcharges);
+	else
+	    buf.sprintf("Pages (Charges): ? / %d", maxcharges);
+	gfx_pager_addtext(buf);
+	gfx_pager_newline();
+
+	if (isKnownCursed() && isCursed())
+	    gfx_pager_addtext("Recharge: None (evil books fade when empty)");
+	else if (isKnownCursed() && isBlessed())
+	    gfx_pager_addtext("Recharge: +1 page every 10 turns");
+	else
+	    gfx_pager_addtext("Recharge: +1 page every 20 turns (10 if holy)");
+	gfx_pager_newline();
+    }
+    else if (getMagicType() == MAGICTYPE_WAND)
+    {
+	const DICE &dice = glb_wanddefs[getMagicClass()].charges;
+	int maxcharges = dice.myNumdie * dice.mySides + dice.myBonus;
+	if (maxcharges < 5)
+	    maxcharges = 5;
+	if (isKnownCharges())
+	    buf.sprintf("Charges: %d / %d", myCharges, maxcharges);
+	else
+	    buf.sprintf("Charges: ? / %d", maxcharges);
+	gfx_pager_addtext(buf);
+	gfx_pager_newline();
+
+	if (isKnownCursed() && isCursed())
+	    gfx_pager_addtext("Recharge: None (evil wands do not recharge)");
+	else if (isKnownCursed() && isBlessed())
+	    gfx_pager_addtext("Recharge: +1 charge every 5 turns");
+	else
+	    gfx_pager_addtext("Recharge: +1 charge every 10 turns (5 if holy)");
+	gfx_pager_newline();
+    }
+
     buf.strcpy("Size: ");
     buf.strcat(gram_capitalize(glb_sizedefs[getSize()].name));
     gfx_pager_addtext(buf);
@@ -2456,6 +2572,8 @@ ITEM::mergeStack(ITEM *item)
 	markEnchantKnown();
     if (item->isKnownPoison())
 	markPoisonKnown();
+    if (item->myIdentifyTimer > myIdentifyTimer)
+	myIdentifyTimer = item->myIdentifyTimer;
 }
 
 ITEM *
@@ -4683,6 +4801,8 @@ ITEM::load(SRAMSTREAM &is)
     me->myPoison = val;
     is.uread(val, 8);
     me->myPoisonCharges = val;
+    is.uread(val, 8);
+    me->myIdentifyTimer = val;
     is.uread(val, 32);
     val ^= glb_itemdefs[me->myDefinition].flag1;
     me->myFlag1 = (ITEMFLAG1_NAMES) val;
@@ -4714,6 +4834,7 @@ ITEM::save(SRAMSTREAM &os)
     os.write(myCharges, 8);
     os.write(myPoison, 8);
     os.write(myPoisonCharges, 8);
+    os.write(myIdentifyTimer, 8);
 
     os.write(myFlag1 ^ glb_itemdefs[myDefinition].flag1, 32);
 

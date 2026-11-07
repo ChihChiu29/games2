@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <string name="hello">Hello World, PowderActivity!</string>
+    <string name="app_name">Powder</string>
+    <string name="rotateportrait">Rotate View</string>
+    <string name="showcontrols">Show Controls</string>
+    <string name="showfps">Show FPS</string>
+    <string name="revertdefaults">Revert Defaults</string>
+    <string name="openfiles">Play Logs</string>
+    <string name="stretchscreen">Stretch Screen</string>
+
+</resources>

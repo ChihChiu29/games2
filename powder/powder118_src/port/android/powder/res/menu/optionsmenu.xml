@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android" >
+    <item android:id="@+id/rotateportrait" android:enabled="true" android:title="@string/rotateportrait" android:visible="true"></item>
+    <item android:id="@+id/showcontrols" android:title="@string/showcontrols" android:visible="true" android:enabled="true"></item>
+    <item android:id="@+id/showfps" android:visible="true" android:title="@string/showfps" android:enabled="true"></item>
+    <item android:id="@+id/revertdefaults" android:title="@string/revertdefaults">
+        <menu>
+            <item android:id="@+id/yesrevertdefault" android:title="@android:string/yes"/>
+            <item android:id="@+id/norevertdefault" android:title="@android:string/no"/>
+        </menu>
+    </item>
+    <item android:id="@+id/openfiles" android:title="@string/openfiles"></item>
+    <item android:id="@+id/stretchscreen" android:title="@string/stretchscreen"></item>
+
+    
+
+</menu>

@@ -4,8 +4,15 @@ set -e
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC_DIR="$ROOT_DIR/powder118_src"
 
-export DEVKITPRO="${DEVKITPRO:-/home/chih/.gemini/antigravity-cli/brain/126ba518-2be9-4c55-a9a8-bf1a21337246/scratch/dkp/devkitPro}"
+if [ -z "${DEVKITPRO:-}" ]; then
+    if [ -d "/opt/devkitpro" ]; then
+        export DEVKITPRO="/opt/devkitpro"
+    else
+        export DEVKITPRO="/home/chih/.gemini/antigravity-cli/brain/126ba518-2be9-4c55-a9a8-bf1a21337246/scratch/dkp/devkitPro"
+    fi
+fi
 export DEVKITARM="${DEVKITARM:-$DEVKITPRO/devkitARM}"
+export PATH="$DEVKITPRO/tools/bin:$DEVKITARM/bin:$PATH"
 
 cd "$SRC_DIR"
 
@@ -42,6 +49,7 @@ fi
 
 echo "Building GBA ROM..."
 make -C port/gba -j"$(nproc)"
+make -C port/gba postmake
 cp -f port/gba/powder.gba "$SRC_DIR/powder.gba"
 cp -f port/gba/powder.gba "$ROOT_DIR/powder.gba"
 

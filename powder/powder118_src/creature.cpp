@@ -2407,32 +2407,54 @@ MOB::doHeartbeat()
 	    if (allowregen ||
 		(intrinsicFromWhat(INTRINSIC_REGENERATION) & INTRINSIC_FROM_TEMPORARY))
 	    {
-		// Enhanced regeneration: +3 HP per heartbeat (+4 if Full)
-		myHP += (hunger > HUNGER_NORMAL) ? 4 : 3;
-		if (myHP > getMaxHP())
-		    myHP = getMaxHP();
-		if (speed_matchheartbeat(10))
-		    starve(1);
+		if (isAvatar())
+		{
+		    // Enhanced regeneration for avatar: +3 HP per heartbeat (+4 if Full)
+		    myHP += (hunger > HUNGER_NORMAL) ? 4 : 3;
+		    if (myHP > getMaxHP())
+			myHP = getMaxHP();
+		    if (speed_matchheartbeat(10))
+			starve(1);
+		}
+		else if (speed_matchheartbeat(2) || (hunger > HUNGER_NORMAL))
+		{
+		    myHP++;
+		    if (speed_matchheartbeat(10))
+			starve(1);
+		}
 	    }
 	}
 	else if (allowregen)
 	{
-	    // Faster baseline HP regeneration
-	    if (hunger > HUNGER_HUNGRY)
+	    if (isAvatar())
 	    {
-		myHP += (hunger > HUNGER_NORMAL) ? 3 : 2;
-		if (myHP > getMaxHP())
-		    myHP = getMaxHP();
-		if (speed_matchheartbeat(10))
-		    starve(1);
+		// Faster baseline HP regeneration for avatar
+		if (hunger > HUNGER_HUNGRY)
+		{
+		    myHP += (hunger > HUNGER_NORMAL) ? 3 : 2;
+		    if (myHP > getMaxHP())
+			myHP = getMaxHP();
+		    if (speed_matchheartbeat(10))
+			starve(1);
+		}
+		else
+		{
+		    myHP += 1;
+		    if (myHP > getMaxHP())
+			myHP = getMaxHP();
+		    if (speed_matchheartbeat(10))
+			starve(1);
+		}
 	    }
-	    else
+	    else if (hunger > HUNGER_HUNGRY)
 	    {
-		myHP += 1;
-		if (myHP > getMaxHP())
-		    myHP = getMaxHP();
-		if (speed_matchheartbeat(10))
-		    starve(1);
+		// Every 8th turn for monsters
+		if (speed_matchheartbeat(8) || (hunger > HUNGER_NORMAL))
+		{
+		    myHP++;
+		    if (speed_matchheartbeat(10))
+			starve(1);
+		}
 	    }
 	}
 
@@ -2441,11 +2463,20 @@ MOB::doHeartbeat()
 		&& hasIntrinsic(INTRINSIC_DRESSED_FIGHTER))
 	{
 	    // Fighters get bonus regen!  Yowzers!
-	    myHP += 2;
-	    if (myHP > getMaxHP())
-		myHP = getMaxHP();
-	    if (speed_matchheartbeat(10))
-		starve(1);
+	    if (isAvatar())
+	    {
+		myHP += 2;
+		if (myHP > getMaxHP())
+		    myHP = getMaxHP();
+		if (speed_matchheartbeat(10))
+		    starve(1);
+	    }
+	    else if (speed_matchheartbeat(2))
+	    {
+		myHP++;
+		if (speed_matchheartbeat(10))
+		    starve(1);
+	    }
 	}
 
 	// If we are tame and our owner is dressed like a cleric
@@ -2478,33 +2509,64 @@ MOB::doHeartbeat()
     // Regain magic...
     if (myMP < getMaxMP() && hunger > HUNGER_STARVING)
     {
-	// Regain every turn (10x faster than original).
-	if (hunger > HUNGER_HUNGRY)
+	if (isAvatar())
 	{
-	    myMP += 5;
-	    if (myMP > getMaxMP())
-		myMP = getMaxMP();
-	    if (speed_matchheartbeat(10))
-		starve(1);
+	    // Regain every turn (10x faster than original).
+	    if (hunger > HUNGER_HUNGRY)
+	    {
+		myMP += 5;
+		if (myMP > getMaxMP())
+		    myMP = getMaxMP();
+		if (speed_matchheartbeat(10))
+		    starve(1);
+	    }
+	    else
+	    {
+		// Hungry players gain at half rate (10x faster than original).
+		myMP += speed_matchheartbeat(2) ? 3 : 2;
+		if (myMP > getMaxMP())
+		    myMP = getMaxMP();
+		if (speed_matchheartbeat(10))
+		    starve(1);
+	    }
+
+	    // Wizards get bonus magic!  Yowzers!
+	    if (myMP < getMaxMP() && hasIntrinsic(INTRINSIC_DRESSED_WIZARD))
+	    {
+		myMP += 10;
+		if (myMP > getMaxMP())
+		    myMP = getMaxMP();
+		if (speed_matchheartbeat(10))
+		    starve(1);
+	    }
 	}
 	else
 	{
-	    // Hungry players gain at half rate (10x faster than original).
-	    myMP += speed_matchheartbeat(2) ? 3 : 2;
-	    if (myMP > getMaxMP())
-		myMP = getMaxMP();
-	    if (speed_matchheartbeat(10))
-		starve(1);
-	}
-	
-	// Wizards get bonus magic!  Yowzers!
-	if (myMP < getMaxMP() && hasIntrinsic(INTRINSIC_DRESSED_WIZARD))
-	{
-	    myMP += 10;
-	    if (myMP > getMaxMP())
-		myMP = getMaxMP();
-	    if (speed_matchheartbeat(10))
-		starve(1);
+	    if (hunger > HUNGER_HUNGRY)
+	    {
+		if (speed_matchheartbeat(2))
+		{
+		    myMP++;
+		    if (speed_matchheartbeat(10))
+			starve(1);
+		}
+	    }
+	    else
+	    {
+		if (speed_matchheartbeat(4))
+		{
+		    myMP++;
+		    if (speed_matchheartbeat(10))
+			starve(1);
+		}
+	    }
+
+	    if (myMP < getMaxMP() && hasIntrinsic(INTRINSIC_DRESSED_WIZARD))
+	    {
+		myMP++;
+		if (speed_matchheartbeat(10))
+		    starve(1);
+	    }
 	}
     }
 
@@ -9331,11 +9393,11 @@ MOB::submergeItemEffects(SQUARE_NAMES tile)
 		destroy = item->douse();
 		break;
 	    case SQUARE_LAVA:
-		if (rand_chance(10))
+		if (!isAvatar() || rand_chance(10))
 		    destroy = item->ignite();
 		break;
 	    case SQUARE_ACID:
-		if (rand_chance(10))
+		if (!isAvatar() || rand_chance(10))
 		    destroy = item->dissolve();
 		break;
 	    default:

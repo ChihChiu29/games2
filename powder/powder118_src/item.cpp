@@ -1072,7 +1072,7 @@ ITEM::doHeartbeat(MAP *map, MOB *owner)
     }
 
     // Self-charging wands: slowly regain charges up to their natural max.
-    if (getMagicType() == MAGICTYPE_WAND && !isCursed())
+    if ((!owner || owner->isAvatar()) && getMagicType() == MAGICTYPE_WAND && !isCursed())
     {
 	const DICE &dice = glb_wanddefs[getMagicClass()].charges;
 	int maxcharges = dice.myNumdie * dice.mySides + dice.myBonus;
@@ -1086,7 +1086,7 @@ ITEM::doHeartbeat(MAP *map, MOB *owner)
     }
 
     // Self-charging spellbooks: slowly regain pages (charges) up to their natural max.
-    if (getMagicType() == MAGICTYPE_SPELLBOOK && !isCursed())
+    if ((!owner || owner->isAvatar()) && getMagicType() == MAGICTYPE_SPELLBOOK && !isCursed())
     {
 	const DICE &dice = glb_spellbookdefs[getMagicClass()].charges;
 	int maxcharges = dice.myNumdie * dice.mySides + dice.myBonus;
@@ -2209,6 +2209,8 @@ ITEM::pageDescription(bool brief) const
 	    gfx_pager_addtext("Recharge: None (evil books fade when empty)");
 	else if (isKnownCursed() && isBlessed())
 	    gfx_pager_addtext("Recharge: +1 page every 10 turns");
+	else if (isKnownCursed())
+	    gfx_pager_addtext("Recharge: +1 page every 20 turns");
 	else
 	    gfx_pager_addtext("Recharge: +1 page every 20 turns (10 if holy)");
 	gfx_pager_newline();
@@ -2230,6 +2232,8 @@ ITEM::pageDescription(bool brief) const
 	    gfx_pager_addtext("Recharge: None (evil wands do not recharge)");
 	else if (isKnownCursed() && isBlessed())
 	    gfx_pager_addtext("Recharge: +1 charge every 5 turns");
+	else if (isKnownCursed())
+	    gfx_pager_addtext("Recharge: +1 charge every 10 turns");
 	else
 	    gfx_pager_addtext("Recharge: +1 charge every 10 turns (5 if holy)");
 	gfx_pager_newline();
@@ -3504,12 +3508,9 @@ ITEM::actionZap(MOB *zapper, int dx, int dy, int dz)
 	    // Determine if we have enough charges...
 	    if (myCharges == 0)
 	    {
-		// Check for wrest-last-charge
-		// 1 in 20 to be nice as it is much harder UI wise
-		// than in Nethack.
-		// I have since reduced this even farther as the goal
-		// is to make it not a tactical decision.
-		if (!rand_choice(7))
+		// Only cursed wands (which do not self-recharge) can be
+		// wrested for one last charge and crumble to dust.
+		if (isCursed() && !rand_choice(7))
 		{
 		    zapper->formatAndReport("%U <wrest> one last charge.");
 		    destroythis = true;

@@ -364,6 +364,12 @@ MOB::actionJump(int dx, int dy)
     const int	jump_mp_cost = 8;
     bool	free_jump = hasIntrinsic(INTRINSIC_JUMP) || hasSkill(SKILL_LEAPATTACK);
 
+    if (!dx && !dy)
+    {
+	formatAndReport("%U <jump> on the spot.");
+	return false;
+    }
+
     if (!free_jump)
     {
 	if (!isAvatar())
@@ -3580,12 +3586,18 @@ MOB::actionRead(int ix, int iy)
 	else if (!item->getCharges())
 	{
 	    item->markChargesKnown();
+	    if (itemstack)
+		itemstack->markChargesKnown();
 	    formatAndReport("The ink of %IU is currently faded and recharging.", item);
 	    doread = false;
 	    costturn = false;
 	}
 	else
 	{
+	    // Autoid spellbooks when the avatar can read their table of contents.
+	    if (isAvatar())
+		item->markClassKnown();
+
 	    int		 num_options;
 	    SKILL_NAMES	 skill = SKILL_NONE;
 	    SPELL_NAMES  spell = SPELL_NONE;
@@ -3789,14 +3801,6 @@ MOB::actionRead(int ix, int iy)
 	    }
 	}
 
-	// Autoid spellbooks...
-	// We don't want to markIdentified as we don't insta-id the
-	// charges.
-	// Because the avatar sees the menu of choices, there is no
-	// case in which we *don't* want to identify.
-	if (isAvatar())
-	    item->markClassKnown();
-	
 	if (doread)
 	{
 	    // Use a charge from the spellbook:

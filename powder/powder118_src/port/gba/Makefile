@@ -129,7 +129,7 @@ $(OUTPUT).elf	:	$(OFILES)
 # number in the ROM tag, not just the title.  And we are particular
 # about our caps.
 postmake: 
-	gbafix powder.gba -tPOWDER`cat ../../VERSION.TXT`
+	gbafix powder.gba -tPOWDER`tr -d '\r\n' < ../../VERSION.TXT`
 
 -include $(DEPENDS)
 
@@ -137,5 +137,5 @@ postmake:
 #---------------------------------------------------------------------------------
 clean:
 	@echo clean ...
-	rm -f $(OFILES) $(DEPENDS) $(TARGET).elf $(TARGET).gba 
+	rm -f $(OFILES) $(DEPENDS) $(TARGET).elf $(TARGET).gba $(TARGET).map 
  

@@ -191,10 +191,14 @@ def main():
     assert cur_ram == REPACK_END_RAM
 
     print("[3/4] Updating MapTable entries for the 20 Skirmish difficulty slots...")
-    for map_id in SKIRMISH_MAP_IDS:
+    par_turns_by_diff = [20, 24, 24, 28, 30]
+    for idx, map_id in enumerate(SKIRMISH_MAP_IDS):
+        diff = idx % 5
         e_off = map_table_off + map_id * MAP_ENTRY_SIZE
-        # Unlock map by default (f18 = 0x00000001) and clear shop lock flag (f40 = 0x000000FF)
+        # Unlock map by default (f18 = 0x00000001), set Par Turn Limit (f2C) for Speed Score,
+        # and clear shop lock flag (f40 = 0x000000FF)
         struct.pack_into("<I", ov5, e_off + 0x18, 0x00000001)
+        struct.pack_into("<H", ov5, e_off + 0x2C, par_turns_by_diff[diff])
         struct.pack_into("<I", ov5, e_off + 0x40, 0x000000FF)
         struct.pack_into("<I", ov5, e_off + 0x44, PAYLOAD_RAM_BASE)
 

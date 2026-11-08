@@ -49,6 +49,7 @@ enum
 extern u8 gUnknown_03003FC0[];
 extern u8 gUnknown_03003FF8[];
 extern u8 gUnknown_03004002[];
+extern u8 gUnknown_0200C420[];
 extern u8 * const gUnknown_0849ECDC;
 extern u8 gUnknown_02027F78[];
 extern u8 gUnknown_02027F74[];
@@ -99,7 +100,9 @@ static u32 Skirmish_RandRange(u32 * state, u32 max)
 
 static int Skirmish_IsSkirmishMode(void)
 {
-    return (gUnknown_03003FC0[1] == 3 && gUnknown_03003FC0[0x32] == 0);
+    return (gUnknown_03003FC0[1] == 3
+         && gUnknown_03003FC0[0x32] == 0
+         && gUnknown_0200C420[0x0D] == 1);
 }
 
 static int Skirmish_IsSkirmishMapId(u16 mapId)
@@ -154,6 +157,17 @@ static void Skirmish_AdvanceHardwareSeed(u32 salt)
 
 u8 Skirmish_PopulateMapList(u8 category)
 {
+    if (!Skirmish_IsSkirmishMode())
+    {
+        u8 mode = gUnknown_03003FC0[1];
+        if (mode != 2 && mode != 4)
+        {
+            if ((gUnknown_02028030[0x10 + (category >> 3)] & (1 << (category & 7))) == 0)
+                return 0;
+        }
+        return 2;
+    }
+
     *(u32 *)(gUnknown_03003FC0 + 0x10) = 0;
     Skirmish_EnsureStateInit();
     Skirmish_MixEntropy(category);
@@ -228,8 +242,6 @@ void Skirmish_OnSelectMap(u8 mapId)
     if (mapId == SKIRMISH_MAP_HARD || mapId == SKIRMISH_MAP_INSANE)
     {
         /* Team Battle: Player (Team A = 0) vs Allied AIs (Team B = 1) */
-        gUnknown_03003FC0[0x2D] = 0;
-        gUnknown_03003FC0[0x2F] = 0;
         gUnknown_03004002[1] = 0;
         gUnknown_03004002[2] = 1;
         gUnknown_03004002[3] = 1;
@@ -238,8 +250,6 @@ void Skirmish_OnSelectMap(u8 mapId)
     else
     {
         /* Free-For-All (1v1 on Easy, 1v1v1 on Normal) */
-        gUnknown_03003FC0[0x2D] = 1;
-        gUnknown_03003FC0[0x2F] = 0;
         gUnknown_03004002[1] = 0;
         gUnknown_03004002[2] = 1;
         gUnknown_03004002[3] = 2;

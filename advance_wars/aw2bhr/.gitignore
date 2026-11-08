@@ -53,6 +53,7 @@ Temporary Items
 # Build Outputs
 # =========================
 
+build/
 *.gba
 *.elf
 *.map

@@ -53488,17 +53488,17 @@ sub_08037448: @ 0x08037448
 	bl sub_08026340
 	lsls r0, r0, #0x18
 	lsrs r7, r0, #0x18
-	ldr r0, _080374D0 @ =gUnknown_03003FC0
-	ldrb r0, [r0, #1]
-	cmp r0, #3
-	bne _08037474
 	adds r0, r6, #0
-	ldr r1, _08037470 @ =Skirmish_PopulateMapList
+	ldr r1, _080374D0 @ =Skirmish_PopulateMapList
 	bl _call_via_r1
-	b _080374E2
+	cmp r0, #1
+	beq _080374E2
+	cmp r0, #0
+	beq _080374E0
 	nop
-	.align 2, 0
-_08037470: .4byte Skirmish_PopulateMapList
+	nop
+	nop
+	nop
 _08037474:
 	movs r5, #0
 	movs r4, #0
@@ -53549,7 +53549,7 @@ _080374B8:
 	movs r0, #1
 	b _080374E2
 	.align 2, 0
-_080374D0: .4byte gUnknown_03003FC0
+_080374D0: .4byte Skirmish_PopulateMapList
 _080374D4: .4byte gUnknown_085C77A0
 _080374D8: .4byte gUnknown_02027F78
 _080374DC: .4byte gUnknown_02027F74

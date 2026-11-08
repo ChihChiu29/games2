@@ -52234,9 +52234,9 @@ sub_08087104: @ 0x08087104
 	cmp r0, #0xb3
 	bhi _08087144
 	bl sub_0803CA54
-	lsls r0, r0, #0x18
-	cmp r0, #0
-	beq _08087144
+	cmp r0, #1
+	bne _08087144
+	nop
 	ldrb r1, [r5]
 	adds r0, r4, #0
 	adds r0, #0x64

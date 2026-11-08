@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Build & ROM Patcher for Advance Wars: Dual Strike (EU AWRP00) Procedural Map Generator.
-Compiles skirmish_hooks.s + skirmish_ds.c, repacks OV9 5 map LZ77 blobs, injects
-the procedural generator payload at 0x0233E950, patches GetMapName and DecompressMap
-in ARM9, and outputs /home/chih/Workspace/git/games2/awds/awds_skirmish.nds.
+Compiles skirmish_ds.c, repacks OV9 5 map LZ77 blobs, injects the procedural
+generator payload at 0x0233E950, patches GetMapName and DecompressMap in ARM9,
+and outputs /home/chih/Workspace/git/games2/awds/awds_skirmish.nds.
 """
 
 import os
@@ -15,11 +15,9 @@ BASE_DIR = "/home/chih/Workspace/git/games2/awds"
 BASEROM_PATH = os.path.join(BASE_DIR, "awds-decomp/extract/baserom_awds_SWRP00.nds")
 OUTROM_PATH = os.path.join(BASE_DIR, "awds_skirmish.nds")
 SRC_C = os.path.join(BASE_DIR, "awds-decomp/src/skirmish_ds.c")
-SRC_S = os.path.join(BASE_DIR, "awds-decomp/src/skirmish_hooks.s")
 
 TOOLCHAIN_BIN = "/home/chih/.gemini/antigravity-cli/brain/126ba518-2be9-4c55-a9a8-bf1a21337246/scratch/dkp/sysroot/usr/bin"
 GCC = os.path.join(TOOLCHAIN_BIN, "arm-none-eabi-gcc")
-AS = os.path.join(TOOLCHAIN_BIN, "arm-none-eabi-as")
 LD = os.path.join(TOOLCHAIN_BIN, "arm-none-eabi-ld")
 OBJCOPY = os.path.join(TOOLCHAIN_BIN, "arm-none-eabi-objcopy")
 NM = os.path.join(TOOLCHAIN_BIN, "arm-none-eabi-nm")
@@ -77,16 +75,11 @@ def lz77_padded_len(buf: bytes, off: int) -> int:
 
 def compile_payload() -> tuple[bytes, dict[str, int]]:
     with tempfile.TemporaryDirectory() as tmpdir:
-        hooks_o = os.path.join(tmpdir, "skirmish_hooks.o")
         c_o = os.path.join(tmpdir, "skirmish_ds.o")
         elf_path = os.path.join(tmpdir, "skirmish_payload.elf")
         bin_path = os.path.join(tmpdir, "skirmish_payload.bin")
         ld_script = os.path.join(tmpdir, "payload.ld")
 
-        subprocess.run(
-            [AS, "-mcpu=arm946e-s", "-mthumb-interwork", SRC_S, "-o", hooks_o],
-            check=True,
-        )
         subprocess.run(
             [
                 GCC,
@@ -99,6 +92,7 @@ def compile_payload() -> tuple[bytes, dict[str, int]]:
                 "-fno-builtin",
                 "-Wall",
                 "-Wextra",
+                "-Werror",
                 "-c",
                 SRC_C,
                 "-o",
@@ -126,7 +120,7 @@ SECTIONS {{
 """
             )
 
-        subprocess.run([LD, "-T", ld_script, hooks_o, c_o, "-o", elf_path], check=True)
+        subprocess.run([LD, "-T", ld_script, c_o, "-o", elf_path], check=True)
         subprocess.run([OBJCOPY, "-O", "binary", elf_path, bin_path], check=True)
 
         nm_out = subprocess.run(

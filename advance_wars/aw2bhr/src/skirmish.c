@@ -5,28 +5,36 @@
 /*
  * Advance Wars 2: Procedural Skirmish Map Generator
  *
- * Adds 7 procedural Random & Left-Right Mirrored modes at the top of the
- * Versus Mode "War Room" tab (category == 7), followed by the original
- * War Room maps:
- *   - RAN 1v1   (mapId =  1): 1v1 (Player OS vs 1 CPU BM)
- *   - MIR 1v1   (mapId =  2): 1v1 Left-Right Mirrored (Player OS vs 1 CPU BM)
- *   - RAN 1v1v1 (mapId = 59): 1v1v1 FFA (Player OS vs 2 CPUs BM, GE)
- *   - RAN 1v2   (mapId = 60): 1v2 Team (Player Team A vs 2 Allied CPUs Team B)
- *   - RAN 2v2   (mapId = 83): 2v2 Team (Player OS + CPU GE Team A vs 2 CPUs BM + YC Team B)
- *   - MIR 2v2   (mapId = 84): 2v2 Left-Right Mirrored (Player OS + CPU GE Team A vs 2 CPUs BM + YC Team B)
- *   - RAN 1v3   (mapId = 85): 1v3 Team (Player Team A vs 3 Allied CPUs Team B)
+ * Adds a dedicated "Random" tab (category == 9) in Versus Mode with 11
+ * procedural Random & Left-Right Mirrored setups:
+ *   - 1v1     (mapId =  1): 1v1 Random Map (Player OS vs 1 CPU BM)
+ *   - MIR 1v1 (mapId =  2): 1v1 Left-Right Mirrored (Player OS vs 1 CPU BM)
+ *   - 1v1v1   (mapId = 59): 3-Way Free-For-All (Player OS vs CPUs BM, GE)
+ *   - 1v2     (mapId = 60): 1v2 Outnumbered (Player Team A vs 2 Allied CPUs Team B)
+ *   - 2v1     (mapId = 61): 2v1 Boss Raid (Player + Ally CPU Team A vs Boss CPU Team B)
+ *   - 1v1v1v1 (mapId = 83): 4-Way Free-For-All (Player OS vs CPUs BM, GE, YC)
+ *   - MIR FFA (mapId = 84): 4-Way Left-Right Mirrored Free-For-All
+ *   - 2v2     (mapId = 85): 2v2 Team Battle (Player OS + CPU GE Team A vs CPUs BM + YC Team B)
+ *   - MIR 2v2 (mapId = 86): 2v2 Left-Right Mirrored Team Battle
+ *   - 1v1v2   (mapId = 87): 3-Team Battle (Player Team A vs Solo CPU Team B vs 2 CPUs Team C)
+ *   - 1v3     (mapId = 88): 1v3 Survival (Player Team A vs 3 Allied CPUs Team B)
  */
 
-#define SKIRMISH_MAP_RAN_1V1   1
-#define SKIRMISH_MAP_MIR_1V1   2
-#define SKIRMISH_MAP_RAN_1V1V1 59
-#define SKIRMISH_MAP_RAN_1V2   60
-#define SKIRMISH_MAP_RAN_2V2   83
-#define SKIRMISH_MAP_MIR_2V2   84
-#define SKIRMISH_MAP_RAN_1V3   85
+#define SKIRMISH_MAP_1V1     1
+#define SKIRMISH_MAP_MIR_1V1 2
+#define SKIRMISH_MAP_1V1V1   59
+#define SKIRMISH_MAP_1V2     60
+#define SKIRMISH_MAP_2V1     61
+#define SKIRMISH_MAP_1V1V1V1 83
+#define SKIRMISH_MAP_MIR_FFA 84
+#define SKIRMISH_MAP_2V2     85
+#define SKIRMISH_MAP_MIR_2V2 86
+#define SKIRMISH_MAP_1V1V2   87
+#define SKIRMISH_MAP_1V3     88
 
-#define SKIRMISH_WAR_ROOM_CATEGORY 7
-#define SKIRMISH_MAGIC 0x534B524Du /* 'SKRM' */
+#define SKIRMISH_MODE_COUNT      11
+#define SKIRMISH_RANDOM_CATEGORY 9
+#define SKIRMISH_MAGIC           0x534B524Du /* 'SKRM' */
 
 struct SkirmishState
 {
@@ -36,7 +44,7 @@ struct SkirmishState
     u8 cachedMapId;
     u8 mapLocked;
     u8 needsReroll;
-    u8 pad;
+    u8 modeApplied;
 };
 
 #define SKIRMISH_STATE ((volatile struct SkirmishState *)0x0203FF00)
@@ -62,18 +70,21 @@ extern u8 gUnknown_03003FFD[];
 extern u8 gUnknown_03004002[];
 extern u8 gUnknown_0200C420[];
 extern s16 gUnknown_0300596C;
-extern u8 * const gUnknown_0849ECDC;
 extern u8 gUnknown_02027F78[];
 extern u8 gUnknown_02027F74[];
 extern u8 gUnknown_02028030[];
+extern u8 gUnknown_020288A0[];
 extern const u8 gUnknown_085C77A0[];
 extern const char * const gUnknown_08610A38[];
-extern const struct ProcCmd gUnknown_08616B74[];
+extern const struct ProcCmd gUnknown_08616C54[];
 extern s32 gUnknown_03004008;
 extern u32 gUnknown_03001FD4;
+extern u8 sub_08043CA0(void);
 
 u8 Skirmish_PopulateMapList(u8 category);
+void Skirmish_SetMapPlayed(u32 mapId, u32 val);
 u8 Skirmish_IsMapUnlocked(u8 mapId);
+u8 Skirmish_IsMapPlayed(u32 mapId);
 const char * Skirmish_GetMapName(u16 mapId);
 void Skirmish_OnSelectMap(u8 mapId);
 const void * Skirmish_GetOrGenerateMapLz(u16 mapId, u32 variant, u8 * destBuf);
@@ -88,13 +99,28 @@ static const u16 sRiverTileTable[16] = {
     24, 123, 24, 93, 120, 26, 92, 27,
 };
 
-static const char sNameRan1v1[]   = "RAN 1v1";
-static const char sNameMir1v1[]   = "MIR 1v1";
-static const char sNameRan1v1v1[] = "RAN 1v1v1";
-static const char sNameRan1v2[]   = "RAN 1v2";
-static const char sNameRan2v2[]   = "RAN 2v2";
-static const char sNameMir2v2[]   = "MIR 2v2";
-static const char sNameRan1v3[]   = "RAN 1v3";
+struct SkirmishModeConfig
+{
+    u8 mapId;
+    u8 numArmies;
+    u8 isMirror;
+    u8 teams[4];
+    char name[8];
+};
+
+static const struct SkirmishModeConfig sSkirmishModes[SKIRMISH_MODE_COUNT] = {
+    { SKIRMISH_MAP_1V1,     2, 0, { 0, 1, 2, 3 }, "1v1"     },
+    { SKIRMISH_MAP_MIR_1V1, 2, 1, { 0, 1, 2, 3 }, "MIR 1v1" },
+    { SKIRMISH_MAP_1V1V1,   3, 0, { 0, 1, 2, 3 }, "1v1v1"   },
+    { SKIRMISH_MAP_1V2,     3, 0, { 0, 1, 1, 1 }, "1v2"     },
+    { SKIRMISH_MAP_2V1,     3, 0, { 0, 0, 1, 1 }, "2v1"     },
+    { SKIRMISH_MAP_1V1V1V1, 4, 0, { 0, 1, 2, 3 }, "1v1v1v1" },
+    { SKIRMISH_MAP_MIR_FFA, 4, 1, { 0, 1, 2, 3 }, "MIR FFA" },
+    { SKIRMISH_MAP_2V2,     4, 0, { 0, 1, 0, 1 }, "2v2"     },
+    { SKIRMISH_MAP_MIR_2V2, 4, 1, { 0, 1, 0, 1 }, "MIR 2v2" },
+    { SKIRMISH_MAP_1V1V2,   4, 0, { 0, 1, 2, 2 }, "1v1v2"   },
+    { SKIRMISH_MAP_1V3,     4, 0, { 0, 1, 1, 1 }, "1v3"     },
+};
 
 /* 20x16 '?' bitmap (1 bit per column in each 20-bit row) for Map Select preview */
 static const u32 sQuestionMarkRows[16] = {
@@ -142,39 +168,39 @@ static int Skirmish_IsSkirmishMode(void)
          && gUnknown_0200C420[0x0D] == 1);
 }
 
-static int Skirmish_IsSkirmishMapId(u16 mapId)
+static const struct SkirmishModeConfig * Skirmish_GetModeConfig(u16 mapId)
 {
-    return (mapId == SKIRMISH_MAP_RAN_1V1
-         || mapId == SKIRMISH_MAP_MIR_1V1
-         || mapId == SKIRMISH_MAP_RAN_1V1V1
-         || mapId == SKIRMISH_MAP_RAN_1V2
-         || mapId == SKIRMISH_MAP_RAN_2V2
-         || mapId == SKIRMISH_MAP_MIR_2V2
-         || mapId == SKIRMISH_MAP_RAN_1V3);
+    int i;
+    for (i = 0; i < SKIRMISH_MODE_COUNT; i++)
+    {
+        if (sSkirmishModes[i].mapId == mapId)
+            return &sSkirmishModes[i];
+    }
+    return NULL;
 }
 
 static int Skirmish_IsMirrorMapId(u16 mapId)
 {
-    return (mapId == SKIRMISH_MAP_MIR_1V1
-         || mapId == SKIRMISH_MAP_MIR_2V2);
+    const struct SkirmishModeConfig * cfg = Skirmish_GetModeConfig(mapId);
+    return (cfg != NULL && cfg->isMirror != 0);
 }
 
 /*
- * Returns 1 only when mapId is one of our 7 random/mirror modes AND we are
- * either viewing the War Room tab (category == 7) on the Versus Map Select
- * screen OR in an active/saved random Skirmish battle (savedSeed != 0).
- * This ensures maps 1, 2, 59, 60, 83, 84, 85 behave as normal built-in maps
- * on the 2P, 3P, and 4P tabs.
+ * Returns 1 only when mapId is one of our Random tab modes AND we are
+ * either viewing the Random tab (category == 9) on the Versus Map Select
+ * screen OR in an active/saved random Skirmish battle for this exact mapId.
+ * This ensures all built-in tabs (2..8) behave 100% as normal built-in maps.
  */
 static int Skirmish_IsActiveRandomMap(u16 mapId)
 {
-    if (!Skirmish_IsSkirmishMode() || !Skirmish_IsSkirmishMapId(mapId))
+    if (!Skirmish_IsSkirmishMode() || Skirmish_GetModeConfig(mapId) == NULL)
         return 0;
 
-    if (Proc_Find(gUnknown_08616B74) != NULL)
-        return (gUnknown_0300596C == SKIRMISH_WAR_ROOM_CATEGORY);
+    if (Proc_Find(gUnknown_08616C54) != NULL)
+        return (gUnknown_0300596C == SKIRMISH_RANDOM_CATEGORY);
 
-    return (*(u32 *)(gUnknown_03003FC0 + 0x10) != 0);
+    return (*(u32 *)(gUnknown_03003FC0 + 0x10) != 0
+         && gUnknown_03003FC0[2] == mapId);
 }
 
 static void Skirmish_EnsureStateInit(void)
@@ -198,6 +224,7 @@ static void Skirmish_EnsureStateInit(void)
         SKIRMISH_STATE->cachedMapId = (savedSeed != 0) ? gUnknown_03003FC0[2] : 0xFF;
         SKIRMISH_STATE->mapLocked = (savedSeed != 0) ? 1 : 0;
         SKIRMISH_STATE->needsReroll = (savedSeed != 0) ? 0 : 1;
+        SKIRMISH_STATE->modeApplied = (savedSeed != 0) ? 1 : 0;
     }
 }
 
@@ -221,12 +248,13 @@ static void Skirmish_AdvanceHardwareSeed(u32 salt)
 
 u8 Skirmish_PopulateMapList(u8 category)
 {
-    int count;
-    int m;
+    int i;
 
     if (!Skirmish_IsSkirmishMode())
     {
         u8 mode = gUnknown_03003FC0[1];
+        if (category == SKIRMISH_RANDOM_CATEGORY)
+            return 0;
         if (mode != 2 && mode != 4)
         {
             if ((gUnknown_02028030[0x10 + (category >> 3)] & (1 << (category & 7))) == 0)
@@ -241,55 +269,69 @@ u8 Skirmish_PopulateMapList(u8 category)
     SKIRMISH_STATE->mapLocked = 0;
     SKIRMISH_STATE->needsReroll = 1;
 
-    /* Leave 2P, Pre-Deployed, 3P, 4P, and Design Maps tabs untouched */
-    if (category != SKIRMISH_WAR_ROOM_CATEGORY)
+    /* Leave all built-in tabs (2..8, including War Room) 100% untouched */
+    if (category != SKIRMISH_RANDOM_CATEGORY)
     {
         if ((gUnknown_02028030[0x10 + (category >> 3)] & (1 << (category & 7))) == 0)
             return 0;
         return 2;
     }
 
-    /* War Room tab in Versus Mode: 7 Random/Mirror modes at the top */
-    gUnknown_02027F78[0] = SKIRMISH_MAP_RAN_1V1;
-    gUnknown_02027F78[1] = SKIRMISH_MAP_MIR_1V1;
-    gUnknown_02027F78[2] = SKIRMISH_MAP_RAN_1V1V1;
-    gUnknown_02027F78[3] = SKIRMISH_MAP_RAN_1V2;
-    gUnknown_02027F78[4] = SKIRMISH_MAP_RAN_2V2;
-    gUnknown_02027F78[5] = SKIRMISH_MAP_MIR_2V2;
-    gUnknown_02027F78[6] = SKIRMISH_MAP_RAN_1V3;
-    count = 7;
-
-    /* Followed by the original War Room maps (if War Room category is unlocked) */
-    if ((gUnknown_02028030[0x10 + (SKIRMISH_WAR_ROOM_CATEGORY >> 3)]
-         & (1 << (SKIRMISH_WAR_ROOM_CATEGORY & 7))) != 0)
+    /* Dedicated "Random" tab (category == 9) in Versus Mode */
+    for (i = 0; i < SKIRMISH_MODE_COUNT; i++)
     {
-        for (m = 0; m <= 0xB3 && count < 0x32; m++)
-        {
-            u16 mapCat = *(const u16 *)(gUnknown_085C77A0 + (m * 0x5C) + 0x1A);
-            u8 armies  = *(const u8 *)(gUnknown_085C77A0 + (m * 0x5C) + 0x18);
-            if (mapCat == SKIRMISH_WAR_ROOM_CATEGORY && armies != 0 && armies != 0xFF)
-            {
-                gUnknown_02027F78[count++] = (u8)m;
-            }
-        }
+        gUnknown_02027F78[i] = sSkirmishModes[i].mapId;
     }
 
     gUnknown_02027F74[0x36] = 0;
-    gUnknown_02027F74[0x37] = (u8)(count - 1);
+    gUnknown_02027F74[0x37] = (u8)(SKIRMISH_MODE_COUNT - 1);
 
     return 1;
+}
+
+void Skirmish_SetMapPlayed(u32 mapId, u32 val)
+{
+    u8 * p;
+    u32 bit;
+    u32 mask;
+
+    /*
+     * Do not mark the underlying built-in mapId as played when finishing
+     * a procedural Random/Mirrored Skirmish battle.
+     */
+    if ((val & 0xFF) != 0 && Skirmish_IsActiveRandomMap((u16)mapId))
+        return;
+
+    p = &gUnknown_02028030[0x30 + (mapId >> 3)];
+    bit = mapId & 7;
+    mask = 1u << bit;
+    *p = (u8)((*p & ~mask) | ((val & 0xFF) << bit));
 }
 
 u8 Skirmish_IsMapUnlocked(u8 mapId)
 {
     /*
-     * Return 2 for active random/mirror maps so sub_08087104 hides the
-     * facility counts (-1), while all other callers treat non-zero as unlocked.
+     * On the Versus Map Select screen (gUnknown_08616C54) while viewing the
+     * Random tab, return 2 so sub_08087104 hides the facility counts (-1) and
+     * sub_08086EB0 / sub_08086F3C draw the native '?' mystery preview.
      */
-    if (Skirmish_IsActiveRandomMap(mapId))
+    if (Proc_Find(gUnknown_08616C54) != NULL && Skirmish_IsActiveRandomMap(mapId))
         return 2;
 
     return (gUnknown_02028030[0x12 + (mapId >> 3)] & (1 << (mapId & 7))) ? 1 : 0;
+}
+
+u8 Skirmish_IsMapPlayed(u32 mapId)
+{
+    /*
+     * Render all modes in the Versus > Random tab with a uniform text color
+     * on the Map Select screen, without affecting global completion checks
+     * (such as sub_08084938 on the Main Menu).
+     */
+    if (Proc_Find(gUnknown_08616C54) != NULL && Skirmish_IsActiveRandomMap((u16)mapId))
+        return 1;
+
+    return (u8)(gUnknown_02028030[0x30 + (mapId >> 3)] & (1u << (mapId & 7)));
 }
 
 const char * Skirmish_GetMapName(u16 mapId)
@@ -298,20 +340,9 @@ const char * Skirmish_GetMapName(u16 mapId)
 
     if (Skirmish_IsActiveRandomMap(mapId))
     {
-        if (mapId == SKIRMISH_MAP_RAN_1V1)
-            return sNameRan1v1;
-        if (mapId == SKIRMISH_MAP_MIR_1V1)
-            return sNameMir1v1;
-        if (mapId == SKIRMISH_MAP_RAN_1V1V1)
-            return sNameRan1v1v1;
-        if (mapId == SKIRMISH_MAP_RAN_1V2)
-            return sNameRan1v2;
-        if (mapId == SKIRMISH_MAP_RAN_2V2)
-            return sNameRan2v2;
-        if (mapId == SKIRMISH_MAP_MIR_2V2)
-            return sNameMir2v2;
-        if (mapId == SKIRMISH_MAP_RAN_1V3)
-            return sNameRan1v3;
+        const struct SkirmishModeConfig * cfg = Skirmish_GetModeConfig(mapId);
+        if (cfg != NULL)
+            return cfg->name;
     }
 
     nameIdx = *(const u16 *)(gUnknown_085C77A0 + (mapId * 0x5C) + 0x14);
@@ -321,35 +352,31 @@ const char * Skirmish_GetMapName(u16 mapId)
 static void Skirmish_RandomizeCpuCos(u32 seed)
 {
     u32 rng = seed ^ 0xA5A5F00Du;
-    u8 unlockedCos[19];
-    int numUnlocked = 0;
+    int numUnlocked = (int)sub_08043CA0();
     int co;
     int army;
 
-    for (co = 0; co <= 18; co++)
-    {
-        if ((gUnknown_02028030[0x2A + (co >> 3)] & (1 << (co & 7))) != 0)
-        {
-            unlockedCos[numUnlocked++] = (u8)co;
-        }
-    }
-
     /* Fallback to standard COs if save data has none flagged */
-    if (numUnlocked == 0)
+    if (numUnlocked <= 0)
     {
         static const u8 sDefaultCos[13] = {
             1, 2, 4, 3, 5, 8, 9, 6, 7, 11, 12, 13, 14
         };
         for (co = 0; co < 13; co++)
-            unlockedCos[co] = sDefaultCos[co];
+            gUnknown_020288A0[co] = sDefaultCos[co];
+        gUnknown_020288A0[13] = 0xFF;
         numUnlocked = 13;
     }
+
+    /* Ensure Player 1's CO slot is initialized on fresh boot before dedup */
+    if (gUnknown_03003FFD[1] == 0)
+        gUnknown_03003FFD[1] = gUnknown_020288A0[0];
 
     /* Assign random distinct unlocked COs to CPU armies (Armies 2, 3, 4) */
     for (army = 2; army <= 4; army++)
     {
         int tries;
-        u8 chosen = unlockedCos[Skirmish_RandRange(&rng, (u32)numUnlocked)];
+        u8 chosen = gUnknown_020288A0[Skirmish_RandRange(&rng, (u32)numUnlocked)];
         for (tries = 0; tries < 8; tries++)
         {
             int dup = 0;
@@ -361,7 +388,7 @@ static void Skirmish_RandomizeCpuCos(u32 seed)
             }
             if (!dup)
                 break;
-            chosen = unlockedCos[Skirmish_RandRange(&rng, (u32)numUnlocked)];
+            chosen = gUnknown_020288A0[Skirmish_RandRange(&rng, (u32)numUnlocked)];
         }
         gUnknown_03003FFD[army] = chosen;
     }
@@ -369,15 +396,22 @@ static void Skirmish_RandomizeCpuCos(u32 seed)
 
 void Skirmish_OnSelectMap(u8 mapId)
 {
+    const struct SkirmishModeConfig * cfg = Skirmish_GetModeConfig(mapId);
+
     gUnknown_03003FC0[2] = mapId;
 
     if (!Skirmish_IsSkirmishMode()
-        || gUnknown_0300596C != SKIRMISH_WAR_ROOM_CATEGORY
-        || !Skirmish_IsSkirmishMapId(mapId))
+        || gUnknown_0300596C != SKIRMISH_RANDOM_CATEGORY
+        || cfg == NULL)
     {
         *(u32 *)(gUnknown_03003FC0 + 0x10) = 0;
-        if (Skirmish_IsSkirmishMode())
+        if (SKIRMISH_STATE->magic == SKIRMISH_MAGIC
+            && SKIRMISH_STATE->modeApplied != 0)
         {
+            SKIRMISH_STATE->modeApplied = 0;
+            gUnknown_03003FFD[2] = 2;
+            gUnknown_03003FFD[3] = 4;
+            gUnknown_03003FFD[4] = 11;
             gUnknown_03004002[1] = 0;
             gUnknown_03004002[2] = 1;
             gUnknown_03004002[3] = 2;
@@ -391,43 +425,24 @@ void Skirmish_OnSelectMap(u8 mapId)
     SKIRMISH_STATE->cachedMapId = mapId;
     SKIRMISH_STATE->needsReroll = 0;
     SKIRMISH_STATE->mapLocked = 1;
+    SKIRMISH_STATE->modeApplied = 1;
     *(u32 *)(gUnknown_03003FC0 + 0x10) = SKIRMISH_STATE->activeSeed;
     gUnknown_03001FD4 ^= SKIRMISH_STATE->activeSeed;
 
-    /* Force 1 Human Player (OS) vs CPU opponents (2 = CPU with assigned CO) */
-    gUnknown_0849ECDC[0] = 1;
+    /* Force 1 Human Player (OS) vs CPU opponents (2 = CPU, 0 = Off) */
     gUnknown_03003FF8[1] = 1; /* Army 1 (OS): Human */
     gUnknown_03003FF8[2] = 2; /* Army 2 (BM): CPU */
-    gUnknown_03003FF8[3] = 2; /* Army 3 (GE): CPU */
-    gUnknown_03003FF8[4] = 2; /* Army 4 (YC): CPU */
+    gUnknown_03003FF8[3] = (cfg->numArmies >= 3) ? 2 : 0;
+    gUnknown_03003FF8[4] = (cfg->numArmies >= 4) ? 2 : 0;
 
     /* Randomize CPU COs from currently unlocked COs on the save file */
     Skirmish_RandomizeCpuCos(SKIRMISH_STATE->activeSeed);
 
-    if (mapId == SKIRMISH_MAP_RAN_2V2 || mapId == SKIRMISH_MAP_MIR_2V2)
-    {
-        /* 2v2 Team Battle: Player (OS) + Ally CPU (GE) vs Enemy CPUs (BM + YC) */
-        gUnknown_03004002[1] = 0; /* Team A */
-        gUnknown_03004002[2] = 1; /* Team B */
-        gUnknown_03004002[3] = 0; /* Team A (CPU Ally) */
-        gUnknown_03004002[4] = 1; /* Team B */
-    }
-    else if (mapId == SKIRMISH_MAP_RAN_1V2 || mapId == SKIRMISH_MAP_RAN_1V3)
-    {
-        /* 1v2 / 1v3 Team Battle: Player (Team A = 0) vs Allied CPUs (Team B = 1) */
-        gUnknown_03004002[1] = 0;
-        gUnknown_03004002[2] = 1;
-        gUnknown_03004002[3] = 1;
-        gUnknown_03004002[4] = 1;
-    }
-    else
-    {
-        /* Free-For-All (1v1 on RAN/MIR 1v1, 1v1v1 on RAN 1v1v1) */
-        gUnknown_03004002[1] = 0;
-        gUnknown_03004002[2] = 1;
-        gUnknown_03004002[3] = 2;
-        gUnknown_03004002[4] = 3;
-    }
+    /* Apply mode team assignments (0..3 = Team A..D) */
+    gUnknown_03004002[1] = cfg->teams[0];
+    gUnknown_03004002[2] = cfg->teams[1];
+    gUnknown_03004002[3] = cfg->teams[2];
+    gUnknown_03004002[4] = cfg->teams[3];
 }
 
 static int Skirmish_Abs(int v)
@@ -511,7 +526,7 @@ static void Skirmish_PlaceHomeCluster(
     if (hy > 0)
     {
         int nIdx = (hy - 1) * w + hx;
-        if (kind[nIdx] == KIND_WOOD || kind[nIdx] == KIND_MOUNTAIN)
+        if (kind[nIdx] != KIND_RIVER && kind[nIdx] != KIND_BRIDGE)
         {
             kind[nIdx] = KIND_PLAIN;
             owner[nIdx] = 0;
@@ -792,7 +807,8 @@ static void Skirmish_GenerateQuestionMarkPreview(u8 * destBuf)
 }
 
 /*
- * Left-Right Mirrored Map Generator for MIR 1v1 (mapId = 2) and MIR 2v2 (mapId = 84).
+ * Left-Right Mirrored Map Generator for MIR 1v1 (mapId = 2), MIR FFA (mapId = 84),
+ * and MIR 2v2 (mapId = 86).
  * Uses an odd map width (w = 2 * midX + 1) so the center column (x = midX) lies
  * on the exact axis of symmetry, and mirrors every tile and property across
  * x <-> w - 1 - x.
@@ -800,11 +816,11 @@ static void Skirmish_GenerateQuestionMarkPreview(u8 * destBuf)
 static void Skirmish_GenerateMirroredMap(u16 mapId, u32 seed, u8 * destBuf)
 {
     u32 rng = seed;
-    int is2v2 = (mapId == SKIRMISH_MAP_MIR_2V2);
-    int w = is2v2
+    int is4P = (mapId != SKIRMISH_MAP_MIR_1V1);
+    int w = is4P
         ? (27 + ((int)Skirmish_RandRange(&rng, 2) << 1))  /* 27 or 29 */
         : (21 + ((int)Skirmish_RandRange(&rng, 3) << 1)); /* 21, 23, or 25 */
-    int h = is2v2
+    int h = is4P
         ? (17 + (int)Skirmish_RandRange(&rng, 2))         /* 17 or 18 */
         : (15 + (int)Skirmish_RandRange(&rng, 2));        /* 15 or 16 */
     int midX = w >> 1;
@@ -816,7 +832,7 @@ static void Skirmish_GenerateMirroredMap(u16 mapId, u32 seed, u8 * destBuf)
     int numCities = 2 + (int)Skirmish_RandRange(&rng, 3);           /* 2..4 starting cities per army */
     int neutralBasesPerSide = 1 + (int)Skirmish_RandRange(&rng, 2); /* 1..2 neutral bases per side */
     int neutralAirportsPerSide = (int)Skirmish_RandRange(&rng, 2);  /* 0..1 neutral airports per side */
-    int neutralCitiesPerSide = (is2v2 ? 6 : 5) + (int)Skirmish_RandRange(&rng, 5);
+    int neutralCitiesPerSide = (is4P ? 6 : 5) + (int)Skirmish_RandRange(&rng, 5);
     int hasCenterRiver = (Skirmish_RandRange(&rng, 100) < 45);
     int hasHorizRiver = (Skirmish_RandRange(&rng, 100) < 45);
     int archetype = (int)Skirmish_RandRange(&rng, 4);
@@ -839,9 +855,9 @@ static void Skirmish_GenerateMirroredMap(u16 mapId, u32 seed, u8 * destBuf)
         owner[i] = 0;
     }
 
-    if (is2v2)
+    if (is4P)
     {
-        /* Team A on Left: Army 1 (OS) Bottom-Left, Army 3 (GE) Top-Left */
+        /* Left half: Army 1 (OS) Bottom-Left, Army 3 (GE) Top-Left */
         hx1 = 2 + ((int)Skirmish_RandRange(&rng, 2) << 1); /* 2 or 4 */
         hy1 = h - 3 - (int)Skirmish_RandRange(&rng, 2);    /* h-4 or h-3 */
         hx3 = hx1;
@@ -892,7 +908,7 @@ static void Skirmish_GenerateMirroredMap(u16 mapId, u32 seed, u8 * destBuf)
 
     /* 2. Irregular terrain blobs on Left half + Centerline based on archetype */
     {
-        int numBlobs = is2v2 ? 25 : 18;
+        int numBlobs = is4P ? 25 : 18;
         int mountainChance = (archetype == 1) ? 60 : (archetype == 2 ? 25 : 42);
         for (i = 0; i < numBlobs; i++)
         {
@@ -922,15 +938,15 @@ static void Skirmish_GenerateMirroredMap(u16 mapId, u32 seed, u8 * destBuf)
     }
 
     /* 3. Carve organic roads on Left half reaching the centerline (hvFirst = 0) */
-    Skirmish_CarveRoad(kind, w, h, hx1, hy1, midX, midY2, 0);
-    if (is2v2)
+    Skirmish_CarveRoad(kind, w, h, hx1 + 1, hy1, midX, midY2, 0);
+    if (is4P)
     {
-        Skirmish_CarveRoad(kind, w, h, hx3, hy3, midX, midY1, 0);
-        Skirmish_CarveRoad(kind, w, h, hx1, hy1, hx3, hy3, 0);
+        Skirmish_CarveRoad(kind, w, h, hx3 + 1, hy3, midX, midY1, 0);
+        Skirmish_CarveRoad(kind, w, h, hx1 + 1, hy1, hx3 + 1, hy3, 0);
     }
     else
     {
-        Skirmish_CarveRoad(kind, w, h, hx1, hy1, midX, midY1, 0);
+        Skirmish_CarveRoad(kind, w, h, hx1 + 1, hy1, midX, midY1, 0);
     }
 
     /* 4. Place Left-side Home Clusters */
@@ -939,7 +955,7 @@ static void Skirmish_GenerateMirroredMap(u16 mapId, u32 seed, u8 * destBuf)
         hx1, hy1, 1, (hy1 >= (h >> 1)) ? -1 : 1,
         1, numBases, numAirports, numCities, &rng);
 
-    if (is2v2)
+    if (is4P)
     {
         Skirmish_PlaceHomeCluster(
             kind, owner, w, h,
@@ -1039,14 +1055,15 @@ static void Skirmish_GenerateMirroredMap(u16 mapId, u32 seed, u8 * destBuf)
 }
 
 /*
- * Fully Random Irregular Map Generator for RAN 1v1, RAN 1v1v1, RAN 1v2, RAN 2v2, RAN 1v3.
+ * Fully Random Irregular Map Generator for non-mirrored Random tab modes.
  */
 static void Skirmish_GenerateRandomMap(u16 mapId, u32 seed, u8 * destBuf)
 {
+    const struct SkirmishModeConfig * cfg = Skirmish_GetModeConfig(mapId);
     u32 rng = seed;
     int w;
     int h;
-    int numArmies;
+    int numArmies = (cfg != NULL) ? cfg->numArmies : 2;
     int archetype = (int)Skirmish_RandRange(&rng, 4);
     int playerBases = 2 + (int)Skirmish_RandRange(&rng, 3); /* 2..4 */
     int aiBases = 2 + (int)Skirmish_RandRange(&rng, 2);     /* 2..3 */
@@ -1074,23 +1091,28 @@ static void Skirmish_GenerateRandomMap(u16 mapId, u32 seed, u8 * destBuf)
     int y;
     int i;
 
-    if (mapId == SKIRMISH_MAP_RAN_1V1)
+    if (numArmies == 2)
     {
         w = 20 + ((int)Skirmish_RandRange(&rng, 3) << 1); /* 20..24 */
         h = 14 + ((int)Skirmish_RandRange(&rng, 2) << 1); /* 14..16 */
-        numArmies = 2;
     }
-    else if (mapId == SKIRMISH_MAP_RAN_1V1V1 || mapId == SKIRMISH_MAP_RAN_1V2)
+    else if (numArmies == 3)
     {
         w = 24 + ((int)Skirmish_RandRange(&rng, 3) << 1); /* 24..28 */
         h = 16 + ((int)Skirmish_RandRange(&rng, 2) << 1); /* 16..18 */
-        numArmies = 3;
     }
     else
     {
         w = 26 + ((int)Skirmish_RandRange(&rng, 3) << 1); /* 26..30 */
         h = 18 + ((int)Skirmish_RandRange(&rng, 2) << 1); /* 18..20 */
-        numArmies = 4;
+    }
+
+    /* Survival 1v3: give the solo player a fortified home cluster */
+    if (mapId == SKIRMISH_MAP_1V3)
+    {
+        playerBases = 4;
+        playerAirports = 2;
+        playerCities = 5;
     }
 
     neutralCities = ((w * h) >> 5) + 2 + (int)Skirmish_RandRange(&rng, 10);
@@ -1288,12 +1310,12 @@ static void Skirmish_GenerateRandomMap(u16 mapId, u32 seed, u8 * destBuf)
     {
         int next = (i + 1 < numArmies) ? (i + 1) : 0;
         Skirmish_CarveRoad(
-            kind, w, h, hx[i], hy[i], hx[next], hy[next],
+            kind, w, h, hx[i] + dirX[i], hy[i], hx[next] + dirX[next], hy[next],
             (int)Skirmish_RandRange(&rng, 2));
         if (i == 0 || Skirmish_RandRange(&rng, 2) == 0)
         {
             Skirmish_CarveRoad(
-                kind, w, h, hx[i], hy[i], hubX, hubY,
+                kind, w, h, hx[i] + dirX[i], hy[i], hubX, hubY,
                 (int)Skirmish_RandRange(&rng, 2));
         }
     }
@@ -1307,13 +1329,21 @@ static void Skirmish_GenerateRandomMap(u16 mapId, u32 seed, u8 * destBuf)
     for (i = 1; i < numArmies; i++)
     {
         int b = aiBases + (int)Skirmish_RandRange(&rng, 2) - 1;
+        int a = aiAirports;
         int c = aiCities + (int)Skirmish_RandRange(&rng, 2);
         if (b < 2)
             b = 2;
+        /* Boss Raid 2v1: give the solo Boss CPU (Army 3 = GE) a fortified stronghold */
+        if (mapId == SKIRMISH_MAP_2V1 && i == 2)
+        {
+            b = 4;
+            a = 2;
+            c = 5;
+        }
         Skirmish_PlaceHomeCluster(
             kind, owner, w, h,
             hx[i], hy[i], dirX[i], dirY[i],
-            (u8)(i + 1), b, aiAirports, c, &rng);
+            (u8)(i + 1), b, a, c, &rng);
     }
 
     /* 6. Scatter randomized Neutral Bases, Airports, Missile Silos, and Cities */
@@ -1392,7 +1422,7 @@ const void * Skirmish_GetOrGenerateMapLz(u16 mapId, u32 variant, u8 * destBuf)
          * locks in activeSeed), render a '?' mystery preview instead of
          * revealing the generated terrain.
          */
-        if (savedSeed == 0 || Proc_Find(gUnknown_08616B74) != NULL)
+        if (savedSeed == 0 || Proc_Find(gUnknown_08616C54) != NULL)
         {
             Skirmish_GenerateQuestionMarkPreview(destBuf);
             return NULL;

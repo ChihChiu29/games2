@@ -49561,7 +49561,7 @@ sub_08085AF4: @ 0x08085AF4
 	ldr r1, _08085B1C @ =gUnknown_03005990
 	movs r2, #0
 	adds r0, r1, #0
-	adds r0, #8
+	adds r0, #9
 _08085AFC:
 	strb r2, [r0]
 	subs r0, #1
@@ -49705,7 +49705,7 @@ _08085C44:
 	asrs r0, r0, #0x10
 	cmp r0, #1
 	bgt _08085C56
-	movs r0, #8
+	movs r0, #9
 	strh r0, [r5]
 _08085C56:
 	ldr r5, [r6]
@@ -50711,7 +50711,7 @@ _08086482:
 	mov sl, r2
 	cmp r0, #1
 	bgt _080864A8
-	movs r0, #8
+	movs r0, #9
 	strh r0, [r4]
 _080864A8:
 	adds r7, r5, #0
@@ -50736,7 +50736,7 @@ _080864C8:
 	asrs r0, r0, #0x10
 	cmp r0, #1
 	bgt _080864DA
-	movs r0, #8
+	movs r0, #9
 	strh r0, [r4]
 _080864DA:
 	mov r2, sl
@@ -50834,7 +50834,7 @@ _0808657C:
 	lsls r0, r0, #0x10
 	asrs r0, r0, #0x10
 	mov sl, r2
-	cmp r0, #8
+	cmp r0, #9
 	ble _080865AC
 	movs r0, #2
 	strh r0, [r4]
@@ -50859,7 +50859,7 @@ _080865CC:
 	strh r0, [r4]
 	lsls r0, r0, #0x10
 	asrs r0, r0, #0x10
-	cmp r0, #8
+	cmp r0, #9
 	ble _080865DE
 	movs r0, #2
 	strh r0, [r4]
@@ -51955,9 +51955,9 @@ sub_08086EB0: @ 0x08086EB0
 	cmp r0, #0xb3
 	bhi _08086EFE
 	bl sub_0803CA54
-	lsls r0, r0, #0x18
-	cmp r0, #0
-	beq _08086EF8
+	cmp r0, #1
+	bne _08086EF8
+	nop
 	ldr r4, _08086EF0 @ =gUnknown_08616D1C
 	adds r0, r4, #0
 	bl Proc_EndEach
@@ -51974,9 +51974,9 @@ _08086EEC: .4byte gUnknown_02027F74
 _08086EF0: .4byte gUnknown_08616D1C
 _08086EF4: .4byte gUnknown_08616D6C
 _08086EF8:
-	ldrb r0, [r4]
-	cmp r0, #0xb3
-	bls _08086F2A
+	cmp r0, #0
+	beq _08086F2A
+	nop
 _08086EFE:
 	ldr r4, _08086F34 @ =gUnknown_08616D1C
 	adds r0, r4, #0
@@ -52018,9 +52018,9 @@ sub_08086F3C: @ 0x08086F3C
 	cmp r0, #0xb3
 	bhi _08086FC6
 	bl sub_0803CA54
-	lsls r0, r0, #0x18
-	cmp r0, #0
-	beq _08086FC0
+	cmp r0, #1
+	bne _08086FC0
+	nop
 	ldrb r0, [r4]
 	bl sub_080247A4
 	ldr r5, _08086FA8 @ =gUnknown_03001FE8
@@ -52061,9 +52061,9 @@ _08086FB4: .4byte gUnknown_03005918
 _08086FB8: .4byte gUnknown_03003F68
 _08086FBC: .4byte gUnknown_030058F4
 _08086FC0:
-	ldrb r0, [r4]
-	cmp r0, #0xb3
-	bls _0808701C
+	cmp r0, #0
+	beq _0808701C
+	nop
 _08086FC6:
 	ldr r0, _08087028 @ =gUnknown_0823FD7C
 	ldr r1, _0808702C @ =gUnknown_03001FE8

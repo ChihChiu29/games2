@@ -64814,27 +64814,27 @@ _0803CA24: .4byte gUnknown_02028030
 
 	thumb_func_start sub_0803CA28
 sub_0803CA28: @ 0x0803CA28
-	push {r4, lr}
-	lsls r1, r1, #0x18
-	lsrs r1, r1, #0x18
-	ldr r2, _0803CA50 @ =gUnknown_02028030
-	lsrs r4, r0, #3
-	adds r2, #0x30
-	adds r4, r4, r2
-	movs r3, #7
-	ands r3, r0
-	movs r2, #1
-	lsls r2, r3
-	ldrb r0, [r4]
-	bics r0, r2
-	lsls r1, r3
-	orrs r0, r1
-	strb r0, [r4]
-	pop {r4}
-	pop {r0}
-	bx r0
+	ldr r2, _0803CA50 @ =Skirmish_SetMapPlayed
+	bx r2
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
 	.align 2, 0
-_0803CA50: .4byte gUnknown_02028030
+_0803CA50: .4byte Skirmish_SetMapPlayed
 
 	thumb_func_start sub_0803CA54
 sub_0803CA54: @ 0x0803CA54
@@ -64956,19 +64956,19 @@ _0803CB20: .4byte gUnknown_02028030
 
 	thumb_func_start sub_0803CB24
 sub_0803CB24: @ 0x0803CB24
-	ldr r1, _0803CB3C @ =gUnknown_02028030
-	lsrs r2, r0, #3
-	adds r1, #0x30
-	adds r2, r2, r1
-	movs r1, #7
-	ands r1, r0
-	movs r0, #1
-	lsls r0, r1
-	ldrb r1, [r2]
-	ands r0, r1
-	bx lr
+	ldr r1, _0803CB3C @ =Skirmish_IsMapPlayed
+	bx r1
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
 	.align 2, 0
-_0803CB3C: .4byte gUnknown_02028030
+_0803CB3C: .4byte Skirmish_IsMapPlayed
 
 	thumb_func_start sub_0803CB40
 sub_0803CB40: @ 0x0803CB40

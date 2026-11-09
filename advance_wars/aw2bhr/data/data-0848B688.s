@@ -226,7 +226,9 @@ gUnknown_08499CCC:  @ 0x08499CCC
 
 	.global gUnknown_08499CE4
 gUnknown_08499CE4:  @ 0x08499CE4
-	.incbin "baserom.gba", 0x499CE4, 0x18    @ 0x499CFC - 0x499CE4
+	.incbin "baserom.gba", 0x499CE4, 0x12    @ entries 0..8
+	.2byte 0x0A05                            @ entry 9: "Random"
+	.incbin "baserom.gba", 0x499CF8, 0x04    @ entries 10..11
 
 	.global gUnknown_08499CFC
 gUnknown_08499CFC:  @ 0x08499CFC

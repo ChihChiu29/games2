@@ -47946,8 +47946,9 @@ _08034834: .4byte gUnknown_0200C420
 	thumb_func_start sub_08034838
 sub_08034838: @ 0x08034838
 	ldr r0, _08034844 @ =gUnknown_03003FC0
-	adds r0, #0x32
 	movs r1, #0
+	str r1, [r0, #0x10]
+	adds r0, #0x32
 	strb r1, [r0]
 	bx lr
 	.align 2, 0

@@ -7,7 +7,7 @@ typedef int8_t s8;
 typedef int16_t s16;
 typedef int32_t s32;
 
-/* ARM9 Hook Trampolines (called from ARM mode at 0x020C6874 and 0x020C6A80) */
+/* ARM9 Hook Trampolines (called from ARM mode at 0x020C6874, 0x020C6A80, 0x0202E114) */
 __asm__(
     ".syntax unified\n"
     ".arm\n"
@@ -39,6 +39,16 @@ __asm__(
     "    pop     {r0, r1, r2, lr}\n"
     "    bxne    lr\n"
     "    b       0x02112FD4\n"
+    "\n"
+    ".global HookIsCategoryUnlocked\n"
+    ".type HookIsCategoryUnlocked, %function\n"
+    "HookIsCategoryUnlocked:\n"
+    "    cmp     r0, #9\n"
+    "    bne     0x02105174\n"
+    "    push    {r1, lr}\n"
+    "    blx     SkirmishIsCategoryUnlocked\n"
+    "    pop     {r1, lr}\n"
+    "    bx      lr\n"
     ".pool\n"
     ".thumb\n"
     ".align 2\n"
@@ -48,12 +58,31 @@ __asm__(
 #define MAX_H 20
 #define MAX_TILES (MAX_W * MAX_H)
 
-/* Difficulty levels (0..4 within each Versus tab) */
-#define DIFF_EASY    0
-#define DIFF_NORMAL  1
-#define DIFF_MIRROR  2
-#define DIFF_HARD    3
-#define DIFF_INSANE  4
+/* Dedicated Random Tab (tabId == 7, cat == 9) map IDs: 188..198 */
+#define SKIRMISH_MAP_BASE   188
+#define SKIRMISH_MODE_COUNT 11
+
+struct SkirmishModeConfig {
+    u8 numArmies;
+    u8 mirror;
+    u8 teams[4]; /* 0=Team A, 1=Team B, 2=Team C, 3=Team D */
+    const char *name;  /* Short label for 3-column SELECT MAP grid */
+    const char *title; /* Full title for top preview banner & in-battle info */
+};
+
+static const struct SkirmishModeConfig sSkirmishModes[SKIRMISH_MODE_COUNT] = {
+    /* 0: 1v1 */     { 2, 0, {0, 1, 2, 3}, "1v1",     "Random 1v1"   },
+    /* 1: MIR 1v1 */ { 2, 1, {0, 1, 2, 3}, "MIR 1v1", "Mirror 1v1"   },
+    /* 2: 1v1v1 */   { 3, 0, {0, 1, 2, 3}, "1v1v1",   "Random 1v1v1" },
+    /* 3: 1v2 */     { 3, 0, {0, 1, 1, 3}, "1v2",     "Outnumbered"  },
+    /* 4: 2v1 */     { 3, 0, {0, 0, 1, 3}, "2v1",     "Boss Raid"    },
+    /* 5: 1v1v1v1 */ { 4, 0, {0, 1, 2, 3}, "1v1v1v1", "Random FFA"   },
+    /* 6: MIR FFA */ { 4, 1, {0, 1, 2, 3}, "MIR FFA", "Mirror FFA"   },
+    /* 7: 2v2 */     { 4, 0, {0, 0, 1, 1}, "2v2",     "Team Battle"  },
+    /* 8: MIR 2v2 */ { 4, 1, {0, 0, 1, 1}, "MIR 2v2", "Mirror Teams" },
+    /* 9: 1v1v2 */   { 4, 0, {0, 1, 2, 2}, "1v1v2",   "Three Teams"  },
+    /* 10: 1v3 */    { 4, 0, {0, 1, 1, 1}, "1v3",     "Survival"     },
+};
 
 /* Biome archetypes */
 #define BIOME_RIVER  0
@@ -138,42 +167,16 @@ static const u16 sShoalTileTable[16] = {
     46, 275, 243,  84,  46, 117,  85, 117
 };
 
-static const char * const sDifficultyNames[5] = {
-    "Random Easy",
-    "Random Norm",
-    "Mirror Norm",
-    "Random Hard",
-    "Random Insane"
-};
-
 /* Persistent state inside OV9 5 */
 static u32 gLastBattleSeed = 0xA55A3C69;
 static u32 gEntropySalt    = 0x13579BDF;
 
-/* Decode mapId into (numPlayers, difficulty). Returns 1 if Skirmish map, 0 otherwise. */
-static int SkirmishDecodeMapId(u16 mapId, int *outPlayers, int *outDiff)
+static const struct SkirmishModeConfig *GetSkirmishModeConfig(u16 mapId)
 {
-    if (mapId >= 1 && mapId <= 5) {
-        *outPlayers = 2;
-        *outDiff = mapId - 1;
-        return 1;
-    }
-    if (mapId >= 18 && mapId <= 22) {
-        *outPlayers = 2;
-        *outDiff = mapId - 18;
-        return 1;
-    }
-    if (mapId >= 76 && mapId <= 80) {
-        *outPlayers = 3;
-        *outDiff = mapId - 76;
-        return 1;
-    }
-    if (mapId >= 103 && mapId <= 107) {
-        *outPlayers = 4;
-        *outDiff = mapId - 103;
-        return 1;
-    }
-    return 0;
+    int idx = (int)mapId - SKIRMISH_MAP_BASE;
+    if (idx < 0 || idx >= SKIRMISH_MODE_COUNT)
+        return 0;
+    return &sSkirmishModes[idx];
 }
 
 static u32 SkirmishStepRng(u32 *rng)
@@ -212,71 +215,70 @@ static u8 *GetMapCfgPtr(void)
     return *(u8 **)(session + 0x1C4);
 }
 
-static void ComputeDefaultTeams(int isSkirmish, int numPlayers, int diff, u8 outTeams[4])
+/* Called by HookIsCategoryUnlocked at 0x0202E114 when cat == 9 (tabId == 7) */
+int SkirmishIsCategoryUnlocked(void)
 {
-    outTeams[0] = 0;
-    outTeams[1] = 1;
-    outTeams[2] = 2;
-    outTeams[3] = 3;
-
-    if (isSkirmish) {
-        if (numPlayers == 4 && diff == DIFF_EASY) {
-            /* 4P Easy: 2v2 Allied (OS + BM on Team A vs GE + YC on Team B) */
-            outTeams[0] = 0;
-            outTeams[1] = 0;
-            outTeams[2] = 1;
-            outTeams[3] = 1;
-        } else if (numPlayers >= 3 && (diff == DIFF_HARD || diff == DIFF_INSANE)) {
-            /* 3P/4P Hard & Insane: 1v2 / 1v3 AI Coalition (OS on Team A vs all AIs on Team B) */
-            outTeams[0] = 0;
-            outTeams[1] = 1;
-            outTeams[2] = 1;
-            outTeams[3] = 1;
-        }
-    }
+    u8 *session = GetSessionPtr();
+    /* Ensure mapId 188..198 are unlocked in the SRAM-loaded map bitfield (0x022D6582) */
+    *(volatile u8 *)(0x022D6582 + 23) |= 0xF0;
+    *(volatile u8 *)(0x022D6582 + 24) |= 0x7F;
+    /* Hide the Random tab in Survival Mode (session[0x8A] != 0); show in Versus Mode */
+    if (session && session[0x8A] != 0)
+        return 0;
+    return 1;
 }
 
 /* Called by GetMapName hook at 0x020C6874 */
 const char *SkirmishGetMapName(u16 mapId, u32 callerLr, u32 parentLr)
 {
-    int numPlayers = 2;
-    int diff = 0;
-    int isSkirmish = SkirmishDecodeMapId(mapId, &numPlayers, &diff);
+    const struct SkirmishModeConfig *cfg = GetSkirmishModeConfig(mapId);
 
     /* When called from InitBattleMap (0x020C7824 -> callerLr = 0x020C7828),
      * persist gLastBattleSeed into mapCfg + 0x14 (bytes 20..23 of the 26-byte map name
      * buffer, untouched by strcpy since our names are <= 14 bytes and saved in SRAM).
      * When InitBattleMap was called from GetMapArmyPresent (0x0206EC18 -> 0x020C73C0,
      * parentLr = 0x020C73C4) entering CO Select, also set session + 0xA2..0xA5 to
-     * this map's default teams (COSelectInit at 0x0206ED48 then copies session + 0xA2..0xA5
-     * into the CO Select menu state at 0x022CD3B8..0x022CD3BB). We guard the non-Skirmish
-     * reset with session[0x58] == 2 (Versus Mode) so Campaign/Trial preset teams are
-     * untouched, and we do NOT overwrite session + 0xA2..0xA5 when starting the battle
-     * (parentLr = 0x020BDAC8), preserving manual team customizations from CO Select!
+     * this mode's default teams and session + 0x93..0x96 to 1P Human vs CPU opponents
+     * (COSelectInit at 0x0206EC80..0x0206ED54 then copies both into the CO Select UI).
+     * We guard the non-Skirmish reset with session[0x58] == 2 (Versus Mode) so
+     * Campaign/Trial preset teams are untouched, and we do NOT overwrite session state
+     * when starting the battle (parentLr = 0x020BDAC8), preserving manual CO Select edits!
      */
     if (callerLr == 0x020C7828) {
         u8 *session = GetSessionPtr();
         u8 *mapCfg  = GetMapCfgPtr();
-        if (mapCfg && isSkirmish) {
+        if (mapCfg && cfg) {
             mapCfg[0x14] = (u8)(gLastBattleSeed & 0xFF);
             mapCfg[0x15] = (u8)((gLastBattleSeed >> 8) & 0xFF);
             mapCfg[0x16] = (u8)((gLastBattleSeed >> 16) & 0xFF);
             mapCfg[0x17] = (u8)((gLastBattleSeed >> 24) & 0xFF);
         }
-        if (session && parentLr == 0x020C73C4 && (isSkirmish || session[0x58] == 2)) {
-            u8 teams[4];
-            ComputeDefaultTeams(isSkirmish, numPlayers, diff, teams);
-            session[0xA2] = teams[0];
-            session[0xA3] = teams[1];
-            session[0xA4] = teams[2];
-            session[0xA5] = teams[3];
+        if (session && parentLr == 0x020C73C4) {
+            if (cfg) {
+                session[0x93] = 1; /* P1: Human */
+                session[0x94] = 2; /* P2: CPU */
+                session[0x95] = 2; /* P3: CPU */
+                session[0x96] = 2; /* P4: CPU */
+                session[0xA2] = cfg->teams[0];
+                session[0xA3] = cfg->teams[1];
+                session[0xA4] = cfg->teams[2];
+                session[0xA5] = cfg->teams[3];
+            } else if (session[0x58] == 2) {
+                session[0xA2] = 0;
+                session[0xA3] = 1;
+                session[0xA4] = 2;
+                session[0xA5] = 3;
+            }
         }
     }
 
-    if (!isSkirmish)
+    if (!cfg)
         return 0;
 
-    return sDifficultyNames[diff];
+    /* 0x020662D8 is the 3-column SELECT MAP grid renderer -> return short label (e.g. "MIR 1v1").
+     * All other callers (0x0206511C top preview banner, 0x020C7828 InitBattleMap, etc.) -> full title.
+     */
+    return (callerLr == 0x020662D8) ? cfg->name : cfg->title;
 }
 
 /* Generate the "Surprise Me!" Giant '?' Question Mark minimap preview (17x13) */
@@ -415,50 +417,46 @@ static int IsVehicleBlockedTerrain(u8 t, u16 tid)
     return 0;
 }
 
-/* Helper to set terrain with optional symmetry (2P rotational or 3P/4P 4-way reflection) */
-static void SetTerrainSym(u8 *tgrid, int w, int h, int x, int y, u8 t, int isMirror, int numPlayers)
+/* Helper to set terrain with symmetry (2P rotational or 3P/4P 4-way reflection) */
+static void SetTerrainSym(u8 *tgrid, int w, int h, int x, int y, u8 t, int numPlayers)
 {
+    int mx = w - 1 - x;
+    int my = h - 1 - y;
     if (x < 0 || x >= w || y < 0 || y >= h)
         return;
     tgrid[y * w + x] = t;
-    if (isMirror) {
-        int mx = w - 1 - x;
-        int my = h - 1 - y;
-        tgrid[my * w + mx] = t;
-        if (numPlayers >= 3) {
-            tgrid[y * w + mx]  = t;
-            tgrid[my * w + x]  = t;
-        }
+    tgrid[my * w + mx] = t;
+    if (numPlayers >= 3) {
+        tgrid[y * w + mx] = t;
+        tgrid[my * w + x] = t;
     }
 }
 
 /* Ensure Mountains never form 8-connected impassable chains with other Mountains, Rivers,
  * Pipes, Ports, or Sea that could wall off a Neutral Base/City or block vehicle corridors.
  */
-static int CanPlaceMountainAt(u8 *tgrid, u16 *tiles, int w, int h, int x, int y, int isMirror, int numPlayers)
+static int CanPlaceMountainAt(u8 *tgrid, u16 *tiles, int w, int h, int x, int y, int numPlayers)
 {
     int pts[4][2];
-    int count = 1;
+    int count;
+    int mx = w - 1 - x;
+    int my = h - 1 - y;
     int i, j, dx, dy;
 
     pts[0][0] = x;
     pts[0][1] = y;
-    if (isMirror) {
-        int mx = w - 1 - x;
-        int my = h - 1 - y;
-        if (numPlayers == 2) {
-            pts[1][0] = mx;
-            pts[1][1] = my;
-            count = 2;
-        } else {
-            pts[1][0] = mx;
-            pts[1][1] = y;
-            pts[2][0] = x;
-            pts[2][1] = my;
-            pts[3][0] = mx;
-            pts[3][1] = my;
-            count = 4;
-        }
+    if (numPlayers == 2) {
+        pts[1][0] = mx;
+        pts[1][1] = my;
+        count = 2;
+    } else {
+        pts[1][0] = mx;
+        pts[1][1] = y;
+        pts[2][0] = x;
+        pts[2][1] = my;
+        pts[3][0] = mx;
+        pts[3][1] = my;
+        count = 4;
     }
 
     for (i = 0; i < count; i++) {
@@ -485,42 +483,16 @@ static int CanPlaceMountainAt(u8 *tgrid, u16 *tiles, int w, int h, int x, int y,
     return 1;
 }
 
-/* Carve a straight/dogleg road segment between (x0, y0) and (x1, y1),
- * turning River/Sea into Bridge and Pipe into Seam.
- */
-static void CarveRoadSegment(u8 *tgrid, u16 *tiles, int w, int h, int x0, int y0, int x1, int y1)
-{
-    int x = x0;
-    int y = y0;
-    while (1) {
-        if (x > 0 && x < w - 1 && y > 0 && y < h - 1 && tiles[y * w + x] == 0) {
-            u8 cur = tgrid[y * w + x];
-            if (cur == T_RIVER || cur == T_SEA || cur == T_SHOAL || cur == T_REEF || cur == T_BRIDGE) {
-                tgrid[y * w + x] = T_BRIDGE;
-            } else if (cur == T_PIPE || cur == T_SEAM) {
-                tgrid[y * w + x] = T_SEAM;
-            } else {
-                tgrid[y * w + x] = T_ROAD;
-            }
-        }
-        if (x == x1 && y == y1)
-            break;
-        if (AbsInt(x - x1) >= AbsInt(y - y1)) {
-            x += (x < x1) ? 1 : -1;
-        } else {
-            y += (y < y1) ? 1 : -1;
-        }
-    }
-}
-
-/* Place a single property (and mirror it if in Mirror mode) if valid */
+/* Place a symmetric neutral property in Mirror mode if valid */
 static int TryPlaceProperty(
     u8 *tgrid, u16 *tiles, int w, int h,
     int x, int y, u16 propTile,
-    int isMirror, int numPlayers, int minBuildingDist)
+    int numPlayers, int minBuildingDist)
 {
     int pts[4][2];
-    int count = 1;
+    int count;
+    int mx = w - 1 - x;
+    int my = h - 1 - y;
     int i, j, dy, dx;
 
     if (x < 1 || x > w - 2 || y < 1 || y > h - 2)
@@ -528,29 +500,24 @@ static int TryPlaceProperty(
 
     pts[0][0] = x;
     pts[0][1] = y;
-
-    if (isMirror) {
-        int mx = w - 1 - x;
-        int my = h - 1 - y;
-        if (numPlayers == 2) {
-            pts[1][0] = mx;
-            pts[1][1] = my;
-            count = 2;
-        } else {
-            pts[1][0] = mx;
-            pts[1][1] = y;
-            pts[2][0] = x;
-            pts[2][1] = my;
-            pts[3][0] = mx;
-            pts[3][1] = my;
-            count = 4;
-        }
-        for (i = 0; i < count; i++) {
-            for (j = i + 1; j < count; j++) {
-                if (AbsInt(pts[i][0] - pts[j][0]) <= minBuildingDist &&
-                    AbsInt(pts[i][1] - pts[j][1]) <= minBuildingDist)
-                    return 0;
-            }
+    if (numPlayers == 2) {
+        pts[1][0] = mx;
+        pts[1][1] = my;
+        count = 2;
+    } else {
+        pts[1][0] = mx;
+        pts[1][1] = y;
+        pts[2][0] = x;
+        pts[2][1] = my;
+        pts[3][0] = mx;
+        pts[3][1] = my;
+        count = 4;
+    }
+    for (i = 0; i < count; i++) {
+        for (j = i + 1; j < count; j++) {
+            if (AbsInt(pts[i][0] - pts[j][0]) <= minBuildingDist &&
+                AbsInt(pts[i][1] - pts[j][1]) <= minBuildingDist)
+                return 0;
         }
     }
 
@@ -575,60 +542,304 @@ static int TryPlaceProperty(
     for (i = 0; i < count; i++) {
         int px = pts[i][0];
         int py = pts[i][1];
-        u16 tid = propTile;
-        if (isMirror && propTile >= 453 && propTile <= 472) {
-            int offsetInArmy = propTile - 453;
-            int armyIdx = i + 1;
-            while (offsetInArmy >= 5)
-                offsetInArmy -= 5;
-            if (armyIdx <= numPlayers) {
-                tid = (u16)(453 + (armyIdx - 1) * 5 + offsetInArmy);
-            } else {
-                tid = (offsetInArmy == 0) ? (u16)TILE_COM_NEUTRAL : (u16)(449 + offsetInArmy - 1);
-            }
-        } else if (isMirror && propTile >= 442 && propTile <= 445) {
-            int armyIdx = i + 1;
-            tid = (armyIdx <= numPlayers) ? (u16)TILE_COM_OWNED(armyIdx) : (u16)TILE_COM_NEUTRAL;
-        }
         tgrid[py * w + px] = T_PLAIN;
-        tiles[py * w + px] = tid;
+        tiles[py * w + px] = propTile;
     }
 
     return 1;
 }
 
-static void SkirmishGenerateBattleMap(u8 *destBuf, int numPlayers, int diff, u32 seed)
+static int NearAnyHq(int x, int y, const int *hx, const int *hy, int n, int dist)
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        if (AbsInt(x - hx[i]) + AbsInt(y - hy[i]) <= dist)
+            return 1;
+    }
+    return 0;
+}
+
+static int IsBuildable(u8 *tgrid, u16 *tiles, int idx)
+{
+    return (tiles[idx] == 0 && (tgrid[idx] == T_PLAIN || tgrid[idx] == T_WOOD));
+}
+
+static void ApplyRoadStep(u8 *tgrid, u16 *tiles, int w, int h, int x, int y)
+{
+    if (x > 0 && x < w - 1 && y > 0 && y < h - 1 && tiles[y * w + x] == 0) {
+        u8 cur = tgrid[y * w + x];
+        if (cur == T_RIVER || cur == T_SEA || cur == T_SHOAL || cur == T_REEF || cur == T_BRIDGE)
+            tgrid[y * w + x] = T_BRIDGE;
+        else if (cur == T_PIPE || cur == T_SEAM)
+            tgrid[y * w + x] = T_SEAM;
+        else
+            tgrid[y * w + x] = T_ROAD;
+    }
+}
+
+static void CarveRoadHV(u8 *tgrid, u16 *tiles, int w, int h,
+                        int x0, int y0, int x1, int y1, int hvFirst)
+{
+    int x = x0, y = y0;
+    while (x != x1 || y != y1) {
+        ApplyRoadStep(tgrid, tiles, w, h, x, y);
+        if (hvFirst) {
+            if (x < x1) x++; else if (x > x1) x--; else if (y < y1) y++; else y--;
+        } else {
+            if (y < y1) y++; else if (y > y1) y--; else if (x < x1) x++; else x--;
+        }
+    }
+    ApplyRoadStep(tgrid, tiles, w, h, x, y);
+}
+
+static void SkirmishGenerateBattleMap(u8 *destBuf, int numPlayers, int isMirror, u32 seed)
 {
     u32 rng = seed;
-    int w, h;
-    int isMirror = (diff == DIFF_MIRROR);
-    int biome;
     u16 *tiles = (u16 *)(destBuf + 2);
-    /* destBuf is a 2580-byte heap buffer (0x020C6AA0); bytes 1400..2000 are unused scratch space */
     u8 *tgrid = destBuf + 1400;
-    int hqX[5], hqY[5];
-    int x, y, i, a;
+    int w, h, x, y, i, a;
     int midX, midY;
+    int biome;
+    int hqX[5], hqY[5];
 
-    /* 1. Choose Odd Map Dimensions so (midX, midY) is the exact geometric center
-     * (w - 1 - midX == midX and h - 1 - midY == midY), equidistant from all 4 corners!
-     */
-    if (diff == DIFF_EASY) {
-        w = 25;
-        h = 17;
-    } else if (diff == DIFF_NORMAL) {
-        w = (numPlayers <= 2) ? 25 : 27;
-        h = 17;
-    } else if (diff == DIFF_MIRROR) {
-        w = (numPlayers <= 2) ? 25 : 27;
-        h = (numPlayers <= 2) ? 17 : 19;
-    } else if (diff == DIFF_HARD) {
-        w = (numPlayers <= 2) ? 27 : 29;
-        h = (numPlayers <= 2) ? 17 : 19;
-    } else {
-        w = 29;
-        h = 19;
+    if (!isMirror) {
+        int archetype = SkirmishRandRange(&rng, 5);
+        int hx[4], hy[4], dX[4], dY[4];
+        int cornerOrder[4];
+        int hubX, hubY, rxBase, ryBase;
+        int neutralCities, neutralBases, numSilos;
+        int cx, cy;
+
+        /* 1. Dimensions */
+        w = 20 + (SkirmishRandRange(&rng, 4) << 1);
+        h = 14 + (SkirmishRandRange(&rng, 3) << 1);
+        if (numPlayers >= 3) { w += 4; h += 2; }
+        if (numPlayers >= 4) { w += 2; }
+        if (w > MAX_W) w = MAX_W;
+        if (h > MAX_H) h = MAX_H;
+
+        cx = w >> 1; cy = h >> 1;
+        midX = cx; midY = cy;
+        destBuf[0] = (u8)w;
+        destBuf[1] = (u8)h;
+        for (i = 0; i < w * h; i++) { tiles[i] = 0; tgrid[i] = T_PLAIN; }
+
+        neutralBases = 2 + SkirmishRandRange(&rng, 3);
+        numSilos = SkirmishRandRange(&rng, 3);
+        neutralCities = ((w * h) >> 5) + 2 + SkirmishRandRange(&rng, 8);
+
+        /* 2. Randomized HQ corners (Fisher-Yates) */
+        cornerOrder[0] = 0; cornerOrder[1] = 1; cornerOrder[2] = 2; cornerOrder[3] = 3;
+        for (i = 3; i > 0; i--) {
+            int j = SkirmishRandRange(&rng, i + 1);
+            int tmp = cornerOrder[i]; cornerOrder[i] = cornerOrder[j]; cornerOrder[j] = tmp;
+        }
+        if (numPlayers <= 2 && (cornerOrder[0] ^ cornerOrder[1]) != 1)
+            cornerOrder[1] = cornerOrder[0] ^ 1;
+
+        {
+            int ox = 2 + SkirmishRandRange(&rng, 2);
+            int oy = 2 + SkirmishRandRange(&rng, 2);
+            for (i = 0; i < 4; i++) {
+                int c = cornerOrder[i];
+                if (c == 0)      { hx[i]=ox;     hy[i]=h-1-oy; dX[i]=1;  dY[i]=-1; }
+                else if (c == 1) { hx[i]=w-1-ox; hy[i]=oy;     dX[i]=-1; dY[i]=1; }
+                else if (c == 2) { hx[i]=ox;     hy[i]=oy;     dX[i]=1;  dY[i]=1; }
+                else             { hx[i]=w-1-ox; hy[i]=h-1-oy; dX[i]=-1; dY[i]=-1; }
+            }
+        }
+
+        rxBase = cx + SkirmishRandRange(&rng, 3) - 1;
+        ryBase = cy;
+        hubX = rxBase + ((SkirmishRandRange(&rng, 2)==0)?-2:2);
+        hubY = ryBase + ((SkirmishRandRange(&rng, 2)==0)?-2:2);
+
+        /* 3. Archetype macro geography
+         * 0=Riverlands, 1=Great Wall, 2=Archipelago, 3=Twin Massifs, 4=Pipe Fortress
+         */
+        if (archetype == 0) {
+            /* Organic meandering vertical river */
+            int rx = rxBase, lastStepY = -10;
+            for (y = 0; y < h; y++) {
+                if (!NearAnyHq(rx, y, hx, hy, numPlayers, 3))
+                    tgrid[y * w + rx] = T_RIVER;
+                if (y >= 5 && y < h-5 && y-lastStepY >= 3
+                    && AbsInt(y-ryBase) >= 4
+                    && SkirmishRandRange(&rng, 100) < 48) {
+                    int step = (SkirmishRandRange(&rng, 2)==0)?-1:1;
+                    int nx = rx + step;
+                    if (nx >= 6 && nx < w-6 && AbsInt(nx-rxBase) <= 1
+                        && !NearAnyHq(nx, y, hx, hy, numPlayers, 3)) {
+                        rx = nx;
+                        tgrid[y * w + rx] = T_RIVER;
+                        lastStepY = y;
+                    }
+                }
+            }
+            /* Horizontal river on 3P/4P */
+            if (numPlayers >= 3) {
+                int ry = ryBase;
+                for (x = 0; x < w; x++) {
+                    if (!NearAnyHq(x, ry, hx, hy, numPlayers, 2))
+                        tgrid[ry * w + x] = T_RIVER;
+                }
+            }
+            /* Coastal sea coves in unoccupied corners */
+            {
+                int cTL = !NearAnyHq(0, 0, hx, hy, numPlayers, 8);
+                int cTR = !NearAnyHq(w-1, 0, hx, hy, numPlayers, 8);
+                int cBL = !NearAnyHq(0, h-1, hx, hy, numPlayers, 8);
+                int cBR = !NearAnyHq(w-1, h-1, hx, hy, numPlayers, 8);
+                for (y = 0; y < h; y++)
+                    for (x = 0; x < w; x++) {
+                        int dTL=x+y, dTR=(w-1-x)+y, dBL=x+(h-1-y), dBR=(w-1-x)+(h-1-y);
+                        if ((cTL&&dTL<=3)||(cTR&&dTR<=3)||(cBL&&dBL<=3)||(cBR&&dBR<=3))
+                            tgrid[y * w + x] = T_SEA;
+                    }
+            }
+        } else if (archetype == 1) {
+            /* Great Wall: thick jagged mountain barrier + central pass */
+            int wx = rxBase;
+            hubX = rxBase; hubY = ryBase;
+            for (y = 0; y < h; y++) {
+                int halfT = 1 + SkirmishRandRange(&rng, 2);
+                if (y >= 3 && y < h-3 && SkirmishRandRange(&rng, 100) < 35) {
+                    int nx = wx + ((SkirmishRandRange(&rng, 2)==0)?-1:1);
+                    if (nx >= cx-2 && nx <= cx+2) wx = nx;
+                }
+                for (x = wx-halfT; x <= wx+halfT-1; x++)
+                    if (x >= 1 && x < w-1
+                        && !(AbsInt(x-hubX) <= 1 && AbsInt(y-hubY) <= 1)
+                        && !NearAnyHq(x, y, hx, hy, numPlayers, 3))
+                        tgrid[y * w + x] = T_MTN;
+            }
+        } else if (archetype == 2) {
+            /* Archipelago: sea strait + central island */
+            hubX = cx; hubY = cy;
+            for (y = 0; y < h; y++) {
+                int seaHalfW = (AbsInt(y-cy) <= 2)?3:1;
+                for (x = cx-seaHalfW; x <= cx+seaHalfW; x++)
+                    if (x >= 0 && x < w && !NearAnyHq(x, y, hx, hy, numPlayers, 4))
+                        tgrid[y*w+x] = T_SEA;
+            }
+            for (y = cy-1; y <= cy+1; y++)
+                for (x = cx-1; x <= cx+1; x++)
+                    tgrid[y*w+x] = T_PLAIN;
+        } else if (archetype == 3) {
+            /* Twin Massifs / Twin Lakes: 3-lane corridor */
+            u8 blockT = (SkirmishRandRange(&rng, 2)==0)?T_MTN:T_SEA;
+            int maxDy = (h <= 14)?2:((h <= 16)?3:4);
+            hubX = cx; hubY = cy;
+            for (y = 4; y <= h-5; y++)
+                if (AbsInt(y-cy) >= 2 && AbsInt(y-cy) <= maxDy)
+                    for (x = cx-3; x <= cx+3; x++)
+                        if (x >= 2 && x < w-2 && !NearAnyHq(x, y, hx, hy, numPlayers, 4))
+                            tgrid[y*w+x] = blockT;
+        } else {
+            /* Pipe Fortress (AWDS-exclusive) */
+            hubX = cx; hubY = cy;
+            for (y = 1; y < h-1; y++)
+                tgrid[y*w+cx] = T_PIPE;
+            if (numPlayers >= 3)
+                for (x = 1; x < w-1; x++)
+                    if (x != cx) tgrid[cy*w+x] = T_PIPE;
+        }
+
+        /* 4. Scatter terrain (individual pass) */
+        for (y = 1; y < h-1; y++) {
+            for (x = 1; x < w-1; x++) {
+                int idx = y * w + x;
+                if (tgrid[idx] == T_PLAIN && tiles[idx] == 0
+                    && !(AbsInt(x-hubX) <= 2 && AbsInt(y-hubY) <= 2)
+                    && !NearAnyHq(x, y, hx, hy, numPlayers, 3)) {
+                    int roll = SkirmishRandRange(&rng, 100);
+                    if (roll < 14) tgrid[idx] = T_WOOD;
+                    else if (roll < 22) tgrid[idx] = T_MTN;
+                }
+            }
+        }
+
+        /* 5. Road network through hub */
+        for (i = 0; i < numPlayers; i++) {
+            int next = (i + 1 < numPlayers) ? (i + 1) : 0;
+            int x0 = hx[i] + dX[i], y0 = hy[i];
+            int x1 = hx[next] + dX[next], y1 = hy[next];
+            int hvF = SkirmishRandRange(&rng, 2);
+            CarveRoadHV(tgrid, tiles, w, h, x0, y0, x1, y1, hvF);
+            CarveRoadHV(tgrid, tiles, w, h, x0, y0, hubX, hubY,
+                        (archetype == 0) ? 0 : hvF);
+        }
+
+        /* 6. Place HQs + starting properties */
+        for (i = 0; i < numPlayers; i++) {
+            int army = i + 1;
+            int px, py, idx, placed;
+            tiles[hy[i] * w + hx[i]] = TILE_ARMY_HQ(army);
+            tgrid[hy[i] * w + hx[i]] = T_PLAIN;
+            /* 2 starting bases */
+            px = hx[i] + dX[i]; py = hy[i];
+            if (px >= 1 && px < w-1) { tiles[py*w+px] = TILE_ARMY_BASE(army); tgrid[py*w+px] = T_PLAIN; }
+            px = hx[i]; py = hy[i] + dY[i];
+            if (py >= 1 && py < h-1) { tiles[py*w+px] = TILE_ARMY_BASE(army); tgrid[py*w+px] = T_PLAIN; }
+            /* Airport behind HQ */
+            if (archetype == 2 || archetype >= 3) {
+                px = hx[i] - dX[i]; py = hy[i];
+                if (px >= 1 && px < w-1 && tiles[py*w+px] == 0) {
+                    tiles[py*w+px] = TILE_ARMY_AIRP(army); tgrid[py*w+px] = T_PLAIN;
+                }
+            }
+            /* Scatter 2-4 cities near HQ */
+            placed = 0;
+            for (a = 0; a < 30 && placed < 2 + SkirmishRandRange(&rng, 3); a++) {
+                int dx = (int)SkirmishRandRange(&rng, 5) - 1;
+                int dy = (int)SkirmishRandRange(&rng, 4) - 1;
+                px = hx[i] + dx * dX[i]; py = hy[i] + dy * dY[i];
+                if (px >= 1 && px < w-1 && py >= 1 && py < h-1) {
+                    idx = py * w + px;
+                    if (IsBuildable(tgrid, tiles, idx)) {
+                        tiles[idx] = TILE_ARMY_CITY(army); tgrid[idx] = T_PLAIN; placed++;
+                    }
+                }
+            }
+        }
+
+        /* 7. Scatter neutral properties */
+        {
+            int placed = 0;
+            for (i = 0; i < 60 && placed < neutralBases; i++) {
+                int nx = 2+SkirmishRandRange(&rng,w-4), ny = 2+SkirmishRandRange(&rng,h-4);
+                int idx = ny*w+nx;
+                if (IsBuildable(tgrid,tiles,idx) && !NearAnyHq(nx,ny,hx,hy,numPlayers,5)) {
+                    tiles[idx]=TILE_BASE_NEUTRAL; tgrid[idx]=T_PLAIN; placed++;
+                }
+            }
+            placed = 0;
+            for (i = 0; i < 40 && placed < numSilos; i++) {
+                int sx = (w>>2)+SkirmishRandRange(&rng,w>>1), sy = (h>>2)+SkirmishRandRange(&rng,h>>1);
+                int idx = sy*w+sx;
+                if (IsBuildable(tgrid,tiles,idx) && !NearAnyHq(sx,sy,hx,hy,numPlayers,4)) {
+                    tiles[idx]=TILE_SILO; tgrid[idx]=T_PLAIN; placed++;
+                }
+            }
+            placed = 0;
+            for (i = 0; i < 160 && placed < neutralCities; i++) {
+                int nx = 1+SkirmishRandRange(&rng,w-2), ny = 1+SkirmishRandRange(&rng,h-2);
+                int idx = ny*w+nx;
+                if (IsBuildable(tgrid,tiles,idx) && !NearAnyHq(nx,ny,hx,hy,numPlayers,4)) {
+                    tiles[idx]=TILE_CITY_NEUTRAL; tgrid[idx]=T_PLAIN; placed++;
+                }
+            }
+        }
+
+        goto resolve_tiles;
     }
+
+    /* =====================================================================
+     * MIRROR MODE: symmetric biome-based generation
+     * Uses SetTerrainSym, TryPlaceProperty, CanPlaceMountainAt for symmetry.
+     * ===================================================================== */
+    w = (numPlayers <= 2) ? 25 : 27;
+    h = (numPlayers <= 2) ? 17 : 19;
 
     destBuf[0] = (u8)w;
     destBuf[1] = (u8)h;
@@ -682,7 +893,7 @@ static void SkirmishGenerateBattleMap(u8 *destBuf, int numPlayers, int diff, u32
             }
         }
         /* Scatter symmetric Reefs in the Open Sea Basin (separated horizontally & vertically) */
-        SetTerrainSym(tgrid, w, h, midX - 1, midY - 2, T_REEF, 1, 4);
+        SetTerrainSym(tgrid, w, h, midX - 1, midY - 2, T_REEF, 4);
     } else if (biome == BIOME_PIPE) {
         /* Pipe Fortress: Continuous 1-tile-thick Black Hole Pipe wall along x = midX
          * (plus flush E-W pipe arms along y = midY in 3P/4P), with zero open gaps!
@@ -717,30 +928,30 @@ static void SkirmishGenerateBattleMap(u8 *destBuf, int numPlayers, int diff, u32
          * - West Trunk at x = 3 (y = 3 .. h - 4) & East Trunk at x = w - 4 (y = 3 .. h - 4)
          * - Mid-Basin Port Spurs at y = midY (x = 3 .. midX - 5 and midX + 5 .. w - 4)
          */
-        CarveRoadSegment(tgrid, tiles, w, h, 3,        2,     w - 4,    2);
-        CarveRoadSegment(tgrid, tiles, w, h, 3,        h - 3, w - 4,    h - 3);
-        CarveRoadSegment(tgrid, tiles, w, h, 3,        2,     3,        h - 3);
-        CarveRoadSegment(tgrid, tiles, w, h, w - 4,    2,     w - 4,    h - 3);
-        CarveRoadSegment(tgrid, tiles, w, h, 3,        midY,  midX - 5, midY);
-        CarveRoadSegment(tgrid, tiles, w, h, midX + 5, midY,  w - 4,    midY);
+        CarveRoadHV(tgrid, tiles, w, h, 3,        2,     w - 4,    2,     1);
+        CarveRoadHV(tgrid, tiles, w, h, 3,        h - 3, w - 4,    h - 3, 1);
+        CarveRoadHV(tgrid, tiles, w, h, 3,        2,     3,        h - 3, 0);
+        CarveRoadHV(tgrid, tiles, w, h, w - 4,    2,     w - 4,    h - 3, 0);
+        CarveRoadHV(tgrid, tiles, w, h, 3,        midY,  midX - 5, midY,  1);
+        CarveRoadHV(tgrid, tiles, w, h, midX + 5, midY,  w - 4,    midY,  1);
     } else {
         /* Clean perimeter highway loop connecting all 4 corners (x = 3..w-4, y = 3..h-4),
          * crossing the River (into straight Bridges) or Pipe (into single Pipe Seams):
          */
-        CarveRoadSegment(tgrid, tiles, w, h, 3,     3,     w - 4, 3);
-        CarveRoadSegment(tgrid, tiles, w, h, 3,     h - 4, w - 4, h - 4);
-        CarveRoadSegment(tgrid, tiles, w, h, 3,     3,     3,     h - 4);
-        CarveRoadSegment(tgrid, tiles, w, h, w - 4, 3,     w - 4, h - 4);
+        CarveRoadHV(tgrid, tiles, w, h, 3,     3,     w - 4, 3,     1);
+        CarveRoadHV(tgrid, tiles, w, h, 3,     h - 4, w - 4, h - 4, 1);
+        CarveRoadHV(tgrid, tiles, w, h, 3,     3,     3,     h - 4, 0);
+        CarveRoadHV(tgrid, tiles, w, h, w - 4, 3,     w - 4, h - 4, 0);
         if (numPlayers <= 2) {
             /* In 2P, y = midY is dry land, so run a central E-W highway across (midX, midY) */
-            CarveRoadSegment(tgrid, tiles, w, h, 3, midY, w - 4, midY);
+            CarveRoadHV(tgrid, tiles, w, h, 3, midY, w - 4, midY, 1);
         } else if (biome == BIOME_RIVER) {
             /* In 3P/4P River Heartland, carve two inner N-S highway trunks at x = midX - 3
              * and x = midX + 3 (from y = 3 to y = h - 4) bridging the E-W river on both sides
              * of the central crossroads while staying well-separated from y = 3 and y = h - 4!
              */
-            CarveRoadSegment(tgrid, tiles, w, h, midX - 3, 3, midX - 3, h - 4);
-            CarveRoadSegment(tgrid, tiles, w, h, midX + 3, 3, midX + 3, h - 4);
+            CarveRoadHV(tgrid, tiles, w, h, midX - 3, 3, midX - 3, h - 4, 0);
+            CarveRoadHV(tgrid, tiles, w, h, midX + 3, 3, midX + 3, h - 4, 0);
         }
     }
 
@@ -761,43 +972,11 @@ static void SkirmishGenerateBattleMap(u8 *destBuf, int numPlayers, int diff, u32
         tiles[(hy + dy) * w + hx] = TILE_ARMY_BASE(a);
         tgrid[(hy + dy) * w + hx] = T_PLAIN;
 
-        /* Starting Airport or extra Base depending on difficulty
-         * (Bonus properties placed within the outer HQ corner at (hx-dx, hy-dy) and (hx-dx, hy+dy)
-         * so they never block any highway or inner approach!)
-         */
-        if (a == 1 && diff == DIFF_EASY) {
-            /* Player 1 advantage on Easy: extra Base + starting Airport + 2 Cities */
-            tiles[(hy - dy) * w + hx] = TILE_ARMY_BASE(1);
-            tgrid[(hy - dy) * w + hx] = T_PLAIN;
-            tiles[hy * w + (hx - dx)] = TILE_ARMY_AIRP(1);
-            tgrid[hy * w + (hx - dx)] = T_PLAIN;
-            tiles[(hy - dy) * w + (hx - dx)] = TILE_ARMY_CITY(1);
-            tgrid[(hy - dy) * w + (hx - dx)] = T_PLAIN;
-            tiles[(hy + dy) * w + (hx - dx)] = TILE_ARMY_CITY(1);
-            tgrid[(hy + dy) * w + (hx - dx)] = T_PLAIN;
-        } else if (a >= 2 && (diff == DIFF_HARD || diff == DIFF_INSANE)) {
-            /* AI advantage on Hard/Insane: extra Base + starting Airport + City */
-            tiles[(hy - dy) * w + hx] = TILE_ARMY_BASE(a);
-            tgrid[(hy - dy) * w + hx] = T_PLAIN;
-            tiles[hy * w + (hx - dx)] = TILE_ARMY_AIRP(a);
-            tgrid[hy * w + (hx - dx)] = T_PLAIN;
-            if (diff == DIFF_INSANE) {
-                tiles[(hy + dy) * w + (hx - dx)] = TILE_ARMY_CITY(a);
-                tgrid[(hy + dy) * w + (hx - dx)] = T_PLAIN;
-            }
-        } else {
-            /* Balanced starting City + neutral expansion Airport nearby */
-            tiles[(hy - dy) * w + hx] = TILE_ARMY_CITY(a);
-            tgrid[(hy - dy) * w + hx] = T_PLAIN;
-            tiles[hy * w + (hx - dx)] = TILE_AIRP_NEUTRAL;
-            tgrid[hy * w + (hx - dx)] = T_PLAIN;
-        }
-
-        /* On Insane, give AI armies a pre-owned Com Tower right behind their HQ! */
-        if (a >= 2 && diff == DIFF_INSANE) {
-            tiles[(hy - dy) * w + (hx - dx)] = TILE_COM_OWNED(a);
-            tgrid[(hy - dy) * w + (hx - dx)] = T_PLAIN;
-        }
+        /* Balanced starting City + neutral expansion Airport nearby */
+        tiles[(hy - dy) * w + hx] = TILE_ARMY_CITY(a);
+        tgrid[(hy - dy) * w + hx] = T_PLAIN;
+        tiles[hy * w + (hx - dx)] = TILE_AIRP_NEUTRAL;
+        tgrid[hy * w + (hx - dx)] = T_PLAIN;
     }
 
     /* 8. Place Naval Ports if in Naval Strait biome
@@ -835,16 +1014,16 @@ static void SkirmishGenerateBattleMap(u8 *destBuf, int numPlayers, int diff, u32
     TryPlaceProperty(tgrid, tiles, w, h,
                      (biome == BIOME_NAVAL) ? (midX - 1) : (midX - 2),
                      (biome == BIOME_NAVAL) ? 1 : (midY - 2),
-                     TILE_SILO, 1, numPlayers, 1);
+                     TILE_SILO, numPlayers, 1);
 
     /* Place symmetric Contested Neutral Com Towers on the flanks (without overwriting roads) */
     TryPlaceProperty(tgrid, tiles, w, h,
                      midX - 4,
                      (biome == BIOME_NAVAL) ? 1 : 2,
-                     TILE_COM_NEUTRAL, 1, numPlayers, 1);
+                     TILE_COM_NEUTRAL, numPlayers, 1);
 
     /* 10. Place Neutral Bases and Cities across the map (stratified by quadrant for fairness) */
-    if (isMirror) {
+    {
         int targetNeutralBases = (numPlayers >= 3) ? 1 : 2;
         int targetCities       = (numPlayers >= 3) ? 3 : 6;
         int placed = 0;
@@ -854,7 +1033,7 @@ static void SkirmishGenerateBattleMap(u8 *destBuf, int numPlayers, int diff, u32
             int minDist = (tries < 40) ? 2 : 1;
             int rx = 2 + SkirmishRandRange(&rng, midX - 3);
             int ry = ((((tries < 60) ? placed : tries) & 1) ? (midY + 2) : 2) + SkirmishRandRange(&rng, midY - 3);
-            if (TryPlaceProperty(tgrid, tiles, w, h, rx, ry, TILE_BASE_NEUTRAL, 1, numPlayers, minDist)) {
+            if (TryPlaceProperty(tgrid, tiles, w, h, rx, ry, TILE_BASE_NEUTRAL, numPlayers, minDist)) {
                 placed++;
             }
         }
@@ -864,37 +1043,8 @@ static void SkirmishGenerateBattleMap(u8 *destBuf, int numPlayers, int diff, u32
             int rx = 1 + SkirmishRandRange(&rng, midX - 1);
             int y0 = (numPlayers == 2 && (((tries < 120) ? placed : tries) & 1)) ? (midY + 1) : 1;
             int ry = y0 + SkirmishRandRange(&rng, midY - 1);
-            if (TryPlaceProperty(tgrid, tiles, w, h, rx, ry, TILE_CITY_NEUTRAL, 1, numPlayers, 1)) {
+            if (TryPlaceProperty(tgrid, tiles, w, h, rx, ry, TILE_CITY_NEUTRAL, numPlayers, 1)) {
                 placed++;
-            }
-        }
-    } else {
-        /* Non-mirror modes: place 1 Neutral Base and (3 + (diff >> 1)) Neutral Cities
-         * in each of the 4 quadrants so every quadrant has identical economy!
-         */
-        int q;
-        int quadCities = 3 + (diff >> 1);
-
-        for (q = 0; q < 4; q++) {
-            int x0 = (q & 1) ? (midX + 1) : 1;
-            int xSpan = (midX - 1 > 1) ? (midX - 1) : 1;
-            int y0 = (q & 2) ? (midY + 1) : 1;
-            int ySpan = (midY - 1 > 1) ? (midY - 1) : 1;
-            int placed = 0;
-            int tries;
-
-            for (tries = 0; tries < 100; tries++) {
-                int minDist = (tries < 40) ? 2 : 1;
-                int rx = x0 + 1 + SkirmishRandRange(&rng, xSpan - 2);
-                int ry = y0 + 1 + SkirmishRandRange(&rng, ySpan - 2);
-                if (TryPlaceProperty(tgrid, tiles, w, h, rx, ry, TILE_BASE_NEUTRAL, 0, numPlayers, minDist))
-                    break;
-            }
-            for (tries = 0; tries < 100 && placed < quadCities; tries++) {
-                int rx = x0 + SkirmishRandRange(&rng, xSpan);
-                int ry = y0 + SkirmishRandRange(&rng, ySpan);
-                if (TryPlaceProperty(tgrid, tiles, w, h, rx, ry, TILE_CITY_NEUTRAL, 0, numPlayers, 1))
-                    placed++;
             }
         }
     }
@@ -903,11 +1053,11 @@ static void SkirmishGenerateBattleMap(u8 *destBuf, int numPlayers, int diff, u32
     for (y = 1; y < h - 1; y++) {
         for (x = 1; x < w - 1; x++) {
             int roll;
-            if (isMirror && x > midX)
+            if (x > midX)
                 continue;
-            if (isMirror && x == midX && y > midY)
+            if (x == midX && y > midY)
                 continue;
-            if (isMirror && numPlayers >= 3 && y > midY)
+            if (numPlayers >= 3 && y > midY)
                 continue;
             if (tgrid[y * w + x] != T_PLAIN || tiles[y * w + x] != 0)
                 continue;
@@ -929,17 +1079,18 @@ static void SkirmishGenerateBattleMap(u8 *destBuf, int numPlayers, int diff, u32
 
             roll = SkirmishRandRange(&rng, 100);
             if (roll < 16) {
-                SetTerrainSym(tgrid, w, h, x, y, T_WOOD, isMirror, numPlayers);
+                SetTerrainSym(tgrid, w, h, x, y, T_WOOD, numPlayers);
             } else if (roll < 28) {
-                if (CanPlaceMountainAt(tgrid, tiles, w, h, x, y, isMirror, numPlayers)) {
-                    SetTerrainSym(tgrid, w, h, x, y, T_MTN, isMirror, numPlayers);
+                if (CanPlaceMountainAt(tgrid, tiles, w, h, x, y, numPlayers)) {
+                    SetTerrainSym(tgrid, w, h, x, y, T_MTN, numPlayers);
                 } else {
-                    SetTerrainSym(tgrid, w, h, x, y, T_WOOD, isMirror, numPlayers);
+                    SetTerrainSym(tgrid, w, h, x, y, T_WOOD, numPlayers);
                 }
             }
         }
     }
 
+resolve_tiles:
     /* Make sure all placed properties sit on T_PLAIN for coastline/road auto-tiling */
     for (y = 0; y < h; y++) {
         for (x = 0; x < w; x++) {
@@ -1041,10 +1192,6 @@ static void SkirmishGenerateBattleMap(u8 *destBuf, int numPlayers, int diff, u32
                     if (x < w - 1 && !IsWaterTerrain(tgrid[y * w + (x + 1)])) m |= 8;
                     if (m != 0) {
                         u16 st = sSeaTileTable[m];
-                        if (m == 4 && x == midX - 3)
-                            st = 107;
-                        else if (m == 8 && x == midX + 3)
-                            st = 138;
                         tiles[y * w + x] = st;
                     } else {
                         u16 st = TILE_SEA;
@@ -1087,21 +1234,19 @@ static void SkirmishGenerateBattleMap(u8 *destBuf, int numPlayers, int diff, u32
 /* Called by DecompressMap hook at 0x020C6A80 */
 int SkirmishDecompressMap(u8 *destBuf, u16 mapId, u32 callerLr, u32 parentLr)
 {
-    int numPlayers = 2;
-    int diff = 0;
-    int isSkirmish = SkirmishDecodeMapId(mapId, &numPlayers, &diff);
+    const struct SkirmishModeConfig *cfg = GetSkirmishModeConfig(mapId);
 
     /* When browsing/confirming a map on the SELECT MAP screen (0x0202CAE0 / 0x0202CE2C),
      * return the "Surprise Me!" Giant '?' minimap preview!
      */
     if (callerLr >= 0x0202CA00 && callerLr < 0x0202D700) {
-        if (!isSkirmish)
+        if (!cfg)
             return 0;
-        SkirmishGenerateQuestionPreview(destBuf, numPlayers);
+        SkirmishGenerateQuestionPreview(destBuf, cfg->numArmies);
         return 1;
     }
 
-    if (!isSkirmish)
+    if (!cfg)
         return 0;
 
     /* Roll a fresh random battle seed when entering CO Select from SELECT MAP
@@ -1139,7 +1284,7 @@ int SkirmishDecompressMap(u8 *destBuf, u16 mapId, u32 callerLr, u32 parentLr)
                 gLastBattleSeed = seed;
         }
 
-        SkirmishGenerateBattleMap(destBuf, numPlayers, diff, seed);
+        SkirmishGenerateBattleMap(destBuf, cfg->numArmies, cfg->mirror, seed);
     }
 
     return 1;

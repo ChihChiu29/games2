@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 Build & ROM Patcher for Advance Wars: Dual Strike (EU AWRP00) Procedural Map Generator.
-Compiles skirmish_ds.c, repacks OV9 5 map LZ77 blobs, injects the procedural
-generator payload at 0x0233E950, patches GetMapName and DecompressMap in ARM9,
+Compiles skirmish_ds.c, repacks OV9 5 map LZ77 blobs (preserving all 187 Versus maps
+and Campaign/Tutorial maps while reclaiming the 36 unused cat=9 blobs), injects the
+procedural generator payload at 0x0233E950, configures the dedicated Random tab
+(tabId=7, cat=9, mid=188..198) with all 11 Skirmish modes, patches ARM9 hooks,
 and outputs /home/chih/Workspace/git/games2/awds/awds_skirmish.nds.
 """
 
@@ -33,14 +35,11 @@ MAP_TABLE_RAM = 0x0235DF88
 MAP_ENTRY_SIZE = 0xA0
 
 PAYLOAD_RAM_BASE = 0x0233E950
-REPACK_END_RAM = 0x02347C5C
+REPACK_END_RAM = 0x02354350
 
-SKIRMISH_MAP_IDS = (
-    set(range(1, 6))
-    | set(range(18, 23))
-    | set(range(76, 81))
-    | set(range(103, 108))
-)
+SKIRMISH_MAP_BASE = 188
+SKIRMISH_MODES_ARMIES = [2, 2, 3, 3, 3, 4, 4, 4, 4, 4, 4]
+REPLACED_CAT9_IDS = set(range(188, 224))
 
 
 def arm_bl(src_vma: int, dst_vma: int) -> int:
@@ -50,27 +49,97 @@ def arm_bl(src_vma: int, dst_vma: int) -> int:
     return 0xEB000000 | imm24
 
 
-def lz77_padded_len(buf: bytes, off: int) -> int:
+def lz77_decompress(buf: bytes, off: int) -> bytes:
     hdr = struct.unpack_from("<I", buf, off)[0]
+    assert (hdr & 0xFF) == 0x10, f"Invalid LZ77 header at 0x{off:X}: 0x{hdr:08X}"
     size = hdr >> 8
-    out_len = 0
+    out = bytearray()
     pos = off + 4
-    while out_len < size:
+    while len(out) < size:
         flags = buf[pos]
         pos += 1
         for i in range(7, -1, -1):
-            if out_len >= size:
+            if len(out) >= size:
                 break
             if flags & (1 << i):
                 b1 = buf[pos]
+                b2 = buf[pos + 1]
                 pos += 2
-                out_len += (b1 >> 4) + 3
+                length = (b1 >> 4) + 3
+                disp = ((b1 & 0x0F) << 8) | b2
+                src = len(out) - (disp + 1)
+                for _ in range(length):
+                    out.append(out[src])
+                    src += 1
             else:
+                out.append(buf[pos])
                 pos += 1
-                out_len += 1
-    while (pos - off) % 4 != 0:
-        pos += 1
-    return pos - off
+    return bytes(out[:size])
+
+
+def lz77_compress_optimal(data: bytes) -> bytes:
+    n = len(data)
+    best_len = [1] * n
+    best_disp = [0] * n
+    for i in range(n):
+        max_l = min(18, n - i)
+        if max_l < 3:
+            continue
+        start_j = max(0, i - 4096)
+        b_l = 0
+        b_d = 0
+        for l in range(max_l, 2, -1):
+            sub = data[i : i + l]
+            idx = data.find(sub, start_j, i + l - 1)
+            if idx != -1 and idx < i:
+                b_l = l
+                b_d = i - idx - 1
+                break
+        if b_l >= 3:
+            best_len[i] = b_l
+            best_disp[i] = b_d
+
+    dp = [10**9] * (n + 1)
+    choice = [1] * n
+    dp[n] = 0
+    for i in range(n - 1, -1, -1):
+        c1 = 9 + dp[i + 1]
+        best_c = c1
+        best_step = 1
+        ml = best_len[i]
+        for l in range(3, ml + 1):
+            cl = 17 + dp[i + l]
+            if cl < best_c:
+                best_c = cl
+                best_step = l
+        dp[i] = best_c
+        choice[i] = best_step
+
+    out = bytearray(struct.pack("<I", 0x10 | (n << 8)))
+    i = 0
+    while i < n:
+        flag_pos = len(out)
+        out.append(0)
+        flags = 0
+        for bit in range(7, -1, -1):
+            if i >= n:
+                break
+            step = choice[i]
+            if step >= 3:
+                flags |= 1 << bit
+                disp = best_disp[i]
+                b1 = ((step - 3) << 4) | ((disp >> 8) & 0x0F)
+                b2 = disp & 0xFF
+                out.append(b1)
+                out.append(b2)
+                i += step
+            else:
+                out.append(data[i])
+                i += 1
+        out[flag_pos] = flags
+    while len(out) % 4 != 0:
+        out.append(0)
+    return bytes(out)
 
 
 def compile_payload() -> tuple[bytes, dict[str, int]]:
@@ -143,9 +212,11 @@ def main():
     payload, syms = compile_payload()
     hook_get_name = syms["HookGetMapName"]
     hook_decomp = syms["HookDecompressMap"]
-    print(f"      Payload size: {len(payload)} bytes (0x{len(payload):X})")
-    print(f"      HookGetMapName:    0x{hook_get_name:08X}")
-    print(f"      HookDecompressMap: 0x{hook_decomp:08X}")
+    hook_is_cat_unlocked = syms["HookIsCategoryUnlocked"]
+    print(f"      Payload size:           {len(payload)} bytes (0x{len(payload):X})")
+    print(f"      HookGetMapName:         0x{hook_get_name:08X}")
+    print(f"      HookDecompressMap:      0x{hook_decomp:08X}")
+    print(f"      HookIsCategoryUnlocked: 0x{hook_is_cat_unlocked:08X}")
 
     with open(BASEROM_PATH, "rb") as f:
         rom = bytearray(f.read())
@@ -153,58 +224,89 @@ def main():
     ov5 = bytearray(rom[OV5_ROM_OFF : OV5_ROM_OFF + OV5_SIZE])
     map_table_off = MAP_TABLE_RAM - OV5_RAM_BASE
 
-    print("[2/4] Repacking OV9 5 LZ77 map blobs (maps 1..107)...")
-    kept_blobs = []
-    for map_id in range(1, 108):
-        if map_id in SKIRMISH_MAP_IDS:
+    print("[2/4] Repacking OV9 5 LZ77 map blobs (preserving all 187 Versus + Campaign maps)...")
+    raw_to_comp: dict[bytes, bytes] = {}
+    unique_blobs: list[bytes] = []
+    ptr_refs: list[tuple[int, int, bytes]] = []
+
+    for map_id in range(1, 257):
+        if map_id in REPLACED_CAT9_IDS:
             continue
         e_off = map_table_off + map_id * MAP_ENTRY_SIZE
-        lz_ptr = struct.unpack_from("<I", ov5, e_off + 0x44)[0]
-        blob_off = lz_ptr - OV5_RAM_BASE
-        blob_len = lz77_padded_len(ov5, blob_off)
-        kept_blobs.append((map_id, bytes(ov5[blob_off : blob_off + blob_len])))
+        for field_off in (0x44, 0x48):
+            lz_ptr = struct.unpack_from("<I", ov5, e_off + field_off)[0]
+            if PAYLOAD_RAM_BASE <= lz_ptr < REPACK_END_RAM:
+                blob_off = lz_ptr - OV5_RAM_BASE
+                raw = lz77_decompress(ov5, blob_off)
+                if raw not in raw_to_comp:
+                    comp = lz77_compress_optimal(raw)
+                    assert lz77_decompress(comp, 0) == raw
+                    raw_to_comp[raw] = comp
+                    unique_blobs.append(comp)
+                ptr_refs.append((map_id, field_off, raw))
 
-    total_kept_bytes = sum(len(b[1]) for b in kept_blobs)
+    total_kept_bytes = sum(len(b) for b in unique_blobs)
     repack_start_ram = REPACK_END_RAM - total_kept_bytes
     max_payload_bytes = repack_start_ram - PAYLOAD_RAM_BASE
     print(
         f"      Available code space at 0x{PAYLOAD_RAM_BASE:08X}..0x{repack_start_ram:08X}: "
-        f"{max_payload_bytes} bytes"
+        f"{max_payload_bytes} bytes (headroom: {max_payload_bytes - len(payload)} bytes)"
     )
     assert len(payload) <= max_payload_bytes, (
         f"Payload ({len(payload)} B) exceeds available space ({max_payload_bytes} B)!"
     )
 
-    # Clear 0x0233E950..0x02347C5C and write payload + repacked LZ77 blobs
+    # Clear 0x0233E950..0x02354350 and write payload + repacked LZ77 blobs
     region_off = PAYLOAD_RAM_BASE - OV5_RAM_BASE
     region_len = REPACK_END_RAM - PAYLOAD_RAM_BASE
     ov5[region_off : region_off + region_len] = b"\x00" * region_len
     ov5[region_off : region_off + len(payload)] = payload
 
+    comp_to_ram: dict[bytes, int] = {}
     cur_ram = repack_start_ram
-    for map_id, blob in kept_blobs:
+    for comp in unique_blobs:
+        comp_to_ram[comp] = cur_ram
         dest_off = cur_ram - OV5_RAM_BASE
-        ov5[dest_off : dest_off + len(blob)] = blob
-        e_off = map_table_off + map_id * MAP_ENTRY_SIZE
-        struct.pack_into("<I", ov5, e_off + 0x44, cur_ram)
-        cur_ram += len(blob)
+        ov5[dest_off : dest_off + len(comp)] = comp
+        cur_ram += len(comp)
     assert cur_ram == REPACK_END_RAM
 
-    print("[3/4] Updating MapTable entries for the 20 Skirmish difficulty slots...")
-    par_turns_by_diff = [20, 24, 24, 28, 30]
-    for idx, map_id in enumerate(SKIRMISH_MAP_IDS):
-        diff = idx % 5
+    for map_id, field_off, raw in ptr_refs:
         e_off = map_table_off + map_id * MAP_ENTRY_SIZE
-        # Unlock map by default (f18 = 0x00000001), set Par Turn Limit (f2C) for Speed Score,
-        # and clear shop lock flag (f40 = 0x000000FF)
+        struct.pack_into("<I", ov5, e_off + field_off, comp_to_ram[raw_to_comp[raw]])
+
+    print("[3/4] Configuring dedicated Random Tab (tabId=7, cat=9, mid=188..198)...")
+    for idx, num_armies in enumerate(SKIRMISH_MODES_ARMIES):
+        map_id = SKIRMISH_MAP_BASE + idx
+        e_off = map_table_off + map_id * MAP_ENTRY_SIZE
+        # Clear survival/script proc pointers so the battle engine treats this as a pure Versus map
+        struct.pack_into("<III", ov5, e_off + 0x00, 0, 0, 0)
+        # Unlock map by default (f18 = 1)
         struct.pack_into("<I", ov5, e_off + 0x18, 0x00000001)
-        struct.pack_into("<H", ov5, e_off + 0x2C, par_turns_by_diff[diff])
-        struct.pack_into("<I", ov5, e_off + 0x40, 0x000000FF)
-        struct.pack_into("<I", ov5, e_off + 0x44, PAYLOAD_RAM_BASE)
+        # Set numArmies (+0x24), cat = 9 (+0x26), flags (+0x28, +0x2A), Par Turns = 24 (+0x2C)
+        struct.pack_into("<HHHHH", ov5, e_off + 0x24, num_armies, 9, 1, 1, 24)
+        # Clear shop lock flag (+0x40 = 0xFF), set valid map pointer (+0x44), clear predeployed units (+0x48..+0x50)
+        struct.pack_into("<IIIII", ov5, e_off + 0x40, 0x000000FF, PAYLOAD_RAM_BASE, 0, 0, 0)
+        # Standard Versus army order: OS=1, BM=2, GE=3, YC=4
+        ov5[e_off + 0x88 : e_off + 0x92] = bytes([0, 1, 2, 3, 4, 0, 1, 2, 3, 4])
+        ov5[e_off + 0x94 : e_off + 0x9C] = b"\xFF" * 8
+
+    # Hide remaining unused cat=9 entries (mid=199..223) from tabId=7
+    for map_id in range(SKIRMISH_MAP_BASE + len(SKIRMISH_MODES_ARMIES), 224):
+        e_off = map_table_off + map_id * MAP_ENTRY_SIZE
+        struct.pack_into("<HH", ov5, e_off + 0x24, 0, 0)
 
     rom[OV5_ROM_OFF : OV5_ROM_OFF + OV5_SIZE] = ov5
 
-    print("[4/4] Patching ARM9 hooks at 0x020C6874 and 0x020C6A80...")
+    print("[4/4] Patching ARM9 hooks (0x0202E0B0, 0x0202E114, 0x020C6874, 0x020C6A80)...")
+    # Enable tabId=7 in Versus Mode Map Select (nop out `beq 0x0202E0D8` at 0x0202E0B0)
+    off_tab7_skip = 0x0202E0B0 - ARM9_RAM_BASE + ARM9_ROM_OFF
+    struct.pack_into("<I", rom, off_tab7_skip, 0xE1A00000)
+
+    # Hook IsCategoryUnlocked call at 0x0202E114
+    off_cat_unlock = 0x0202E114 - ARM9_RAM_BASE + ARM9_ROM_OFF
+    struct.pack_into("<I", rom, off_cat_unlock, arm_bl(0x0202E114, hook_is_cat_unlocked))
+
     # Patch GetMapName (0x020C6874..0x020C687C)
     off_get_name = 0x020C6874 - ARM9_RAM_BASE + ARM9_ROM_OFF
     struct.pack_into(

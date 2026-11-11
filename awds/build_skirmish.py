@@ -279,8 +279,8 @@ def main():
     for idx, num_armies in enumerate(SKIRMISH_MODES_ARMIES):
         map_id = SKIRMISH_MAP_BASE + idx
         e_off = map_table_off + map_id * MAP_ENTRY_SIZE
-        # Clear survival/script proc pointers so the battle engine treats this as a pure Versus map
-        struct.pack_into("<III", ov5, e_off + 0x00, 0, 0, 0)
+        # Zero entire 0xA0-byte entry so no leftover Survival mode scripts/COs remain
+        ov5[e_off : e_off + MAP_ENTRY_SIZE] = b"\x00" * MAP_ENTRY_SIZE
         # Unlock map by default (f18 = 1)
         struct.pack_into("<I", ov5, e_off + 0x18, 0x00000001)
         # Set numArmies (+0x24), cat = 9 (+0x26), flags (+0x28, +0x2A), Par Turns = 24 (+0x2C)
@@ -297,6 +297,75 @@ def main():
         struct.pack_into("<HH", ov5, e_off + 0x24, 0, 0)
 
     rom[OV5_ROM_OFF : OV5_ROM_OFF + OV5_SIZE] = ov5
+
+    # Patch res_mapselect_lang_E (0x1BE6A00..0x1BE7B90) Banner 12+13 ("SURVIVAL" -> "RANDOM")
+    lang_e_off = 0x1BE6A00
+    lang_e_end = 0x1BE7B90
+    lang_raw = bytearray(lz77_decompress(rom, lang_e_off))
+
+    def get_128x16(buf: bytearray, pair_idx: int) -> list[list[int]]:
+        grid = [[0] * 128 for _ in range(16)]
+        for b in range(2):
+            s = pair_idx * 2 + b
+            for ty in range(2):
+                for py in range(8):
+                    for half in range(2):
+                        for tx in range(4):
+                            t_idx = s * 16 + half * 8 + ty * 4 + tx
+                            toff = t_idx * 32 + py * 4
+                            for bx in range(4):
+                                byte = buf[toff + bx]
+                                x0 = b * 64 + half * 32 + tx * 8 + bx * 2
+                                y0 = ty * 8 + py
+                                grid[y0][x0] = byte & 0xF
+                                grid[y0][x0 + 1] = byte >> 4
+        return grid
+
+    def set_128x16(buf: bytearray, pair_idx: int, grid: list[list[int]]) -> None:
+        for b in range(2):
+            s = pair_idx * 2 + b
+            for ty in range(2):
+                for py in range(8):
+                    for half in range(2):
+                        for tx in range(4):
+                            t_idx = s * 16 + half * 8 + ty * 4 + tx
+                            toff = t_idx * 32 + py * 4
+                            for bx in range(4):
+                                x0 = b * 64 + half * 32 + tx * 8 + bx * 2
+                                y0 = ty * 8 + py
+                                buf[toff + bx] = (grid[y0][x0] & 0xF) | ((grid[y0][x0 + 1] & 0xF) << 4)
+
+    g_dep = get_128x16(lang_raw, 1)  # DEPLOYED
+    g_war = get_128x16(lang_raw, 5)  # WAR ROOM
+    g_sur = get_128x16(lang_raw, 6)  # SURVIVAL
+    g_des = get_128x16(lang_raw, 7)  # DESIGN MAPS
+
+    def extract_cols(g: list[list[int]], x0: int, x1: int) -> list[list[int]]:
+        return [[g[y][x] for x in range(x0, x1 + 1)] for y in range(3, 13)]
+
+    glyphs = [
+        extract_cols(g_sur, 38, 51),   # R
+        extract_cols(g_sur, 92, 105),  # A
+        extract_cols(g_des, 58, 69),   # N
+        extract_cols(g_dep, 4, 16),    # D
+        extract_cols(g_war, 75, 88),   # O
+        extract_cols(g_war, 107, 120), # M
+    ]
+    for y in range(3, 13):
+        for x in range(4, 124):
+            g_sur[y][x] = 4
+    total_w = sum(len(gl[0]) for gl in glyphs) + 3 * (len(glyphs) - 1)
+    cur_x = (128 - total_w) // 2
+    for gl in glyphs:
+        gw = len(gl[0])
+        for y in range(10):
+            for dx in range(gw):
+                g_sur[3 + y][cur_x + dx] = gl[y][dx]
+        cur_x += gw + 3
+    set_128x16(lang_raw, 6, g_sur)
+    lang_comp = lz77_compress_optimal(bytes(lang_raw))
+    assert len(lang_comp) <= (lang_e_end - lang_e_off)
+    rom[lang_e_off:lang_e_end] = lang_comp.ljust(lang_e_end - lang_e_off, b"\x00")
 
     print("[4/4] Patching ARM9 hooks (0x0202E0B0, 0x0202E114, 0x020C6874, 0x020C6A80)...")
     # Enable tabId=7 in Versus Mode Map Select (nop out `beq 0x0202E0D8` at 0x0202E0B0)

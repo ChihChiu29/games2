@@ -383,35 +383,45 @@ static __attribute__((noinline)) int IsBuildable(u8 *tgrid, u16 *tiles, int idx)
     return (tiles[idx] == 0 && (tgrid[idx] == T_PLAIN || tgrid[idx] == T_WOOD));
 }
 
-/* Road step: bridges Rivers, opens Seams in Pipes, leaves Sea/Shoal/Reef intact
- * so naval basins are never walled off by multi-tile bridges!
+/* Carve a water-aware road: bridges Rivers, opens Seams in Pipes, detours around
+ * lakes when both axes remain, and stops cleanly at Shoal beaches instead of
+ * teleporting across deep water.
  */
-static __attribute__((noinline)) void ApplyRoadStep(u8 *tgrid, u16 *tiles, int w, int h, int x, int y)
-{
-    if (x > 0 && x < w - 1 && y > 0 && y < h - 1 && tiles[y * w + x] == 0) {
-        u8 cur = tgrid[y * w + x];
-        if (cur == T_RIVER || cur == T_BRIDGE)
-            tgrid[y * w + x] = T_BRIDGE;
-        else if (cur == T_PIPE || cur == T_SEAM)
-            tgrid[y * w + x] = T_SEAM;
-        else if (cur != T_SEA && cur != T_SHOAL && cur != T_REEF)
-            tgrid[y * w + x] = T_ROAD;
-    }
-}
-
 static __attribute__((noinline)) void CarveRoadHV(u8 *tgrid, u16 *tiles, int w, int h,
                                                    int x0, int y0, int x1, int y1, int hvFirst)
 {
     int x = x0, y = y0;
-    while (x != x1 || y != y1) {
-        ApplyRoadStep(tgrid, tiles, w, h, x, y);
-        if (hvFirst) {
-            if (x < x1) x++; else if (x > x1) x--; else if (y < y1) y++; else y--;
-        } else {
-            if (y < y1) y++; else if (y > y1) y--; else if (x < x1) x++; else x--;
+    for (;;) {
+        if (x > 0 && x < w - 1 && y > 0 && y < h - 1 && tiles[y * w + x] == 0) {
+            u8 cur = tgrid[y * w + x];
+            if (cur >= T_SEA && cur <= T_SHOAL)
+                break;
+            if (cur == T_RIVER || cur == T_BRIDGE)
+                tgrid[y * w + x] = T_BRIDGE;
+            else if (cur == T_PIPE || cur == T_SEAM)
+                tgrid[y * w + x] = T_SEAM;
+            else
+                tgrid[y * w + x] = T_ROAD;
+        }
+        if (x == x1 && y == y1)
+            break;
+        {
+            int dx = (x < x1) ? 1 : ((x > x1) ? -1 : 0);
+            int dy = (y < y1) ? 1 : ((y > y1) ? -1 : 0);
+            if (dx != 0 && dy != 0) {
+                int nx = hvFirst ? (x + dx) : x;
+                int ny = hvFirst ? y : (y + dy);
+                u8 nt = tgrid[ny * w + nx];
+                if (nt >= T_SEA && nt <= T_SHOAL)
+                    hvFirst ^= 1;
+            }
+            if (hvFirst) {
+                if (dx != 0) x += dx; else y += dy;
+            } else {
+                if (dy != 0) y += dy; else x += dx;
+            }
         }
     }
-    ApplyRoadStep(tgrid, tiles, w, h, x, y);
 }
 
 /* Carve a water basin (T_SEA core with T_SHOAL shallow beach rim on orthogonal edges) */
@@ -838,13 +848,15 @@ static void SkirmishGenerateBattleMap(u8 *destBuf, int numPlayers, int isMirror,
     }
 
     /* 5. Carve Road Network through Central Hub & Flanks */
-    for (i = 0; i < numPlayers; i++) {
-        int next = (i + 1 < numPlayers) ? (i + 1) : 0;
-        int x0 = hx[i] + dX[i], y0 = hy[i];
-        int x1 = hx[next] + dX[next], y1 = hy[next];
-        int hvF = isMirror ? 1 : SkirmishRandRange(&rng, 2);
-        CarveRoadHV(tgrid, tiles, w, h, x0, y0, x1, y1, hvF);
-        CarveRoadHV(tgrid, tiles, w, h, x0, y0, hubX, hubY, 1 - hvF);
+    {
+        int hubHv = (archetype >= 6) ? 1 : ((archetype == 4) ? 0 : orient);
+        for (i = 0; i < numPlayers; i++) {
+            int next = (i + 1 < numPlayers) ? (i + 1) : 0;
+            int x0 = hx[i] + dX[i], y0 = hy[i];
+            int x1 = hx[next] + dX[next], y1 = hy[next];
+            CarveRoadHV(tgrid, tiles, w, h, x0, y0, x1, y1, 1 - hubHv);
+            CarveRoadHV(tgrid, tiles, w, h, x0, y0, hubX, hubY, hubHv);
+        }
     }
 
     /* 6. Place HQs & Home Clusters */
@@ -918,18 +930,20 @@ static void SkirmishGenerateBattleMap(u8 *destBuf, int numPlayers, int isMirror,
             u8 tS = (y < h - 1) ? tgrid[idx + w] : t;
             u8 tW = (x > 0)     ? tgrid[idx - 1] : t;
             u8 tE = (x < w - 1) ? tgrid[idx + 1] : t;
+            int hasSea = (tN == T_SEA || tS == T_SEA || tW == T_SEA || tE == T_SEA);
             if (tiles[idx] != 0 && y > 1 && tN == T_MTN && tS >= T_MTN) {
                 tgrid[idx - w] = T_PLAIN;
             } else if (t == T_RIVER) {
                 if (tN >= T_SEA || tS >= T_SEA || tW >= T_SEA || tE >= T_SEA)
                     tgrid[idx] = T_PLAIN;
             } else if (t == T_SHOAL) {
-                int hasSea  = (tN == T_SEA || tS == T_SEA || tW == T_SEA || tE == T_SEA);
                 int hasLand = (!IsWaterTerrain(tN) || !IsWaterTerrain(tS) || !IsWaterTerrain(tW) || !IsWaterTerrain(tE));
                 if (!hasLand)
                     tgrid[idx] = T_SEA;
                 else if (!hasSea)
                     tgrid[idx] = T_PLAIN;
+            } else if (t == T_ROAD && (hasSea || (tN != T_ROAD && tS != T_ROAD && tW != T_ROAD && tE != T_ROAD))) {
+                tgrid[idx] = T_PLAIN;
             }
         }
     }

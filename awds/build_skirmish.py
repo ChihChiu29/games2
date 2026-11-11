@@ -77,21 +77,22 @@ def lz77_decompress(buf: bytes, off: int) -> bytes:
     return bytes(out[:size])
 
 
-def lz77_compress_optimal(data: bytes) -> bytes:
+def lz77_compress_optimal(data: bytes, vram_safe: bool = False) -> bytes:
     n = len(data)
+    min_dist = 2 if vram_safe else 1
     best_len = [1] * n
     best_disp = [0] * n
     for i in range(n):
         max_l = min(18, n - i)
-        if max_l < 3:
+        if max_l < 3 or i < min_dist:
             continue
         start_j = max(0, i - 4096)
         b_l = 0
         b_d = 0
         for l in range(max_l, 2, -1):
             sub = data[i : i + l]
-            idx = data.find(sub, start_j, i + l - 1)
-            if idx != -1 and idx < i:
+            idx = data.find(sub, start_j, i - min_dist + l)
+            if idx != -1 and idx <= i - min_dist:
                 b_l = l
                 b_d = i - idx - 1
                 break
@@ -298,9 +299,9 @@ def main():
 
     rom[OV5_ROM_OFF : OV5_ROM_OFF + OV5_SIZE] = ov5
 
-    # Patch res_mapselect_lang_E (0x1BE6A00..0x1BE7B90) Banner 12+13 ("SURVIVAL" -> "RANDOM")
+    # Patch res_mapselect_lang_E Chunk 0 (0x1BE6A00..0x1BE7220) Banner 12+13 ("SURVIVAL" -> "RANDOM")
     lang_e_off = 0x1BE6A00
-    lang_e_end = 0x1BE7B90
+    lang_e_end = 0x1BE7220
     lang_raw = bytearray(lz77_decompress(rom, lang_e_off))
 
     def get_128x16(buf: bytearray, pair_idx: int) -> list[list[int]]:
@@ -363,7 +364,7 @@ def main():
                 g_sur[3 + y][cur_x + dx] = gl[y][dx]
         cur_x += gw + 3
     set_128x16(lang_raw, 6, g_sur)
-    lang_comp = lz77_compress_optimal(bytes(lang_raw))
+    lang_comp = lz77_compress_optimal(bytes(lang_raw), vram_safe=True)
     assert len(lang_comp) <= (lang_e_end - lang_e_off)
     rom[lang_e_off:lang_e_end] = lang_comp.ljust(lang_e_end - lang_e_off, b"\x00")
 

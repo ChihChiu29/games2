@@ -1,0 +1,22 @@
+.section .text
+.thumb
+.syntax unified
+.include "include/gba.inc"
+
+.thumb_func
+glabel func_08024494
+/* 08024494 */ PUSH {LR}
+/* 08024496 */ MOVS R0, #0
+/* 08024498 */ BL scene_set_current_thread
+/* 0802449C */ MOVS R0, #2
+/* 0802449E */ BL scene_show_sprite
+/* 080244A2 */ LDR R0, =D_083FC594
+/* 080244A4 */ BL play_sound
+/* 080244A8 */ POP {R0}
+/* 080244AA */ BX R0
+
+.balign 4, 0
+_080244AC:
+/* 080244AC */ @ literal emitted by .ltorg for '=...' 
+.ltorg
+.end

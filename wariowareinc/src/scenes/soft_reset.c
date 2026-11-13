@@ -1,0 +1,58 @@
+#include "src/scenes/soft_reset.h"
+#include "include/global.h"
+
+asm(".include \"include/gba.inc\"");
+
+void soft_reset_scene_run(void) {
+    u32 newScene;
+
+    if (D_030035E0 != 0) {
+        soft_reset_init_scene();
+    }
+    
+    newScene = soft_reset_update_scene();
+    if (newScene == GLOBAL_SCENE_TITLE) {
+        func_080001D4();
+        gCurrentScene = newScene;
+    }
+}
+
+void soft_reset_init_scene(void) {
+    func_08000F74(0);
+    sprite_handler_set_global_pause(gSpriteHandler, TRUE);
+    gSoftReset.state = 0;
+}
+
+s32 soft_reset_update_scene(void) {
+    hdma_start();
+    gfx_buffer_flush();
+    hdma_run_dma3_now();
+
+    switch (gSoftReset.state) {
+    case 0:
+        gfx_fade_out_start(20, 0);
+        func_08002090(20);
+        gSoftReset.state++;
+        break;
+
+    case 1:
+        if (!(gGraphicsBuffer.fadeActive)) {
+            hdma_disable();
+            gSoftReset.state++;
+        }
+        break;
+
+    case 2:
+        if ((gCurrentKeys & RESET_BUTTON_COMBO) != RESET_BUTTON_COMBO)
+            return GLOBAL_SCENE_TITLE;
+        return GLOBAL_SCENE_INIT;
+
+    default:
+        break;
+    }
+
+    update_sprite_handler();
+    gfx_buffer_update_palette();
+    backdrop_gradient_update();
+    return GLOBAL_SCENE_INIT;
+}

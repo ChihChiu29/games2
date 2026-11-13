@@ -1,0 +1,93 @@
+#=================================================================
+# $NHDT-Header: NetHack 5.0 cross-pre1.501 2026/10/11_17:56:42 NetHack-5.0:1.15 $
+# Copyright (c) Michael Allison, 2026.
+# NetHack may be freely redistributed.  See license for details.
+#
+# Cross-compiling -PRE section 1
+#
+
+ifdef CROSS_TO_MSDOS
+CROSS=1
+BUILD_TARGET_LUA=1
+BUILD_PDCURSES=1
+CROSS_SHARED=1
+override TARGET = msdos
+override TARGETDIR=../targets/$(TARGET)
+override TARGETPFX = $(TARGETDIR)/
+override TARGET_LIBS=
+endif
+
+ifdef CROSS_TO_WASM
+CROSS=1
+BUILD_TARGET_LUA=1
+HACKDIR=/
+PREFIX=
+override TARGET = wasm
+override TARGETDIR=../targets/$(TARGET)
+override TARGETPFX = $(TARGETDIR)/
+override TARGET_LIBS=
+endif
+
+ifdef CROSS_TO_MIPS
+CROSS=1
+BUILD_TARGET_LUA=1
+BUILD_TARGET_NCURSES=1
+HACKDIR=/
+PREFIX=
+override TARGET = mips
+override TARGETDIR=../targets/$(TARGET)
+override TARGETPFX = $(TARGETDIR)/
+override TARGET_LIBS=
+endif
+
+ifdef CROSS_TO_AMIGA
+CROSS=1
+BUILD_TARGET_LUA=1
+CROSS_SHARED=1
+HACKDIR=NetHack:
+override TARGET = amiga
+override TARGETDIR=../targets/$(TARGET)
+override TARGETPFX = $(TARGETDIR)/
+override TARGET_LIBS=
+endif
+
+ifdef CROSS_TO_MAC68K
+CROSS=1
+BUILD_TARGET_LUA=1
+CROSS_SHARED=1
+override TARGET = mac68k
+override TARGETDIR=../targets/$(TARGET)
+override TARGETPFX = $(TARGETDIR)/
+override TARGET_LIBS=
+endif
+
+ifdef CROSS_TO_MACPPC
+CROSS=1
+BUILD_TARGET_LUA=1
+CROSS_SHARED=1
+override TARGET = macppc
+override TARGETDIR=../targets/$(TARGET)
+override TARGETPFX = $(TARGETDIR)/
+override TARGET_LIBS=
+endif
+
+ifdef CROSS_TO_ATARI
+CROSS=1
+BUILD_TARGET_LUA=1
+CROSS_SHARED=1
+override TARGET = atari
+override TARGETDIR=../targets/$(TARGET)
+override TARGETPFX = $(TARGETDIR)/
+override TARGET_LIBS=
+endif
+
+ifdef CROSS
+CROSSCOMPILE=1
+override PREGAME=
+override BUILDMORE=
+override CLEANMORE=
+override PACKAGE=
+endif
+# End of cross-compiling -PRE section 1
+#=================================================================
+

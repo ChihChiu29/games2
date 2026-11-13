@@ -1,0 +1,28 @@
+#==============================================================================
+# $NHDT-Header: NetHack 5.0 multiw-1.501 2026/10/11_17:56:42 NetHack-5.0:1.10 $
+# Copyright (c) Michael Allison, 2026.
+# NetHack may be freely redistributed.  See license for details.
+
+# 1. Which windowing interface(s) should be included in this binary?
+# One or more of these can be manually uncommented and/or can be specified
+# on the 'make' command line.  If none are enabled, tty will be used.
+#WANT_WIN_TTY=1
+#WANT_WIN_CURSES=1
+#WANT_WIN_X11=1
+#WANT_WIN_QT=1
+
+# 2. What is the default window system?
+# Exactly one of these can be manually uncommented and/or can be specified
+# on the 'make' command line.  If none is enabled, the first among
+# WANT_WIN_{tty,curses,X11,Qt} that is enabled will become default.
+#WANT_DEFAULT=tty
+#WANT_DEFAULT=curses
+#WANT_DEFAULT=Qt
+#WANT_DEFAULT=X11
+
+# Based on the NetHack version 5.0.1
+# Used to build some filenames subsequently in other include files
+NHV=501
+
+#end of multiw-1
+#==============================================================================

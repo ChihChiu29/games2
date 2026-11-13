@@ -1,0 +1,23 @@
+# $NHDT-Header: NetHack 5.0 Makefile.lib 2026/04/26_14:47:48 NetHack-5.0:1.11 $
+# Copyright (c) Norman Meluch 2002.
+# NetHack may be freely redistributed.  See license for details.
+#	Nethack makefile for Fred fish termlib -- Norman Meluch
+#
+CC	= cl /c
+MODEL	= L
+CFLAGS	= /A$(MODEL) /Os /Oa /Gs /Zp1 /W0
+#
+# Termcap routines.
+TERMLIB = termlib.lib
+#
+TL_LOBJECTS =	tgetent.o	tgetflag.o 	tgetnum.o	\
+		tgetstr.o	tgoto.o		tputs.o		\
+		isdigit.o	fgetlr.o
+#
+.SUFFIXES: .exe .o .c .obj .asm
+#
+.c.o:
+	$(CC) $(CFLAGS) /Fo$*.o $*.c
+#
+$(TERMLIB):	$(TL_LOBJECTS)
+	lib $(TERMLIB) -+ $(TL_LOBJECTS);

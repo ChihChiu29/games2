@@ -1,0 +1,283 @@
+#pragma once
+
+#include "global.h"
+#include "graphics.h"
+#include "scenes.h"
+#include "src/code_08003a70.h"
+
+// MACROS
+#define gGameplayData CURRENT_SCENE_DATA(struct GameplayData)
+
+#define MAX_LIVES 4
+#define MAX_SCORE 999
+
+enum GameplayState {
+    GAMEPLAY_STATE_STAGE_INIT = 0,
+    GAMEPLAY_STATE_RUNNING = 1,
+    GAMEPLAY_STATE_PAUSED = 4,
+    GAMEPLAY_STATE_EXITING = 5,
+    GAMEPLAY_STATE_SUSPENDED = 6,
+    GAMEPLAY_STATE_RESUMING = 7
+};
+
+// TYPES
+struct Unk083A4B58 {
+    u8 pad[2];
+    u16 unk2;
+};
+extern struct Unk083A4B58 *D_083A4B58[];
+
+struct GameplayStageInfo {
+    void (*initCallback)(void*);
+    void (*unk4)(void*);
+    struct SubScene* introScene;
+    struct SubScene* unkC;
+    struct SubScene* unk10;
+    struct SubScene* unk14;
+    struct SubScene* unk18;
+    struct SubScene* unk1C;
+    struct SubScene* unk20;
+    struct SubScene* unk24;
+    struct SubScene* unk28;
+    struct SubScene* unk2C;
+    struct SubScene* unk30;
+    struct SubScene* unk34;
+    u8 unk38;
+};
+
+struct GameplayData_struct_0 {
+    u16 baseTempo;
+    u16 unk2;
+    struct GameplayStageInfo* unk4;
+    struct GameplayScriptCmd* script;
+};
+
+struct GameplayData_struct_1f4 {
+    u32 unk0_1 : 1;
+    u32 unk0_2 : 31;
+};
+
+struct GameplayScriptSelectorList;
+
+struct GameplayData {
+    struct GameplayData_struct_0* unk0; // 0x0 size:0x4
+    u32 currentState : 5; // 0x4:0
+    u32 unk4_6 : 5; // 0x4:5
+    u32 unk5_3 : 1; // 0x4:10
+    u32 gameOver : 1; // 0x4:11
+    u32 isPaused : 1; // 0x4:12
+    u32 pauseSelection : 2; // 0x4:13
+    u32 pauseAvailable : 1; // 0x4:15
+    u32 difficultyOffset : 2; // 0x4:16
+    u32 callStackDepth : 4; // 0x4:18
+    u32 unk6_7 : 1; // 0x4:22
+    u32 unk6_8 : 1; // 0x4:23
+    u32 unk7_1 : 1; // 0x4:24
+    u32 unk7_2 : 1; // 0x4:25
+    u32 unk7_3 : 1; // 0x4:26
+    u32 unk7_4 : 1; // 0x4:27
+    s32 unk8; // 0x8 size:0x4
+    struct SongHeader* unkC; // 0xC size:0x4
+    u8 pad10[4]; // 0x10 size:0x4
+    u16 unk14; // 0x14 size:0x2
+    u16 unk16; // 0x16 size:0x2
+    u16 minTempo; // 0x18 size:0x2
+    u16 maxTempo; // 0x1A size:0x2
+    u32 unk1c; // 0x1C size:0x4
+    struct GameplayScriptCmd* unk20; // 0x20 size:0x4
+    u32 currentOpcode; // 0x24 size:0x4
+    u32 unk28; // 0x28 size:0x4
+    void* callStack[16]; // 0x2C size:0x40
+    struct MicrogameSequence* unk6c; // 0x6C size:0x4
+    u8 sequenceIndex; // 0x70
+    u8 sequenceOrder[0x100]; // 0x71 size:0x100
+    u8 unk171; // 0x171
+    u8 unk172; // 0x172
+    u8 unk173; // 0x173
+    u8 currentDifficulty; // 0x174
+    u8 currentLives; // 0x175
+    u8 maxLives; // 0x176
+    u8 pad177[1]; // 0x177
+    u16 microgameFailed; // 0x178 size:0x2
+    u16 unk17a; // 0x17A size:0x2
+    u16 currentScore; // 0x17C size:0x2
+    u16 previousScore; // 0x17E size:0x2
+    struct Animation *unk180; // 0x180 size:0x4
+    s16 unk184; // 0x184 size:0x2
+    s16 unk186; // 0x186 size:0x2
+    s16 unk188; // 0x188 size:0x2
+    s16 unk18A;
+    s16 unk18C[4];
+    s8 unk194;
+    u8 unk195; // 0x195
+    u8 pad196[0x2]; // 0x196 size:0x58
+    struct Animation unk198[3];
+    u8 pad1b0[0x3e];
+    s16 pauseMenuSprite; // 0x1EE size:0x2
+    s32 unk1f0; // 0x1F0 size:0x4
+    struct BgAnimator unk1f4; // 0x1F4 size:0x4
+    u32 scoreChanged; // 0x21C size:0x4
+    u8 unk220; // 0x220
+    u8 unk221; // 0x221
+    u8 pad222[2]; // 0x222 size:0x2
+    struct GameplayScriptSelectorList* unk224; // 0x224 size:0x4
+    u32 unk228; // 0x228 size:0x4
+    void* unk22c; // 0x22C size:0x4
+    u8 pad230[8]; // 0x230 size:0xC
+    u8 unk238;
+    u8 pad239[3];
+    u8 unk23c; // 0x23C
+    u8 pad23d[1]; // 0x23D
+    u8 unk23e; // 0x23E
+    u8 pad23f[0x31]; // 0x23F size:0x31
+    u8 unk270; // 0x270
+    u8 pad271[3]; // 0x271 size:0x3
+    u32 unk274; // 0x274 size:0x4
+    u32 unk278; // 0x278 size:0x4
+    u8 currentMicrogameID; // 0x27C
+    u8 unk27d; // 0x27D
+    u16 unk27e; // 0x27E size:0x2
+    u16 tempoLimit; // 0x280 size:0x2
+    s16 unk282; // 0x282 size:0x2
+    s16 pitchLimit; // 0x284 size:0x2
+    u8 pad286[2]; // 0x286 size:0x2
+    void* unk288; // 0x288 size:0x4
+    void* unk28c; // 0x28C size:0x4
+    u8 unk290; // 0x290
+    u8 pad291[3]; // 0x291 size:0x3
+};
+
+struct GameplayScriptCmd {
+    u32 opcode;
+    union FreeType arg;
+};
+
+struct GameplayMicrogameInfo {
+    struct SubScene* scenes;
+    struct SongHeader* song;
+    u8 unk8; // callback
+    u8 targetScore;
+    u16 unkA; // always 0
+    char* name; // internal name?
+};
+
+struct GameplayStruct6c_4_0 {
+    u32 difficulty : 8;
+    u32 microgameID : 10;
+};
+
+struct GameplayStruct6c_4 {
+    struct GameplayStruct6c_4_0 unk0;
+    void* unk4;
+};
+
+struct MicrogameSequence {
+    u32 count : 8;
+    u32 unk0_9 : 1;
+    u32 retryOnFail : 23;
+    struct GameplayStruct6c_4* entries;
+};
+
+struct GameplayRandomMicrogameList {
+    u8 pad0[4];
+    struct GameplayStruct6c_4* unk4;
+};
+
+struct GameplayScriptSelectorList {
+    u8 unk0_1 : 4;
+    u8 unk0_5 : 4;
+    u8 pad1[3];
+    struct GameplayScriptSelector** unk4;
+};
+
+struct GameplayScriptSelector {
+    u8 unk0;
+    u8 pad1[3];
+    struct GameplayScriptSelector** unk4;
+    void** unk8;
+};
+
+enum GameplayScriptOpcode {
+    GP_CMD_PLAY_INTRO        = 0x01,
+    GP_CMD_PLAY_MICROGAMES   = 0x02,
+    GP_CMD_UNK_03            = 0x03,
+    GP_CMD_UNK_04            = 0x04,
+    GP_CMD_STAGE_CLEAR       = 0x05,
+    GP_CMD_GAME_OVER         = 0x06,
+    GP_CMD_SET_DIFFICULTY    = 0x07,
+    GP_CMD_SET_SELECTOR_MODE = 0x08,
+    GP_CMD_SET_SELECTOR_LIST = 0x09,
+    GP_CMD_SET_SELECTOR_CAT  = 0x0A,
+    GP_CMD_SET_SELECTOR_IDX  = 0x0B,
+    GP_CMD_SET_TEMPO         = 0x0C,
+    GP_CMD_SET_MAX_TEMPO     = 0x0D,
+    GP_CMD_CALL              = 0x0E,
+    GP_CMD_RETURN            = 0x0F,
+    GP_CMD_RESULTS           = 0x10,
+    GP_CMD_LABEL             = 0x11,
+    GP_CMD_GOTO              = 0x12,
+    GP_CMD_END               = 0x13,
+    GP_CMD_SET_UNK270        = 0x14,
+    GP_CMD_SET_PITCH         = 0x15,
+    GP_CMD_UNK_16            = 0x16,
+    GP_CMD_GOTO_IF_BEATEN    = 0x17,
+    GP_CMD_SET_TEMPO_LIMIT   = 0x18,
+    GP_CMD_ADD_TEMPO         = 0x19,
+    GP_CMD_ADD_MAX_TEMPO     = 0x1A,
+    GP_CMD_SET_UNK7_1        = 0x1B,
+    GP_CMD_TEMPO_RAMP        = 0x1C,
+    GP_CMD_SET_UNK282        = 0x1D,
+    GP_CMD_PITCH_RAMP        = 0x1E,
+    GP_CMD_SET_PITCH_LIMIT   = 0x1F,
+    GP_CMD_ADD_PITCH         = 0x20,
+};
+
+
+// DATA
+extern s16 D_030035E0;
+extern void* D_03005758;
+extern u8 D_03003634;
+extern s16 gCurrentScene;
+extern u8 D_03004394[]; 
+extern struct BeatscriptLocalData D_030049F0[];
+extern struct BeatscriptThread D_030048B8;
+extern u8 D_03003848;
+extern struct Beatscript D_083A4BE4[];
+extern void *D_083FBB44;
+extern void *D_083FBBBC;
+extern void** D_03006524;
+extern void** D_03006528;
+extern void** D_0300652C;
+extern struct GameplayScriptCmd D_083A4BCC[];
+extern void* D_083FBAF4;
+extern void* D_083FBB08;
+extern u16 D_0300363C;
+extern struct GameplayData_struct_0* D_03003628;
+extern struct GameplayMicrogameInfo gMicrogameTable[];
+
+// FUNCTIONS
+extern void gameplay_scene_run(void);
+extern u32 gameplay_check_collision(struct Vector2*, struct Rect*, struct Vector2*, struct Rect*);
+extern void gameplay_init_scene(void);
+extern void gameplay_stop_scene(void);
+extern u32 gameplay_update_scene(void);
+extern void gameplay_pause_dim_palettes(void);
+extern void gameplay_unpause_restore_palettes(void);
+extern void func_08008940(void);
+extern u32 func_08008AA4(u32);
+extern void func_08008AE8(struct GameplayScriptCmd*);
+extern struct GameplayScriptCmd* func_08008B18(void);
+extern void gameplay_stage_init(void);
+extern void func_08008DF4(void);
+extern void func_0800912C(u16);
+extern struct GameplayScriptCmd* func_080091B0(struct GameplayScriptCmd*, s32);
+extern u32 gameplay_run_script(void);
+
+// EXTERNS
+extern void rle_cache_free_all(void);
+extern u32 func_0800A098(void);
+extern void func_0800A200(u32);
+extern void func_0800A270(void);
+extern void func_0800CC9C(s32, s32);
+extern void func_0800CD94(s32, s32);
+extern void func_08008130(void);

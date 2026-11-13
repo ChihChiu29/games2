@@ -1,0 +1,22 @@
+.section .text
+.thumb
+.syntax unified
+.include "include/gba.inc"
+
+.thumb_func
+glabel func_08016FB0
+/* 08016FB0 */ PUSH {LR}
+/* 08016FB2 */ LDR R0, =gSpriteHandler
+/* 08016FB4 */ LDR R0, [R0]
+/* 08016FB6 */ MOVS R1, #1
+/* 08016FB8 */ BL sprite_id_delete
+/* 08016FBC */ MOVS R0, #1
+/* 08016FBE */ BL affine_param_free_by_owner
+/* 08016FC2 */ POP {R0}
+/* 08016FC4 */ BX R0
+
+.balign 4, 0
+_08016FC8:
+/* 08016FC8 */ @ literal emitted by .ltorg for '=...' 
+.ltorg
+.end

@@ -1,0 +1,28 @@
+# $NHDT-Header: NetHack 5.0 linuxdistro.501 2026/10/06_00:06:35 NetHack-5.0:1.4 $
+# Copyright (c) Michael Allison, 2026.
+# NetHack may be freely redistributed.  See license for details.
+# ===== linuxdistro ========
+
+LINUX_DISTRO=
+OS_ID := $(shell grep -E '^ID=' /etc/os-release 2>/dev/null | cut -d= -f2)
+#$(info OS_ID=$(OS_ID))
+
+ifeq ($(OS_ID),alpine)
+LINUX_DISTRO=alpine
+USE_SYSTEM_LUA=1
+CURSPKG = ncurses
+endif
+ifeq ($(OS_ID),debian)
+LINUX_DISTRO=debian
+USE_SYSTEM_LUA=1
+endif
+ifeq ($(OS_ID),ubuntu)
+LINUX_DISTRO=ubuntu
+USE_SYSTEM_LUA=1
+endif
+ifeq ($(OS_ID),fedora)
+LINUX_DISTRO=fedora
+USE_SYSTEM_LUA=1
+endif
+#$(info LINUX_DIST=$(LINUX_DISTRO))
+# ===== end of linuxdistro ========

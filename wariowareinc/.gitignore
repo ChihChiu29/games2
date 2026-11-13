@@ -1,0 +1,25 @@
+build/
+*.o
+*.elf
+*.map
+*.gba
+tools/agbcc/
+decomp.py
+*.bak
+ctx.c
+wrapper.py
+split.py
+progress.py
+tools/sample_extractor.py
+tools/find_archive_matches.py
+cleanup.py
+objdiff.json
+tools/objdiff-cli
+report.json
+
+# random helpers
+
+*.pyc
+tools/split_unknown_graphics.py
+
+tools/shaffy/*

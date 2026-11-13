@@ -8,10 +8,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -d "${SCRIPT_DIR}/NetHack/src" ]; then
     NH_DIR="${SCRIPT_DIR}/NetHack"
-    OUT_ZIP="${SCRIPT_DIR}/nethack-dos.zip"
+    OUT_ZIP="${SCRIPT_DIR}/nethack_dospure.zip"
 elif [ -d "${SCRIPT_DIR}/src" ]; then
     NH_DIR="${SCRIPT_DIR}"
-    OUT_ZIP="${SCRIPT_DIR}/nethack-dos.zip"
+    OUT_ZIP="${SCRIPT_DIR}/nethack_dospure.zip"
 else
     echo "Error: Could not locate NetHack source directory." >&2
     exit 1

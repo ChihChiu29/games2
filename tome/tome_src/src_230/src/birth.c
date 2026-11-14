@@ -2682,6 +2682,7 @@ static bool player_birth_aux_point(void)
 		/* Prompt XXX XXX XXX */
 		strnfmt(buf, 80, "Total Cost %2d/48.  Use 2/8 to move, 4/6 to modify, ESC to accept.", cost);
 		prt(buf, 0, 0);
+		prt("[Click stat row (L:+ / R:-), 'Q' to quit, 'S' to start over, or ESC to accept]", 23, 1);
 
 		/* Place cursor just after cost of current stat */
 		Term_gotoxy(col + 36, row + stat - 1);
@@ -3141,6 +3142,7 @@ static bool player_birth_aux()
 		}
 		display_player(1);
 		c_put_str(TERM_L_GREEN, "(Character Background - Edit Mode)", 15, 20);
+		prt("[Press ENTER or Click to accept Character Background]", 23, 14);
 		while (TRUE)
 		{
 			for (i = 0; i < 4; i++)

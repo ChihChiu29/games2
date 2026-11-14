@@ -1503,8 +1503,17 @@ void map_info(int y, int x, byte *ap, char *cp)
 
 					if (percent < 7)
 					{
-						c = I2D(percent);
-						if (percent < 3) a = TERM_L_RED;
+						if (graphics_mode == GRAPHICS_IBM && use_graphics)
+						{
+							if (percent < 3) a = TERM_L_RED;
+							else if (percent < 5) a = TERM_ORANGE;
+							else a = TERM_YELLOW;
+						}
+						else
+						{
+							c = I2D(percent);
+							if (percent < 3) a = TERM_L_RED;
+						}
 					}
 				}
 

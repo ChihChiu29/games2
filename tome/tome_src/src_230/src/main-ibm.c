@@ -341,6 +341,15 @@ static void activate_color_complex(void)
 		outportb(0x3c9, ((ibm_color_complex[i] >> 16) & 0xFF));
 	}
 
+	/* Disable VGA attribute blinking so all 16 background colors work cleanly */
+	{
+		union REGS r;
+		memset(&r, 0, sizeof(r));
+		r.w.ax = 0x1003;
+		r.w.bx = 0x0000;
+		int86(0x10, &r, &r);
+	}
+
 #else /* 1 */
 
 	/* Set the colors */
@@ -606,19 +615,38 @@ static void ibm_flush_row(int r)
 
 	if (mouse_present && r == mouse_y && mouse_x >= 0 && mouse_x < cols)
 	{
+		byte orig_ch = linebuf[mouse_x << 1];
 		byte orig_attr = linebuf[(mouse_x << 1) + 1];
-		byte fg = orig_attr & 0x0F;
+		byte orig_bg = (orig_attr >> 4) & 0x0F;
+		byte orig_fg = orig_attr & 0x0F;
 		byte new_attr;
 
-		if (use_color_complex)
+		/* On blank space, draw the pointer arrow glyph (0x10) so the cursor is always visible */
+		if (orig_ch == ' ' || orig_ch == 0)
 		{
-			/* Orange/Gold cursor background (3) with contrasting foreground */
-			byte new_fg = (fg == TERM_ORANGE || fg == TERM_YELLOW || fg == TERM_WHITE) ? TERM_DARK : TERM_WHITE;
-			new_attr = (byte)((TERM_ORANGE << 4) | new_fg);
+			linebuf[mouse_x << 1] = 0x10;
+			if (use_color_complex)
+			{
+				byte cur_bg = (orig_bg == TERM_BLUE) ? TERM_GREEN : TERM_BLUE;
+				new_attr = (byte)((cur_bg << 4) | TERM_YELLOW);
+			}
+			else
+			{
+				new_attr = 0x1E;
+			}
 		}
 		else
 		{
-			new_attr = (byte)(orig_attr ^ 0x7F);
+			if (use_color_complex)
+			{
+				byte cur_bg = (orig_bg == TERM_BLUE) ? TERM_GREEN : TERM_BLUE;
+				byte cur_fg = (orig_fg == TERM_YELLOW) ? TERM_WHITE : TERM_YELLOW;
+				new_attr = (byte)((cur_bg << 4) | cur_fg);
+			}
+			else
+			{
+				new_attr = (byte)(orig_attr ^ 0x7F);
+			}
 		}
 		linebuf[(mouse_x << 1) + 1] = new_attr;
 	}
@@ -631,7 +659,7 @@ static void ibm_flush_row(int r)
 #endif
 }
 
-/* Render the 12-button Command Dock onto Row 24 of VirtualScreen and flush */
+/* Render the 12-button Command Dock onto Row 24 of VirtualScreen (only when in-game) and flush */
 static void ibm_draw_dock(void)
 {
 	int b, x;
@@ -640,10 +668,22 @@ static void ibm_draw_dock(void)
 	if (!VirtualScreen) return;
 	dest = VirtualScreen + ((24 * cols) << 1);
 
+	/* Hide the Command Dock on title, savefile, and character creation screens */
+	if (!character_dungeon)
+	{
+		for (x = 0; x < cols; x++)
+		{
+			dest[x << 1] = ' ';
+			dest[(x << 1) + 1] = use_color_complex ? TERM_WHITE : 0x07;
+		}
+		ibm_flush_row(24);
+		return;
+	}
+
 	for (x = 0; x < cols; x++)
 	{
 		dest[x << 1] = ' ';
-		dest[(x << 1) + 1] = use_color_complex ? (byte)((TERM_L_DARK << 4) | TERM_WHITE) : 0x70;
+		dest[(x << 1) + 1] = use_color_complex ? (byte)((TERM_SLATE << 4) | TERM_WHITE) : 0x70;
 	}
 
 	for (b = 0; b < DOCK_BTN_COUNT; b++)
@@ -651,7 +691,7 @@ static void ibm_draw_dock(void)
 		bool hov = (mouse_present && mouse_y == 24 &&
 		            mouse_x >= dock_buttons[b].x0 && mouse_x <= dock_buttons[b].x1);
 		byte bg = use_color_complex ?
-		          (hov ? TERM_BLUE : ((b & 1) ? TERM_DARK : TERM_L_DARK)) :
+		          (hov ? TERM_BLUE : ((b & 1) ? TERM_DARK : TERM_SLATE)) :
 		          (hov ? 0x10 : ((b & 1) ? 0x00 : 0x70));
 		cptr s = dock_buttons[b].label;
 		int len = strlen(s);
@@ -691,9 +731,9 @@ static void ibm_mouse_init(void)
 	union REGS r;
 
 	memset(&r, 0, sizeof(r));
-	r.x.ax = 0x0000;
+	r.w.ax = 0x0000;
 	int86(0x33, &r, &r);
-	if (r.x.ax == 0)
+	if (r.w.ax == 0)
 	{
 		mouse_present = FALSE;
 		return;
@@ -702,19 +742,32 @@ static void ibm_mouse_init(void)
 	mouse_present = TRUE;
 
 	/* Horizontal range 0..639 */
-	r.x.ax = 0x0007;
-	r.x.cx = 0;
-	r.x.dx = 639;
+	memset(&r, 0, sizeof(r));
+	r.w.ax = 0x0007;
+	r.w.cx = 0;
+	r.w.dx = 639;
 	int86(0x33, &r, &r);
 
 	/* Vertical range 0..199 */
-	r.x.ax = 0x0008;
-	r.x.cx = 0;
-	r.x.dx = 199;
+	memset(&r, 0, sizeof(r));
+	r.w.ax = 0x0008;
+	r.w.cx = 0;
+	r.w.dx = 199;
 	int86(0x33, &r, &r);
 
 	/* Keep hardware cursor hidden; we draw a clean software cursor */
-	r.x.ax = 0x0002;
+	memset(&r, 0, sizeof(r));
+	r.w.ax = 0x0002;
+	int86(0x33, &r, &r);
+
+	/* Clear any pending button press counters */
+	memset(&r, 0, sizeof(r));
+	r.w.ax = 0x0005;
+	r.w.bx = 0;
+	int86(0x33, &r, &r);
+	memset(&r, 0, sizeof(r));
+	r.w.ax = 0x0005;
+	r.w.bx = 1;
 	int86(0x33, &r, &r);
 
 	mouse_x = 40;
@@ -730,12 +783,39 @@ static int ibm_mouse_poll(int *out_x, int *out_y)
 
 	if (!mouse_present) return (0);
 
-	r.x.ax = 0x0003;
+	memset(&r, 0, sizeof(r));
+	r.w.ax = 0x0003;
 	int86(0x33, &r, &r);
 
-	btns = (int)(r.x.bx & 0x03);
-	nx = (int)(r.x.cx / 8);
-	ny = (int)(r.x.dx / 8);
+	btns = (int)(r.w.bx & 0x03);
+	nx = (int)(r.w.cx / 8);
+	ny = (int)(r.w.dx / 8);
+
+	pressed = btns & (~mouse_last_buttons);
+	mouse_last_buttons = btns;
+
+	/* Also check latched button-press counters so fast clicks are never missed */
+	memset(&r, 0, sizeof(r));
+	r.w.ax = 0x0005;
+	r.w.bx = 0;
+	int86(0x33, &r, &r);
+	if (r.w.bx > 0)
+	{
+		pressed |= 1;
+		nx = (int)(r.w.cx / 8);
+		ny = (int)(r.w.dx / 8);
+	}
+
+	memset(&r, 0, sizeof(r));
+	r.w.ax = 0x0005;
+	r.w.bx = 1;
+	int86(0x33, &r, &r);
+	if (r.w.bx > 0)
+	{
+		pressed |= 2;
+		nx = (int)(r.w.cx / 8);
+		ny = (int)(r.w.dx / 8);
+	}
 
 	if (nx < 0) nx = 0;
 	if (nx >= cols) nx = cols - 1;
@@ -754,9 +834,6 @@ static int ibm_mouse_poll(int *out_x, int *out_y)
 		if (old_y != 24) ibm_flush_row(old_y);
 		if (mouse_y != old_y && mouse_y != 24) ibm_flush_row(mouse_y);
 	}
-
-	pressed = btns & (~mouse_last_buttons);
-	mouse_last_buttons = btns;
 
 	if (out_x) *out_x = mouse_x;
 	if (out_y) *out_y = mouse_y;
@@ -1085,12 +1162,12 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 	{
 		int hovered = -1;
 		int pressed, mx, my;
-		byte border_attr = use_color_complex ? (byte)((TERM_L_DARK << 4) | TERM_L_WHITE) : 0x7F;
+		byte border_attr = use_color_complex ? (byte)((TERM_SLATE << 4) | TERM_WHITE) : 0x7F;
 		byte title_attr  = use_color_complex ? (byte)((TERM_BLUE << 4) | TERM_YELLOW) : 0x1E;
-		byte body_attr   = use_color_complex ? (byte)((TERM_L_DARK << 4) | TERM_WHITE) : 0x70;
-		byte key_attr    = use_color_complex ? (byte)((TERM_L_DARK << 4) | TERM_YELLOW) : 0x7E;
+		byte body_attr   = use_color_complex ? (byte)((TERM_SLATE << 4) | TERM_WHITE) : 0x70;
+		byte key_attr    = use_color_complex ? (byte)((TERM_SLATE << 4) | TERM_YELLOW) : 0x7E;
 		byte sel_attr    = use_color_complex ? (byte)((TERM_BLUE << 4) | TERM_YELLOW) : 0x1F;
-		byte shadow_attr = use_color_complex ? (byte)((TERM_DARK << 4) | TERM_L_DARK) : 0x08;
+		byte shadow_attr = use_color_complex ? (byte)((TERM_DARK << 4) | TERM_SLATE) : 0x08;
 
 		if (mouse_y >= box_y + 2 && mouse_y < box_y + 2 + cnt &&
 		    mouse_x >= box_x && mouse_x < box_x + box_w)
@@ -1108,20 +1185,15 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 				char ch = ' ';
 				byte at = body_attr;
 
-				if (r == 0)
+				if (r == 0 || r == box_h - 1)
 				{
 					at = border_attr;
-					ch = (c == 0) ? (char)0xC9 : ((c == box_w - 1) ? (char)0xBB : (char)0xCD);
-				}
-				else if (r == box_h - 1)
-				{
-					at = border_attr;
-					ch = (c == 0) ? (char)0xC8 : ((c == box_w - 1) ? (char)0xBC : (char)0xCD);
+					ch = (c == 0 || c == box_w - 1) ? '+' : '-';
 				}
 				else if (c == 0 || c == box_w - 1)
 				{
 					at = border_attr;
-					ch = (char)0xBA;
+					ch = '|';
 				}
 				else if (r == 1)
 				{
@@ -1361,12 +1433,15 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 	return (FALSE);
 }
 
-/* Scan a screen row for a selectable menu letter like "a) ", "  a - 2) ", or "[a]" */
+/* Scan a screen row for a selectable menu letter like "a) ", "  a - 2) ", or "[a] " */
 static char ibm_scan_row_choice(int my, int mx, int btn)
 {
 	char line[81];
 	char row0[81];
-	int x, start_x;
+	int pos[16];
+	char chs[16];
+	int count = 0;
+	int x, i, best;
 
 	if (my < 1 || my >= 24) return (0);
 	ibm_vscr_line(my, line);
@@ -1380,43 +1455,50 @@ static char ibm_scan_row_choice(int my, int mx, int btn)
 		if (strstr(line, "-more-")) return (' ');
 	}
 
-	/* Scan leftward from mx, then rightward from 0, for "c) " or "c - d) " */
-	start_x = (mx < 78) ? mx : 77;
-	for (x = start_x; x >= 0; x--)
+	/* Collect all selectable option tokens on this row (handles both 1-col and multi-col grids) */
+	for (x = 0; x < 77 && count < 16; x++)
 	{
 		char c = line[x];
 		if ((isalnum((unsigned char)c)) &&
 		    (x == 0 || line[x - 1] == ' ' || line[x - 1] == '(' || line[x - 1] == '['))
 		{
-			if (line[x + 1] == ')' && line[x + 2] == ' ')
+			if ((line[x + 1] == ')' && line[x + 2] == ' ') ||
+			    (x > 0 && line[x - 1] == '[' && line[x + 1] == ']' && line[x + 2] == ' ') ||
+			    (line[x + 1] == ' ' && line[x + 2] == '-' && line[x + 3] == ' '))
 			{
-				if (btn == 2 && strstr(row0, "Descs") && islower((unsigned char)c))
-					return ((char)toupper((unsigned char)c));
-				return (c);
-			}
-			if (line[x + 1] == ' ' && line[x + 2] == '-' && line[x + 3] == ' ')
-			{
-				return (c);
+				pos[count] = x;
+				chs[count] = c;
+				count++;
 			}
 		}
 	}
-	for (x = 0; x < 78; x++)
+
+	if (count == 0) return (0);
+
+	if (count == 1)
 	{
-		char c = line[x];
-		if ((isalnum((unsigned char)c)) &&
-		    (x == 0 || line[x - 1] == ' ' || line[x - 1] == '(' || line[x - 1] == '['))
+		char c = chs[0];
+		if (mx >= pos[0] - 2 || pos[0] <= 16)
 		{
-			if (line[x + 1] == ')' && line[x + 2] == ' ')
-			{
-				if (btn == 2 && strstr(row0, "Descs") && islower((unsigned char)c))
-					return ((char)toupper((unsigned char)c));
-				return (c);
-			}
-			if (line[x + 1] == ' ' && line[x + 2] == '-' && line[x + 3] == ' ')
-			{
-				return (c);
-			}
+			if (btn == 2 && strstr(row0, "Descs") && islower((unsigned char)c))
+				return ((char)toupper((unsigned char)c));
+			return (c);
 		}
+		return (0);
+	}
+
+	/* Multi-column row: find the column containing mx */
+	best = 0;
+	for (i = 0; i < count; i++)
+	{
+		if (mx >= pos[i] - 1) best = i;
+	}
+	if (mx - pos[best] <= 22)
+	{
+		char c = chs[best];
+		if (btn == 2 && strstr(row0, "Descs") && islower((unsigned char)c))
+			return ((char)toupper((unsigned char)c));
+		return (c);
 	}
 
 	return (0);
@@ -1426,6 +1508,8 @@ static char ibm_scan_row_choice(int my, int mx, int btn)
 static bool ibm_handle_mouse_click(int mx, int my, int btn)
 {
 	char row0[81];
+	char line[81];
+	char line23[81];
 	int b;
 
 	/* 1. If running, resting, or repeating a command, any click aborts it */
@@ -1443,11 +1527,35 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 	}
 
 	ibm_vscr_line(0, row0);
+	ibm_vscr_line(my, line);
+	ibm_vscr_line(23, line23);
 
-	/* 3. Yes/No confirmation prompt on Row 0 or in a message box */
-	if (strstr(row0, "[y/n]") || strstr(row0, "(y/n)"))
+	/* 3. Yes/No confirmation prompt on Row 0 or on the clicked row (e.g. "Use quick start (y/n)?") */
+	if (strstr(row0, "[y/n]") || strstr(row0, "(y/n)") ||
+	    strstr(line, "[y/n]") || strstr(line, "(y/n)"))
 	{
-		Term_keypress((btn == 1) ? 'y' : 'n');
+		const char *yn = strstr(line, "(y/n)");
+		if (!yn) yn = strstr(line, "[y/n]");
+		if (!yn && my == 0)
+		{
+			yn = strstr(row0, "(y/n)");
+			if (!yn) yn = strstr(row0, "[y/n]");
+		}
+		if (btn == 2)
+		{
+			Term_keypress('n');
+			return (TRUE);
+		}
+		if (yn)
+		{
+			int yn_x = (int)(yn - ((my == 0 && yn >= row0 && yn < row0 + 81) ? row0 : line));
+			if (mx >= yn_x + 3 && mx <= yn_x + 4)
+			{
+				Term_keypress('n');
+				return (TRUE);
+			}
+		}
+		Term_keypress('y');
 		return (TRUE);
 	}
 
@@ -1546,9 +1654,10 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 		return (FALSE);
 	}
 
-	/* 6. Command Dock on Row 24 */
+	/* 6. Command Dock on Row 24 (only active when in-game) */
 	if (my == 24)
 	{
+		if (!character_dungeon) return (FALSE);
 		for (b = 0; b < DOCK_BTN_COUNT; b++)
 		{
 			if (mx >= dock_buttons[b].x0 && mx <= dock_buttons[b].x1)
@@ -1579,12 +1688,194 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 		return (FALSE);
 	}
 
-	/* 7. Menus, Item Selection, Spell Lists, Stores, Character Birth (!inkey_flag or character_icky or command_see) */
+	/* 7. Menus, Item Selection, Spell Lists, Stores, Options, Character Birth */
 	if (!inkey_flag || character_icky || command_see || !character_dungeon)
 	{
 		char ch;
+		char line11[81], line15[81], line20[81];
+		ibm_vscr_line(11, line11);
+		ibm_vscr_line(15, line15);
+		ibm_vscr_line(20, line20);
 
-		/* Right-click in menus (unless right-clicking a spell for its description) cancels/exits */
+		/* 7a. Options toggle screen ("RET to advance, y/n to set") */
+		if (strstr(row0, "RET to advance"))
+		{
+			if (btn == 2)
+			{
+				Term_keypress(ESCAPE);
+				return (TRUE);
+			}
+			if (my == 0)
+			{
+				const char *p_esc = strstr(row0, "ESC");
+				const char *p_yn  = strstr(row0, "y/n");
+				if (p_esc && mx >= (int)(p_esc - row0) - 2)
+				{
+					Term_keypress(ESCAPE);
+					return (TRUE);
+				}
+				if (p_yn && mx >= (int)(p_yn - row0) && mx <= (int)(p_yn - row0) + 10)
+				{
+					Term_keypress((mx >= (int)(p_yn - row0) + 2) ? 'n' : 'y');
+					return (TRUE);
+				}
+				Term_keypress('\r');
+				return (TRUE);
+			}
+			if (my >= 2 && my <= 22 && line[48] == ':')
+			{
+				int cur_r = -1, n_opt = 0, r_idx;
+				for (r_idx = 2; r_idx <= 22; r_idx++)
+				{
+					char rline[81];
+					ibm_vscr_line(r_idx, rline);
+					if (rline[48] == ':')
+					{
+						if ((VirtualScreen[((r_idx * cols) << 1) + 1] & 0x0F) == TERM_L_BLUE)
+							cur_r = r_idx;
+						n_opt++;
+					}
+				}
+				if (cur_r >= 2 && n_opt > 0)
+				{
+					int steps = (my - cur_r + n_opt) % n_opt;
+					int s_i;
+					for (s_i = 0; s_i < steps; s_i++) Term_keypress('2');
+					Term_keypress((line[50] == 'y') ? 'n' : 'y');
+					Term_keypress('8');
+					return (TRUE);
+				}
+			}
+			if (my == 5 && strstr(line, "frequency"))
+			{
+				Term_keypress('f');
+				return (TRUE);
+			}
+			return (FALSE);
+		}
+
+		/* 7b. Point-based stat allocation screen ("Total Cost xx/48") */
+		if (strstr(row0, "Total Cost "))
+		{
+			if (my == 0)
+			{
+				Term_keypress(ESCAPE);
+				return (TRUE);
+			}
+			if (my == 23)
+			{
+				const char *p_q   = strstr(line23, "'Q'");
+				const char *p_s   = strstr(line23, "'S'");
+				const char *p_esc = strstr(line23, "ESC");
+				if (p_esc && mx >= (int)(p_esc - line23) - 3)
+					Term_keypress(ESCAPE);
+				else if (p_s && mx >= (int)(p_s - line23) - 1 && mx <= (int)(p_s - line23) + 16)
+					Term_keypress('S');
+				else if (p_q && mx >= (int)(p_q - line23) - 1 && mx <= (int)(p_q - line23) + 12)
+					Term_keypress('Q');
+				else
+					Term_keypress(ESCAPE);
+				return (TRUE);
+			}
+			if (my >= 2 && my <= 7)
+			{
+				int cur_stat = Term->scr->cy - 2;
+				int target_stat = my - 2;
+				if (cur_stat >= 0 && cur_stat <= 5)
+				{
+					int steps = (target_stat - cur_stat + 6) % 6;
+					int s_i;
+					for (s_i = 0; s_i < steps; s_i++) Term_keypress('2');
+					Term_keypress((btn == 2) ? '4' : '6');
+					return (TRUE);
+				}
+			}
+			if (btn == 2)
+			{
+				Term_keypress(ESCAPE);
+				return (TRUE);
+			}
+			return (FALSE);
+		}
+
+		/* 7c. Autoroller / Stat Roll screen ("['r' to reroll, ... or ESC to accept]") */
+		if (strstr(line11, "Hit ESC to abort"))
+		{
+			Term_keypress(ESCAPE);
+			return (TRUE);
+		}
+		if (strstr(line23, "to reroll"))
+		{
+			if (btn == 2)
+			{
+				Term_keypress(ESCAPE);
+				return (TRUE);
+			}
+			if (my == 23)
+			{
+				const char *p_prev = strstr(line23, "'p'");
+				const char *p_hist = strstr(line23, "'h'");
+				const char *p_esc  = strstr(line23, "ESC");
+				if (p_esc && mx >= (int)(p_esc - line23) - 3)
+					Term_keypress(ESCAPE);
+				else if (p_hist && mx >= (int)(p_hist - line23) - 1)
+					Term_keypress('h');
+				else if (p_prev && mx >= (int)(p_prev - line23) - 1)
+					Term_keypress('p');
+				else
+					Term_keypress('r');
+				return (TRUE);
+			}
+			if (my >= 15 && my <= 21)
+			{
+				Term_keypress('h');
+				return (TRUE);
+			}
+			return (FALSE);
+		}
+
+		/* 7d. Character Background Edit Mode */
+		if (strstr(line15, "Character Background - Edit Mode"))
+		{
+			Term_keypress((btn == 2) ? ESCAPE : '\r');
+			return (TRUE);
+		}
+
+		/* 7e. Text / Number input prompts (askfor_aux / get_name) */
+		if (strstr(line23, "Enter the name of") ||
+		    strstr(line23, "Enter your player's name") ||
+		    strstr(line20, "Number of quests?") ||
+		    strstr(row0, "Quantity ("))
+		{
+			Term_keypress((btn == 2) ? ESCAPE : '\r');
+			return (TRUE);
+		}
+
+		/* 7f. Final character confirmation prompt ("['Q' to suicide, 'S' to start over, or ESC to continue]") */
+		if (strstr(line23, "ESC to continue") || strstr(line23, "to start over"))
+		{
+			if (btn == 2 || my != 23)
+			{
+				Term_keypress(ESCAPE);
+				return (TRUE);
+			}
+			{
+				const char *p_q   = strstr(line23, "'Q'");
+				const char *p_s   = strstr(line23, "'S'");
+				const char *p_esc = strstr(line23, "ESC");
+				if (p_esc && mx >= (int)(p_esc - line23) - 3)
+					Term_keypress(ESCAPE);
+				else if (p_s && mx >= (int)(p_s - line23) - 1)
+					Term_keypress('S');
+				else if (p_q && mx <= (int)(p_q - line23) + 15)
+					Term_keypress('Q');
+				else
+					Term_keypress(ESCAPE);
+				return (TRUE);
+			}
+		}
+
+		/* 7g. Right-click in menus (unless right-clicking a spell for its description) cancels/exits */
 		if (btn == 2)
 		{
 			ch = ibm_scan_row_choice(my, mx, 2);
@@ -1597,7 +1888,60 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 			return (TRUE);
 		}
 
-		/* Row 0 prompt shortcuts ('/', '-', '*') */
+		/* 7h. Inline keywords on clicked row ('* for random', '= for options', '? for help', 'Q' to quit, 'S' to restart, etc.) */
+		{
+			const char *p_rand = strstr(line, "* for");
+			const char *p_opt  = strstr(line, "= for");
+			const char *p_help = strstr(line, "'?' for help");
+			const char *p_quit = strstr(line, "'Q' to quit");
+			const char *p_rest = strstr(line, "'S' to restart");
+			const char *p_ret  = strstr(line, "Return to select");
+			const char *p_bs   = strstr(line, "Backspace to delete");
+			const char *p_escq = strstr(line, "Esc to quit");
+
+			if (p_opt && mx >= (int)(p_opt - line) - 1 && mx <= (int)(p_opt - line) + 14)
+			{
+				Term_keypress('=');
+				return (TRUE);
+			}
+			if (p_rand && mx >= (int)(p_rand - line) - 1 && mx <= (int)(p_rand - line) + 18)
+			{
+				Term_keypress('*');
+				return (TRUE);
+			}
+			if (p_help && mx >= (int)(p_help - line) - 1 && mx <= (int)(p_help - line) + 13)
+			{
+				Term_keypress('?');
+				return (TRUE);
+			}
+			if (p_quit && mx >= (int)(p_quit - line) - 1 && mx <= (int)(p_quit - line) + 12)
+			{
+				Term_keypress('Q');
+				return (TRUE);
+			}
+			if (p_rest && mx >= (int)(p_rest - line) - 1 && mx <= (int)(p_rest - line) + 15)
+			{
+				Term_keypress('S');
+				return (TRUE);
+			}
+			if (p_ret && mx >= (int)(p_ret - line) && mx <= (int)(p_ret - line) + 16)
+			{
+				Term_keypress('\r');
+				return (TRUE);
+			}
+			if (p_bs && mx >= (int)(p_bs - line) && mx <= (int)(p_bs - line) + 19)
+			{
+				Term_keypress('\010');
+				return (TRUE);
+			}
+			if (p_escq)
+			{
+				Term_keypress(ESCAPE);
+				return (TRUE);
+			}
+		}
+
+		/* Row 0 prompt shortcuts ('/', '-', '*', '?') */
 		if (my == 0)
 		{
 			char c0 = ibm_vscr_char(mx, 0);
@@ -1628,14 +1972,27 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 			return (TRUE);
 		}
 
-		/* Any other click on a "[Press any key to continue]" or birth/title screen advances */
+		/* Click on "[Press any key to continue]" or initial news/title screen advances */
 		{
-			char line23[81];
-			ibm_vscr_line(23, line23);
-			if (strstr(line23, "Press any key") || strstr(row0, "Press any key") || !character_dungeon)
+			char line1[81], line6[81];
+			ibm_vscr_line(1, line1);
+			ibm_vscr_line(6, line6);
+			if (strstr(line23, "Press any key") || strstr(row0, "Press any key") ||
+			    strstr(line, "Press any key") || strstr(line, "-more-"))
 			{
 				Term_keypress(' ');
 				return (TRUE);
+			}
+			/* Title/News splash screen (before begin_screen or player_birth) */
+			if (!character_dungeon && !strstr(line1, "Welcome to") && !strstr(line6, "New Character"))
+			{
+				char line2[81];
+				ibm_vscr_line(2, line2);
+				if (!strstr(line2, "Name  :"))
+				{
+					Term_keypress(' ');
+					return (TRUE);
+				}
 			}
 		}
 
@@ -1900,6 +2257,10 @@ static errr Term_xtra_ibm_event(int v)
 	{
 		/* Blocking wait for keyboard or mouse event */
 		ibm_draw_dock();
+		if (mouse_present && mouse_y != 24)
+		{
+			ibm_flush_row(mouse_y);
+		}
 		while (!bioskey(1))
 		{
 			if (mouse_present)
@@ -2050,8 +2411,14 @@ static errr Term_xtra_ibm(int n, int v)
 
 # endif  /* USE_WAT */
 
-			/* Keep the Command Dock on Row 24 visible */
+			/* Keep the Command Dock on Row 24 visible (if in-game) */
 			ibm_draw_dock();
+
+			/* Keep mouse cursor visible */
+			if (mouse_present && mouse_y != 24)
+			{
+				ibm_flush_row(mouse_y);
+			}
 
 # endif  /* USE_VIRTUAL */
 
@@ -2570,7 +2937,7 @@ void enable_graphic_font(const char *font)
 	*/
 	dblock.d.eax = 0x1100;          /* BIOS function -- set font */
 	dblock.d.ebx = 0x1000;          /* bh = size of a letter; bl = 0 (reserved) */
-	dblock.d.ecx = 0x00FF;          /* Last character in font */
+	dblock.d.ecx = 0x0100;          /* Number of characters in font (all 256) */
 	dblock.x.es = seg;             /* Pointer to font segment */
 	dblock.d.ebp = 0x0000;          /* Pointer to font offset */
 

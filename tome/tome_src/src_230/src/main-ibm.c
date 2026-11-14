@@ -942,7 +942,7 @@ typedef struct ibm_ctx_item
 
 static void ibm_add_ctx(ibm_ctx_item *items, int *cnt, cptr label, int action, char cmd, int dir)
 {
-	if (*cnt >= 14) return;
+	if (*cnt >= 20) return;
 	strncpy(items[*cnt].label, label, 43);
 	items[*cnt].label[43] = '\0';
 	items[*cnt].action = action;
@@ -967,7 +967,7 @@ static void ibm_vscr_putstr(int x, int y, cptr s, byte attr)
 /* Display and run the interactive popup Context Menu for map grid (gy, gx) */
 static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 {
-	ibm_ctx_item items[14];
+	ibm_ctx_item items[20];
 	int cnt = 0;
 	char title[48];
 	cave_type *c_ptr = NULL;
@@ -1026,7 +1026,7 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 		ibm_add_ctx(items, &cnt, "Wait 1 turn (,)", CTX_RAW_CMD, ',', 0);
 		ibm_add_ctx(items, &cnt, "Rest until healed (R)", CTX_REST_HEAL, 'R', 0);
 		ibm_add_ctx(items, &cnt, "Search surroundings (s)", CTX_RAW_CMD, 's', 0);
-		ibm_add_ctx(items, &cnt, "Cast spell / Skill (m)", CTX_CAST_SPELL, 'm', 0);
+		ibm_add_ctx(items, &cnt, "Look around (l)", CTX_RAW_CMD, 'l', 0);
 		ibm_add_ctx(items, &cnt, "Wear / Wield equipment (w)", CTX_RAW_CMD, 'w', 0);
 		ibm_add_ctx(items, &cnt, "Take off equipment (t)", CTX_RAW_CMD, 't', 0);
 		ibm_add_ctx(items, &cnt, "Drop item (d)", CTX_RAW_CMD, 'd', 0);
@@ -1433,6 +1433,203 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 	return (FALSE);
 }
 
+/* Display and run the comprehensive 2-column [+]More Commands menu (excludes dock shortcuts) */
+static bool ibm_show_more_menu(void)
+{
+	typedef struct
+	{
+		char key;
+		cptr label;
+		char cmd;
+		bool is_rest;
+	} more_item_type;
+
+	static const more_item_type more_items[30] =
+	{
+		/* Left column (15 items) */
+		{ 'a', "Rest until healed (R)",    'R',     TRUE  },
+		{ 'b', "Wait 1 turn (,)",          ',',     FALSE },
+		{ 'c', "Search surroundings (s)",  's',     FALSE },
+		{ 'd', "Toggle search mode (S)",   'S',     FALSE },
+		{ 'e', "Look around (l)",          'l',     FALSE },
+		{ 'f', "Full dungeon map (M)",     'M',     FALSE },
+		{ 'g', "Locate player (L)",        'L',     FALSE },
+		{ 'h', "Wear / Wield item (w)",    'w',     FALSE },
+		{ 'i', "Take off item (t)",        't',     FALSE },
+		{ 'j', "Drop item (d)",            'd',     FALSE },
+		{ 'k', "Destroy item (k)",         'k',     FALSE },
+		{ 'l', "Eat food (E)",             'E',     FALSE },
+		{ 'm', "Fuel light source (F)",    'F',     FALSE },
+		{ 'n', "Throw item (v)",           'v',     FALSE },
+		{ 'o', "Inspect item (I)",         'I',     FALSE },
+		/* Right column (15 items) */
+		{ 'p', "Use skill / power (m)",    'm',     FALSE },
+		{ 'q', "Racial / Class power (U)", 'U',     FALSE },
+		{ 'r', "Activate artifact (A)",    'A',     FALSE },
+		{ 's', "Special abilities (N)",    'N',     FALSE },
+		{ 't', "Browse spellbooks (b)",    'b',     FALSE },
+		{ 'u', "Pray to god (p)",          'p',     FALSE },
+		{ 'v', "Pet commands (P)",         'P',     FALSE },
+		{ 'w', "Chat / Interact (Y)",      'Y',     FALSE },
+		{ 'x', "Character sheet (C)",      'C',     FALSE },
+		{ 'y', "Quest status (^Q)",        KTRL('Q'), FALSE },
+		{ 'z', "Knowledge / Lore (~)",     '~',     FALSE },
+		{ '1', "Message log (^P)",         KTRL('P'), FALSE },
+		{ '2', "Game options (=)",         '=',     FALSE },
+		{ '3', "Save game (^S)",           KTRL('S'), FALSE },
+		{ '4', "Save & Quit (^X)",         KTRL('X'), FALSE }
+	};
+
+	const int rows_per_col = 15;
+	const int box_x = 4, box_y = 4, box_w = 72, box_h = 18;
+	const int col_w = 34;
+	byte *saved_vscr;
+	int r, c, i;
+	int chosen = -1;
+
+	C_MAKE(saved_vscr, rows * cols * 2, byte);
+	memcpy(saved_vscr, VirtualScreen, rows * cols * 2);
+
+	while (TRUE)
+	{
+		int hovered = -1;
+		int pressed, mx, my;
+		byte border_attr = use_color_complex ? (byte)((TERM_SLATE << 4) | TERM_WHITE) : 0x7F;
+		byte title_attr  = use_color_complex ? (byte)((TERM_BLUE << 4) | TERM_YELLOW) : 0x1E;
+		byte body_attr   = use_color_complex ? (byte)((TERM_SLATE << 4) | TERM_WHITE) : 0x70;
+		byte key_attr    = use_color_complex ? (byte)((TERM_SLATE << 4) | TERM_YELLOW) : 0x7E;
+		byte sel_attr    = use_color_complex ? (byte)((TERM_BLUE << 4) | TERM_YELLOW) : 0x1F;
+		byte shadow_attr = use_color_complex ? (byte)((TERM_DARK << 4) | TERM_SLATE) : 0x08;
+
+		if (mouse_y >= box_y + 2 && mouse_y < box_y + 2 + rows_per_col &&
+		    mouse_x > box_x && mouse_x < box_x + box_w - 1)
+		{
+			int row_idx = mouse_y - (box_y + 2);
+			int col_idx = (mouse_x >= box_x + 2 + col_w) ? 1 : 0;
+			hovered = col_idx * rows_per_col + row_idx;
+		}
+
+		for (r = 0; r < box_h; r++)
+		{
+			int sy = box_y + r;
+			for (c = 0; c < box_w; c++)
+			{
+				int sx = box_x + c;
+				char ch = ' ';
+				byte at = body_attr;
+
+				if (r == 0 || r == box_h - 1)
+				{
+					at = border_attr;
+					ch = (c == 0 || c == box_w - 1) ? '+' : '-';
+				}
+				else if (c == 0 || c == box_w - 1)
+				{
+					at = border_attr;
+					ch = '|';
+				}
+				else if (r == 1)
+				{
+					at = title_attr;
+					ch = ' ';
+				}
+				VirtualScreen[((sy * cols + sx) << 1)] = (byte)ch;
+				VirtualScreen[((sy * cols + sx) << 1) + 1] = at;
+			}
+			if (box_x + box_w < cols && r > 0)
+				VirtualScreen[((sy * cols + box_x + box_w) << 1) + 1] = shadow_attr;
+		}
+		if (box_y + box_h < 24)
+		{
+			for (c = 1; c <= box_w && (box_x + c) < cols; c++)
+				VirtualScreen[(((box_y + box_h) * cols + box_x + c) << 1) + 1] = shadow_attr;
+		}
+
+		ibm_vscr_putstr(box_x + 2, box_y + 1, "More Commands (not on bottom dock)  -  [a-z, 1-4, ESC=cancel]", title_attr);
+
+		for (i = 0; i < 30; i++)
+		{
+			int col_idx = i / rows_per_col;
+			int row_idx = i % rows_per_col;
+			int sx = box_x + 2 + col_idx * (col_w + 1);
+			int sy = box_y + 2 + row_idx;
+			bool is_hov = (i == hovered);
+			byte row_at = is_hov ? sel_attr : body_attr;
+			byte badge_at = is_hov ? sel_attr : key_attr;
+			char badge[6];
+
+			for (c = 0; c < col_w; c++)
+			{
+				VirtualScreen[((sy * cols + sx + c) << 1)] = ' ';
+				VirtualScreen[((sy * cols + sx + c) << 1) + 1] = row_at;
+			}
+			sprintf(badge, "[%c] ", more_items[i].key);
+			ibm_vscr_putstr(sx, sy, badge, badge_at);
+			ibm_vscr_putstr(sx + 4, sy, more_items[i].label, row_at);
+		}
+
+		for (r = box_y; r <= box_y + box_h && r < 24; r++)
+			ibm_flush_row(r);
+
+		if (bioskey(1))
+		{
+			int k = bioskey(0x10) & 0xFF;
+			if (k == ESCAPE || k == ' ')
+			{
+				chosen = -1;
+				break;
+			}
+			for (i = 0; i < 30; i++)
+			{
+				if (tolower(k) == more_items[i].key)
+				{
+					chosen = i;
+					break;
+				}
+			}
+			if (chosen >= 0) break;
+		}
+
+		pressed = ibm_mouse_poll(&mx, &my);
+		if (pressed & 1)
+		{
+			if (my >= box_y + 2 && my < box_y + 2 + rows_per_col &&
+			    mx > box_x && mx < box_x + box_w - 1)
+			{
+				int row_idx = my - (box_y + 2);
+				int col_idx = (mx >= box_x + 2 + col_w) ? 1 : 0;
+				chosen = col_idx * rows_per_col + row_idx;
+			}
+			break;
+		}
+		else if (pressed & 2)
+		{
+			chosen = -1;
+			break;
+		}
+
+		delay(10);
+	}
+
+	memcpy(VirtualScreen, saved_vscr, rows * cols * 2);
+	C_FREE(saved_vscr, rows * cols * 2, byte);
+	for (r = 0; r < 24; r++) ibm_flush_row(r);
+	ibm_draw_dock();
+
+	if (chosen < 0 || chosen >= 30) return (FALSE);
+
+	mouse_cmd_raw = TRUE;
+	if (more_items[chosen].is_rest)
+	{
+		ibm_send_keys("R*\r");
+	}
+	else
+	{
+		Term_keypress(more_items[chosen].cmd);
+	}
+	return (TRUE);
+}
+
 /* Scan a screen row for a selectable menu letter like "a) ", "  a - 2) ", or "[a] " */
 static char ibm_scan_row_choice(int my, int mx, int btn)
 {
@@ -1532,14 +1729,20 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 
 	/* 3. Yes/No confirmation prompt on Row 0 or on the clicked row (e.g. "Use quick start (y/n)?") */
 	if (strstr(row0, "[y/n]") || strstr(row0, "(y/n)") ||
-	    strstr(line, "[y/n]") || strstr(line, "(y/n)"))
+	    strstr(row0, "[Y/N]") || strstr(row0, "(Y/N)") ||
+	    strstr(line, "[y/n]") || strstr(line, "(y/n)") ||
+	    strstr(line, "[Y/N]") || strstr(line, "(Y/N)"))
 	{
 		const char *yn = strstr(line, "(y/n)");
 		if (!yn) yn = strstr(line, "[y/n]");
+		if (!yn) yn = strstr(line, "(Y/N)");
+		if (!yn) yn = strstr(line, "[Y/N]");
 		if (!yn && my == 0)
 		{
 			yn = strstr(row0, "(y/n)");
 			if (!yn) yn = strstr(row0, "[y/n]");
+			if (!yn) yn = strstr(row0, "(Y/N)");
+			if (!yn) yn = strstr(row0, "[Y/N]");
 		}
 		if (btn == 2)
 		{
@@ -1670,7 +1873,7 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 				}
 				if (dock_buttons[b].cmd == '+')
 				{
-					return (ibm_show_context_menu(p_ptr->py, p_ptr->px, mx, 22));
+					return (ibm_show_more_menu());
 				}
 				else if (dock_buttons[b].cmd == 'm')
 				{
@@ -1960,13 +2163,25 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 		ch = ibm_scan_row_choice(my, mx, btn);
 		if (ch)
 		{
-			/* If inside a store at top-level command prompt and clicking a store stock row (6..17), buy it */
-			if (character_icky && inkey_flag && my >= 6 && my <= 17 && islower((unsigned char)ch))
+			/* If inside a store at top-level command prompt and clicking a store stock row (6..17), buy/get it */
+			if (character_icky && my >= 6 && my <= 17 && islower((unsigned char)ch))
 			{
-				mouse_cmd_raw = TRUE;
-				Term_keypress('g');
-				Term_keypress(ch);
-				return (TRUE);
+				char line22[81];
+				ibm_vscr_line(22, line22);
+				if (strstr(line22, "Purchase an item"))
+				{
+					mouse_cmd_raw = TRUE;
+					Term_keypress('p');
+					Term_keypress(ch);
+					return (TRUE);
+				}
+				if (strstr(line22, "Get an item"))
+				{
+					mouse_cmd_raw = TRUE;
+					Term_keypress('g');
+					Term_keypress(ch);
+					return (TRUE);
+				}
 			}
 			Term_keypress(ch);
 			return (TRUE);

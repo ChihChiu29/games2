@@ -270,7 +270,7 @@ function fill_learned_spells(sch_filter)
 	for bi, b in __learned_book_list do
 		if school_book[b] then
 			for si, s in school_book[b] do
-				if not seen[s] and get_level(s, 50, 0) > 0 then
+				if s and s >= 0 and __tmp_spells[s] and not seen[s] and get_level(s, 50, 0) > 0 then
 					ok = nil
 					if sch_filter < 0 then
 						ok = 1
@@ -369,35 +369,42 @@ function print_book(book, spl, obj)
 		school_book[book] = {spl}
 	end
 
+	if not school_book[book] then
+		prt(format("   %-20s%-16s Level Cost Fail Info", "Name", "School"), 1, x)
+		return y
+	end
+
 	-- Parse all spells
 	for index, s in school_book[book] do
-		local color = TERM_L_DARK
-		local lvl, na = get_level_school(s, 50, -50)
-		local xx, sch_str
+		if s and s >= 0 and __tmp_spells[s] then
+			local color = TERM_L_DARK
+			local lvl, na = get_level_school(s, 50, -50)
+			local xx, sch_str
 
-		if is_ok_spell(s, obj) then
-			if get_mana(s) > get_power(s) then color = TERM_ORANGE
-			else color = TERM_L_GREEN end
-		end
-		
-		xx = nil
-		sch_str = ""
-		for index, sch in __spell_school[s] do
-			if xx then
-				sch_str = sch_str.."/"..school(sch).name
-			else
-				xx = 1
-				sch_str = sch_str..school(sch).name
+			if is_ok_spell(s, obj) then
+				if get_mana(s) > get_power(s) then color = TERM_ORANGE
+				else color = TERM_L_GREEN end
 			end
-		end
+			
+			xx = nil
+			sch_str = ""
+			for index, sch in __spell_school[s] do
+				if xx then
+					sch_str = sch_str.."/"..school(sch).name
+				else
+					xx = 1
+					sch_str = sch_str..school(sch).name
+				end
+			end
 
-		if na then
-			c_prt(color, format("%c) %-20s%-16s   %3s %4s %3d%s %s", size + strbyte("a"), spell(s).name, sch_str, na, get_mana(s), spell_chance(s), "%", __spell_info[s]()), y, x)
-		else
-			c_prt(color, format("%c) %-20s%-16s   %3d %4s %3d%s %s", size + strbyte("a"), spell(s).name, sch_str, lvl, get_mana(s), spell_chance(s), "%", __spell_info[s]()), y, x)
+			if na then
+				c_prt(color, format("%c) %-20s%-16s   %3s %4s %3d%s %s", size + strbyte("a"), spell(s).name, sch_str, na, get_mana(s), spell_chance(s), "%", __spell_info[s]()), y, x)
+			else
+				c_prt(color, format("%c) %-20s%-16s   %3d %4s %3d%s %s", size + strbyte("a"), spell(s).name, sch_str, lvl, get_mana(s), spell_chance(s), "%", __spell_info[s]()), y, x)
+			end
+			y = y + 1
+			size = size + 1
 		end
-		y = y + 1
-		size = size + 1
 	end
 	prt(format("   %-20s%-16s Level Cost Fail Info", "Name", "School"), 1, x)
 	return y
@@ -452,9 +459,15 @@ function book_spells_num(book)
 		return 1
 	end
 
+	if not school_book[book] then
+		return 0
+	end
+
 	-- Parse all spells
 	for index, s in school_book[book] do
-		size = size + 1
+		if s and s >= 0 and __tmp_spells[s] then
+			size = size + 1
+		end
 	end
 	return size
 end
@@ -463,15 +476,17 @@ function spell_x(book, spl, s)
 	if book == 255 then
 		return spl
 	else
-		local i, x, val
+		local i, val, x
 
-		i, val = next(school_book[book], nil)
+		if not school_book[book] then return -1 end
 		x = 0
-		while x < s do
-			i, val = next(school_book[book], i)
-			x = x + 1
+		for i, val in school_book[book] do
+			if val and val >= 0 and __tmp_spells[val] then
+				if x == s then return val end
+				x = x + 1
+			end
 		end
-		return val
+		return -1
 	end
 end
 

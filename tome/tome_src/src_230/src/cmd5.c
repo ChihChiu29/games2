@@ -2223,7 +2223,7 @@ u32b get_school_spell(cptr do_what, cptr check_fct, s16b force_book)
 				int sch_num = exec_lua("return get_learned_schools_num()");
 				if (sch_num > 0)
 				{
-					char sch_choice;
+					char sch_choice = 0;
 					char sch_prompt[80];
 
 					character_icky = TRUE;
@@ -2340,6 +2340,11 @@ u32b get_school_spell(cptr do_what, cptr check_fct, s16b force_book)
 	if (hack_force_spell == -1)
 	{
 		num = exec_lua(format("return book_spells_num(%d)", sval));
+		if (num <= 0)
+		{
+			msg_print("That book contains no spells.");
+			return -1;
+		}
 
 		/* Automatically display the spell list so it is visible and mouse-clickable */
 		redraw = TRUE;
@@ -2541,6 +2546,11 @@ void browse_school_spell(int book, int pval, object_type *o_ptr)
 	}
 
 	num = exec_lua(format("return book_spells_num(%d)", book));
+	if (num <= 0)
+	{
+		msg_print("That book contains no spells.");
+		return;
+	}
 
 	/* Build a prompt (accept all spells) */
 	strnfmt(out_val, 78, "(Spells %c-%c, ESC=exit) cast which spell? ",

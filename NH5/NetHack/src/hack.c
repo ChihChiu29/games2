@@ -1543,6 +1543,33 @@ is_valid_travelpt(coordxy x, coordxy y)
     return ret;
 }
 
+boolean
+can_travel_to(coordxy x, coordxy y)
+{
+    int tx = u.tx, ty = u.ty;
+    schar dx = u.dx, dy = u.dy;
+    boolean ret;
+
+    if (!isok(x, y) || u_at(x, y))
+        return FALSE;
+    if (is_valid_travelpt(x, y))
+        return TRUE;
+    if (glyph_at(x, y) == GLYPH_UNEXPLORED && !levl[x][y].seenv)
+        return FALSE;
+    u.tx = x;
+    u.ty = y;
+    ret = findtravelpath(TRAVP_GUESS);
+    if (gt.travelmap) {
+        selection_free(gt.travelmap, TRUE);
+        gt.travelmap = NULL;
+    }
+    u.tx = tx;
+    u.ty = ty;
+    u.dx = dx;
+    u.dy = dy;
+    return ret;
+}
+
 /* try to escape being stuck in a trapped state by walking out of it;
    return true iff moving should continue to intended destination
    (all failures and most successful escapes leave hero at original spot) */
@@ -2722,8 +2749,12 @@ domove_core(void)
             displaceu = FALSE;          /* involuntary swap */
 
     if (svc.context.travel) {
-        if (!findtravelpath(TRAVP_TRAVEL))
-            (void) findtravelpath(TRAVP_GUESS);
+        if (!findtravelpath(TRAVP_TRAVEL) && !findtravelpath(TRAVP_GUESS)) {
+            svc.context.travel1 = 0;
+            svc.context.move = 0;
+            nomul(0);
+            return;
+        }
         svc.context.travel1 = 0;
     }
 

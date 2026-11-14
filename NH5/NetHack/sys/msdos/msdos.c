@@ -546,16 +546,6 @@ dos_poskey(coordxy *x, coordxy *y, int *mod)
 #endif
             }
 
-            /* Dismiss --More-- prompt if active */
-            if (ttyDisplay && ttyDisplay->toplin == TOPLINE_NEED_MORE) {
-                dos_mouse_hide();
-#ifdef SIMULATE_CURSOR
-                if (iflags.grmode && cursor_flag)
-                    HideCursor();
-#endif
-                return (mev.pressed == 1) ? ' ' : '\033';
-            }
-
             /* Direction prompt ("In what direction?"): convert clicked tile
              * to a direction character relative to the hero */
             if (program_state.input_state == getdirInp) {

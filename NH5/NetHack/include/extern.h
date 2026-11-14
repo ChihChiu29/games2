@@ -1209,6 +1209,7 @@ extern void maybe_shuffle_customizations(void);
 /* ### hack.c ### */
 
 extern boolean is_valid_travelpt(coordxy, coordxy);
+extern boolean can_travel_to(coordxy, coordxy);
 extern anything *uint_to_any(unsigned);
 extern anything *long_to_any(long);
 extern anything *monst_to_any(struct monst *) NONNULLARG1;

@@ -1212,10 +1212,11 @@ set_item_state(
     int lineno,
     tty_menu_item *item)
 {
+    struct WinDesc *cw = wins[window];
     char ch = item->selected ? (item->count == -1L ? '+' : '#') : '-';
 
     HUPSKIP();
-    tty_curs(window, 4, lineno);
+    tty_curs(window, (cw && cw->offx) ? 5 : 4, lineno);
     term_start_attr(item->attr);
     if (item->color != NO_COLOR)
         term_start_color(item->color);
@@ -1499,8 +1500,30 @@ process_menu_window(winid window, struct WinDesc *cw)
                         *rp++ = curr->selector;
 
                     tty_curs(window, 1, page_lines);
-                    if (cw->offx)
+                    if (cw->offx) {
                         cl_end();
+                        if (page_lines == 1 && !curr->identifier.a_void
+                            && !curr->str[0]) {
+                            int k, dlen = (int) cw->cols - 2;
+
+                            toggle_menu_attr(TRUE, CLR_CYAN, ATR_NONE);
+                            (void) putchar('\xC3');
+                            ++ttyDisplay->curx;
+                            for (k = 0; k < dlen
+                                        && (int) ttyDisplay->curx
+                                               < (int) ttyDisplay->cols - 1;
+                                 k++) {
+                                (void) putchar('\xC4');
+                                ++ttyDisplay->curx;
+                            }
+                            toggle_menu_attr(FALSE, CLR_CYAN, ATR_NONE);
+                            continue;
+                        }
+                        toggle_menu_attr(TRUE, CLR_CYAN, ATR_NONE);
+                        (void) putchar('\xB3');
+                        toggle_menu_attr(FALSE, CLR_CYAN, ATR_NONE);
+                        ++ttyDisplay->curx;
+                    }
 
                     (void) putchar(' ');
                     ++ttyDisplay->curx;
@@ -1539,8 +1562,13 @@ process_menu_window(winid window, struct WinDesc *cw)
                         if (n == attr_n && (color != NO_COLOR
                                             || attr != ATR_NONE))
                             toggle_menu_attr(TRUE, color, attr);
-                        if (n == 2 && curr->identifier.a_void != 0
-                            && curr->selected) {
+                        if (attr_n == 4 && n == 0
+                            && curr->identifier.a_void != 0) {
+                            toggle_menu_attr(TRUE, CLR_YELLOW, ATR_BOLD);
+                            (void) putchar(*cp);
+                            toggle_menu_attr(FALSE, CLR_YELLOW, ATR_BOLD);
+                        } else if (n == 2 && curr->identifier.a_void != 0
+                                   && curr->selected) {
                             char c = (curr->count == -1L) ? '*' : '#';
 
                             /* all selected: '*' vs count selected: '#' */
@@ -1555,6 +1583,10 @@ process_menu_window(winid window, struct WinDesc *cw)
                             toggle_menu_attr(TRUE, gcolor, ATR_NONE);
                             (void) putchar(curr->glyphinfo.ttychar);
                             toggle_menu_attr(FALSE, gcolor, ATR_NONE);
+                        } else if (attr_n == 4 && n == 2 && *cp == '-') {
+                            toggle_menu_attr(TRUE, CLR_CYAN, ATR_NONE);
+                            (void) putchar('\xFA');
+                            toggle_menu_attr(FALSE, CLR_CYAN, ATR_NONE);
                         } else {
                             (void) putchar(*cp);
                         }
@@ -1618,6 +1650,13 @@ process_menu_window(winid window, struct WinDesc *cw)
 
             tty_curs(window, 1, page_lines);
             cl_end();
+            if (cw->offx) {
+                toggle_menu_attr(TRUE, CLR_CYAN, ATR_NONE);
+                (void) putchar('\xC0');
+                (void) putchar('\xC4');
+                toggle_menu_attr(FALSE, CLR_CYAN, ATR_NONE);
+                ttyDisplay->curx += 2;
+            }
 #ifdef MSDOS
             active_menu_cw = cw;
             active_page_start = page_start;
@@ -1627,7 +1666,9 @@ process_menu_window(winid window, struct WinDesc *cw)
             dmore(cw, resp);
         } else {
             /* just put the cursor back... */
-            tty_curs(window, (int) strlen(cw->morestr) + 2, page_lines);
+            tty_curs(window,
+                     (int) strlen(cw->morestr) + (cw->offx ? 4 : 2),
+                     page_lines);
 #ifdef MSDOS
             active_menu_cw = cw;
             active_page_start = page_start;
@@ -2728,7 +2769,7 @@ reverse(tty_menu_item *curr)
     return head;
 }
 
-static color_attr tty_menu_promptstyle = { NO_COLOR, ATR_NONE };
+static color_attr tty_menu_promptstyle = { CLR_YELLOW, ATR_BOLD };
 
 /*
  * End a menu in this window, window must a type NHW_MENU.  This routine
@@ -2817,9 +2858,9 @@ tty_end_menu(
         }
 
         /* cut off any lines that are too long */
-        len = strlen(curr->str) + 2; /* extra space at beg & end */
+        len = strlen(curr->str) + 3; /* extra space for border & padding */
         if (len > (int) ttyDisplay->cols) {
-            curr->str[ttyDisplay->cols - 2] = 0;
+            curr->str[ttyDisplay->cols - 3] = 0;
             len = ttyDisplay->cols;
         }
         if (len > cw->cols)

@@ -4437,7 +4437,49 @@ mcmd_addmenu(winid win, int act, const char *txt)
     anything any;
     int clr = NO_COLOR;
 
-    /* TODO: fixed letters for the menu entries? */
+    switch (act) {
+    case MCMD_ATTACK_NEXT2U:
+    case MCMD_KICK_DOOR:
+    case MCMD_THROW_OBJ:
+        clr = CLR_ORANGE;
+        break;
+    case MCMD_MOVE_DIR:
+    case MCMD_TRAVEL:
+    case MCMD_UP:
+    case MCMD_DOWN:
+    case MCMD_JUMP:
+    case MCMD_RIDE:
+    case MCMD_DISMOUNT:
+        clr = CLR_BRIGHT_GREEN;
+        break;
+    case MCMD_OPEN_DOOR:
+    case MCMD_CLOSE_DOOR:
+    case MCMD_LOCK_DOOR:
+    case MCMD_UNTRAP_DOOR:
+    case MCMD_UNTRAP_TRAP:
+    case MCMD_UNTRAP_HERE:
+    case MCMD_TALK:
+    case MCMD_PICKUP:
+    case MCMD_LOOT:
+    case MCMD_TIP:
+    case MCMD_EAT:
+    case MCMD_QUAFF:
+    case MCMD_DIP:
+    case MCMD_SIT:
+    case MCMD_OFFER:
+    case MCMD_CAST_SPELL:
+    case MCMD_PRAY:
+    case MCMD_ENGRAVE:
+    case MCMD_NAME:
+    case MCMD_APPLY_SADDLE:
+    case MCMD_REMOVE_SADDLE:
+        clr = CLR_BRIGHT_CYAN;
+        break;
+    default:
+        clr = CLR_WHITE;
+        break;
+    }
+
     any = cg.zeroany;
     any.a_int = act;
     add_menu(win, &nul_glyphinfo, &any, '\0', 0, ATR_NONE, clr, txt,
@@ -4638,6 +4680,9 @@ there_cmd_menu_next2u(
     } else if (test_move(u.ux, u.uy, x-u.ux, y-u.uy, TEST_MOVE)) {
         mcmd_addmenu(win, MCMD_MOVE_DIR, "Move here"); ++K;
         *act = MCMD_MOVE_DIR;
+    } else if (is_valid_travelpt(x, y)) {
+        mcmd_addmenu(win, MCMD_TRAVEL, "Move here"); ++K;
+        *act = MCMD_TRAVEL;
     }
 
     if (gi.invent)
@@ -4940,7 +4985,44 @@ there_cmd_menu(coordxy x, coordxy y, int mod)
         act_on_act(act, dx, dy);
         return '\0';
     } else {
-        end_menu(win, "What do you want to do?");
+        char titlebuf[BUFSZ];
+        struct monst *mtmp = m_at(x, y);
+        struct obj *otmp = vobj_at(x, y);
+        struct trap *ttmp = t_at(x, y);
+        schar typ = levl[x][y].typ;
+
+        if (mtmp && !canspotmon(mtmp))
+            mtmp = 0;
+
+        if (u_at(x, y)) {
+            Strcpy(titlebuf, "Actions: Yourself");
+        } else if (mtmp) {
+            Sprintf(titlebuf, "Actions: %s", upstart(mon_nam(mtmp)));
+        } else if (IS_DOOR(typ) && (levl[x][y].seenv || next2u(x, y))) {
+            int dm = levl[x][y].doormask;
+
+            Sprintf(titlebuf, "Actions: %s",
+                    (dm & (D_CLOSED | D_LOCKED)) ? "Closed door"
+                    : (dm & D_ISOPEN) ? "Open door" : "Doorway");
+        } else if (levl[x][y].glyph == objnum_to_glyph(BOULDER)) {
+            Strcpy(titlebuf, "Actions: Boulder");
+        } else if (ttmp && ttmp->tseen) {
+            Sprintf(titlebuf, "Actions: %s",
+                    defsyms[trap_to_defsym(ttmp->ttyp)].explanation);
+        } else if (otmp && (levl[x][y].seenv || next2u(x, y))) {
+            Sprintf(titlebuf, "Actions: %s",
+                    otmp->nexthere ? "Items here" : doname(otmp));
+        } else if (glyph_is_cmap(glyph_at(x, y))) {
+            int cidx = glyph_to_cmap(glyph_at(x, y));
+
+            Sprintf(titlebuf, "Actions: %s", defsyms[cidx].explanation);
+        } else {
+            Strcpy(titlebuf, "What do you want to do?");
+        }
+        if (!strncmp(titlebuf, "Actions: ", 9) && titlebuf[9])
+            titlebuf[9] = highc(titlebuf[9]);
+        titlebuf[38] = '\0';
+        end_menu(win, titlebuf);
         npick = select_menu(win, PICK_ONE, &picks);
         ch = '\033';
     }
@@ -4977,26 +5059,34 @@ click_to_cmd(coordxy x, coordxy y, int mod)
 staticfn int
 domouseaction(void)
 {
-    coordxy x, y;
+    coordxy tx = gc.clicklook_cc.x;
+    coordxy ty = gc.clicklook_cc.y;
+    coordxy x = tx - u.ux;
+    coordxy y = ty - u.uy;
     struct obj *o;
     struct monst *mtmp;
+    struct trap *ttmp;
     int dir;
 
-    x = gc.clicklook_cc.x - u.ux;
-    y = gc.clicklook_cc.y - u.uy;
+    if (!isok(tx, ty))
+        return ECMD_OK;
 
     if (flags.travelcmd) {
         if (abs(x) <= 1 && abs(y) <= 1) {
             x = sgn(x), y = sgn(y);
         } else {
-            iflags.travelcc.x = u.tx = u.ux + x;
-            iflags.travelcc.y = u.ty = u.uy + y;
-            cmdq_add_ec(CQ_CANNED, dotravel_target);
+            if (can_travel_to(tx, ty)) {
+                iflags.travelcc.x = u.tx = tx;
+                iflags.travelcc.y = u.ty = ty;
+                cmdq_add_ec(CQ_CANNED, dotravel_target);
+            } else {
+                (void) there_cmd_menu(tx, ty, CLICK_1);
+            }
             return ECMD_OK;
         }
 
         if (x == 0 && y == 0) {
-            /* here: perform most common self action */
+            /* here: perform most common self action, or open context menu */
             if (On_stairs_up(u.ux, u.uy)) {
                 cmdq_add_ec(CQ_CANNED, doup);
                 return ECMD_OK;
@@ -5022,14 +5112,14 @@ domouseaction(void)
                 cmdq_add_userinput(CQ_CANNED);
                 return ECMD_OK;
             } else {
-                cmdq_add_ec(CQ_CANNED, donull); /* just rest */
+                (void) here_cmd_menu();
                 return ECMD_OK;
             }
         }
 
-        /* directional commands on adjacent tile (u.ux + x, u.uy + y) */
+        /* directional commands on adjacent tile (tx, ty) */
         dir = xytodir(x, y);
-        mtmp = m_at(u.ux + x, u.uy + y);
+        mtmp = m_at(tx, ty);
         if (mtmp && !canspotmon(mtmp))
             mtmp = 0;
 
@@ -5040,36 +5130,93 @@ domouseaction(void)
                 cmdq_add_dir(CQ_CANNED, x, y, 0);
                 return ECMD_OK;
             }
+            if (mtmp->mtame && !test_move(u.ux, u.uy, x, y, TEST_MOVE)) {
+                (void) there_cmd_menu(tx, ty, CLICK_1);
+                return ECMD_OK;
+            }
             /* Hostile monster (attack) or tame pet (swap places) */
             cmdq_add_ec(CQ_CANNED, move_funcs[dir][MV_WALK]);
             return ECMD_OK;
         }
 
-        if (!test_move(u.ux, u.uy, x, y, TEST_MOVE)) {
-            if (IS_DOOR(levl[u.ux + x][u.uy + y].typ)) {
-                if (levl[u.ux + x][u.uy + y].doormask & D_CLOSED) {
-                    cmdq_add_ec(CQ_CANNED, doopen);
-                    cmdq_add_dir(CQ_CANNED, x, y, 0);
-                    return ECMD_OK;
-                }
-                if (levl[u.ux + x][u.uy + y].doormask & D_LOCKED) {
-                    if (carrying(SKELETON_KEY) || carrying(LOCK_PICK)
-                        || carrying(CREDIT_CARD)) {
-                        act_on_act(MCMD_LOCK_DOOR, x, y);
-                    } else {
-                        cmdq_add_ec(CQ_CANNED, dokick);
-                        cmdq_add_dir(CQ_CANNED, x, y, 0);
-                    }
-                    return ECMD_OK;
-                }
+        if (glyph_is_invisible(glyph_at(tx, ty))) {
+            cmdq_add_ec(CQ_CANNED, move_funcs[dir][MV_WALK]);
+            return ECMD_OK;
+        }
+
+        if (IS_DOOR(levl[tx][ty].typ)) {
+            int dm = levl[tx][ty].doormask;
+
+            if (dm & D_CLOSED) {
+                cmdq_add_ec(CQ_CANNED, doopen);
+                cmdq_add_dir(CQ_CANNED, x, y, 0);
+                return ECMD_OK;
             }
-            if (levl[u.ux + x][u.uy + y].typ <= SCORR) {
-                cmdq_add_ec(CQ_CANNED, dosearch);
+            if (dm & D_LOCKED) {
+                if (carrying(SKELETON_KEY) || carrying(LOCK_PICK)
+                    || carrying(CREDIT_CARD)) {
+                    act_on_act(MCMD_LOCK_DOOR, x, y);
+                } else {
+                    cmdq_add_ec(CQ_CANNED, dokick);
+                    cmdq_add_dir(CQ_CANNED, x, y, 0);
+                }
+                return ECMD_OK;
+            }
+            if (dm & D_ISOPEN) {
+                if (test_move(u.ux, u.uy, x, y, TEST_MOVE)) {
+                    cmdq_add_ec(CQ_CANNED, move_funcs[dir][MV_WALK]);
+                } else {
+                    /* Diagonal to an open door: can't step in diagonally,
+                     * so close it (the main valid action from a diagonal) */
+                    cmdq_add_ec(CQ_CANNED, doclose);
+                    cmdq_add_dir(CQ_CANNED, x, y, 0);
+                }
+                return ECMD_OK;
+            }
+        }
+
+        /* Boulder: push it */
+        if (levl[tx][ty].glyph == objnum_to_glyph(BOULDER)) {
+            cmdq_add_ec(CQ_CANNED, move_funcs[dir][MV_WALK]);
+            return ECMD_OK;
+        }
+
+        /* Known trap: open context menu (examine / disarm / step on it) */
+        ttmp = t_at(tx, ty);
+        if (ttmp && ttmp->tseen && ttmp->ttyp != VIBRATING_SQUARE) {
+            (void) there_cmd_menu(tx, ty, CLICK_1);
+            return ECMD_OK;
+        }
+
+        if (test_move(u.ux, u.uy, x, y, TEST_MOVE)) {
+            /* Avoid accidentally walking into visible water/lava */
+            if (is_pool_or_lava(tx, ty) && levl[tx][ty].seenv
+                && !test_move(u.ux, u.uy, x, y, TEST_TRAV)) {
+                (void) there_cmd_menu(tx, ty, CLICK_1);
                 return ECMD_OK;
             }
             cmdq_add_ec(CQ_CANNED, move_funcs[dir][MV_WALK]);
             return ECMD_OK;
         }
+
+        /* Can't step directly in 1 step, but reachable via short path
+         * (e.g. clicking a diagonal floor tile while standing in a doorway) */
+        if (is_valid_travelpt(tx, ty)) {
+            iflags.travelcc.x = u.tx = tx;
+            iflags.travelcc.y = u.ty = ty;
+            cmdq_add_ec(CQ_CANNED, dotravel_target);
+            return ECMD_OK;
+        }
+
+        /* Adjacent wall / stone / secret corridor: search */
+        if (levl[tx][ty].typ <= SCORR) {
+            cmdq_add_ec(CQ_CANNED, dosearch);
+            return ECMD_OK;
+        }
+
+        /* No obvious single action: open the context menu */
+        (void) there_cmd_menu(tx, ty, CLICK_1);
+        return ECMD_OK;
     } else {
         /* convert without using floating point, allowing sloppy clicking */
         if (x > 2 * abs(y))
@@ -5084,8 +5231,7 @@ domouseaction(void)
             x = sgn(x), y = sgn(y);
 
         if (x == 0 && y == 0) {
-            /* map click on player to "rest" command */
-            cmdq_add_ec(CQ_CANNED, donull);
+            (void) here_cmd_menu();
             return ECMD_OK;
         }
         dir = xytodir(x, y);

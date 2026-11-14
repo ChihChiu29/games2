@@ -5180,6 +5180,13 @@ void disturb(int stop_search, int unused_flag)
 		p_ptr->update |= (PU_TORCH);
 	}
 
+	/* Cancel mouse travel destination */
+	{
+		extern int mouse_dest_y, mouse_dest_x;
+		mouse_dest_y = 0;
+		mouse_dest_x = 0;
+	}
+
 	/* Cancel searching if requested */
 	if (stop_search && p_ptr->searching)
 	{

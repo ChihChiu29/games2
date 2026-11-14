@@ -480,6 +480,7 @@ void do_cmd_skill()
 
 	while (TRUE)
 	{
+		extern int ibm_skill_mode, ibm_skill_click_y, ibm_skill_click_x, ibm_skill_click_btn;
 		Term_get_size(&wid, &hgt);
 
 		/* Display list of skills */
@@ -487,7 +488,43 @@ void do_cmd_skill()
 		print_skills(table, max, sel, start);
 
 		/* Wait for user input */
+		ibm_skill_mode = 1;
+		ibm_skill_click_y = -1;
 		c = inkey();
+		ibm_skill_mode = 0;
+
+		if (ibm_skill_click_y >= 7 && ibm_skill_click_y < hgt)
+		{
+			int clicked_idx = start + (ibm_skill_click_y - 7);
+			if (clicked_idx >= 0 && clicked_idx < max)
+			{
+				if (ibm_skill_click_btn == 2)
+				{
+					sel = clicked_idx;
+					if (table[sel][0] != SKILL_MISC)
+						decrease_skill(table[sel][0], skill_invest);
+					continue;
+				}
+				else
+				{
+					bool was_sel = (sel == clicked_idx);
+					sel = clicked_idx;
+					if (has_child(table[sel][0]) && (!was_sel || ibm_skill_click_x < 55))
+					{
+						c = '\r';
+					}
+					else if (was_sel && table[sel][0] != SKILL_MISC)
+					{
+						increase_skill(table[sel][0], skill_invest);
+						continue;
+					}
+					else
+					{
+						continue;
+					}
+				}
+			}
+		}
 
 		/* Leave the skill screen */
 		if (c == ESCAPE) break;
@@ -755,12 +792,17 @@ static void print_skill_batch(int *p, cptr *p_desc, int start, int max, bool mod
 	prt(format("Select a skill (a-%c), @ to select by name, +/- to scroll:", I2A(j - 1)), 0, 0);
 }
 
+int ibm_skill_mode = 0;
+int ibm_skill_click_y = -1;
+int ibm_skill_click_x = -1;
+int ibm_skill_click_btn = 0;
+
 int do_cmd_activate_skill_aux()
 {
 	char which;
 	int max = 0, i, start = 0;
 	int ret;
-	bool mode = FALSE;
+	bool mode = TRUE;
 	int *p;
 	cptr *p_desc;
 

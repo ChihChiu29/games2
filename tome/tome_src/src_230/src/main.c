@@ -462,6 +462,11 @@ int main(int argc, char *argv[])
 
 
 
+#ifdef USE_IBM
+	/* Default to graphical tiles on DOS/IBM VGA */
+	arg_graphics = TRUE;
+#endif
+
 	/* Process the command line arguments */
 	for (i = 1; args && (i < argc); i++)
 	{
@@ -471,6 +476,12 @@ int main(int argc, char *argv[])
 		/* Analyze option */
 		switch (argv[i][1])
 		{
+		case 'A':
+		case 'a':
+			{
+				arg_graphics = FALSE;
+				break;
+			}
 		case 'N':
 		case 'n':
 			{

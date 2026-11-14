@@ -249,8 +249,79 @@ end
 -- Can we cast the spell ?
 function is_ok_spell(s, obj)
 	if get_level(s, 50, 0) == 0 then return nil end
-	if __tmp_spells[s].pval and obj.pval < __tmp_spells[s].pval then return nil end
+	if __tmp_spells[s].pval and obj and obj.tval == TV_INSTRUMENT and obj.pval < __tmp_spells[s].pval then return nil end
 	return 1
+end
+
+__learned_book_list = {
+	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+	20, 21, 22, 23, 24,
+	55, 56, 57, 58, 59, 60, 61
+}
+__learned_schools = {}
+
+-- Populate virtual book 254 with all learned spells (optionally filtered by school)
+function fill_learned_spells(sch_filter)
+	local bi, b, si, s, i, sch, ok
+	local seen = {}
+	local list = {}
+	local count = 0
+
+	for bi, b in __learned_book_list do
+		if school_book[b] then
+			for si, s in school_book[b] do
+				if not seen[s] and get_level(s, 50, 0) > 0 then
+					ok = nil
+					if sch_filter < 0 then
+						ok = 1
+					else
+						for i, sch in __spell_school[s] do
+							if sch == sch_filter then ok = 1 end
+						end
+					end
+					if ok then
+						seen[s] = 1
+						count = count + 1
+						list[count] = s
+					end
+				end
+			end
+		end
+	end
+	school_book[254] = list
+	return count
+end
+
+function get_learned_schools_num()
+	local sch, n, total
+	total = 0
+	__learned_schools = {}
+	for sch = 0, __schools_num - 1 do
+		if __schools[sch] then
+			n = fill_learned_spells(sch)
+			if n > 0 then
+				total = total + 1
+				__learned_schools[total] = { ["sch"] = sch, ["num"] = n }
+			end
+		end
+	end
+	return total
+end
+
+function print_learned_schools()
+	local i, entry, y
+	y = 2
+	prt("   School              Known Spells", 1, 0)
+	for i, entry in __learned_schools do
+		c_prt(TERM_L_GREEN, format("%c) %-20s (%d spells)", i - 1 + strbyte("a"), school(entry.sch).name, entry.num), y, 0)
+		y = y + 1
+	end
+end
+
+function fill_learned_spells_by_school_idx(idx)
+	local entry = __learned_schools[idx + 1]
+	if not entry then return 0 end
+	return fill_learned_spells(entry.sch)
 end
 
 -- Get the amount of mana(or power) needed

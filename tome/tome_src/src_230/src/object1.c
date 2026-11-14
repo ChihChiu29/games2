@@ -5492,6 +5492,9 @@ bool get_item_floor(int *cp, cptr pmt, cptr str, int mode)
 		}
 	}
 
+	/* Hack -- Always start out in "display" mode for mouse selection */
+	if (!done) command_see = TRUE;
+
 	/* Hack -- start out in "display" mode */
 	if (command_see)
 	{

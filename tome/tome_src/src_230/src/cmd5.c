@@ -121,7 +121,7 @@ void do_cmd_browse(void)
 
 	cptr q, s;
 
-	object_type *o_ptr;
+	object_type *o_ptr, forge;
 
 	/* Restrict choices to "useful" books */
 	item_tester_hook = item_tester_hook_browsable;
@@ -129,7 +129,19 @@ void do_cmd_browse(void)
 	/* Get an item */
 	q = "Browse which book? ";
 	s = "You have no books that you can read.";
-	if (!get_item(&item, q, s, (USE_INVEN | USE_EQUIP | USE_FLOOR))) return;
+	if (!get_item(&item, q, s, (USE_INVEN | USE_EQUIP | USE_FLOOR)))
+	{
+		if (exec_lua("return fill_learned_spells(-1)") > 0)
+		{
+			o_ptr = &forge;
+			object_wipe(o_ptr);
+			o_ptr->tval = TV_BOOK;
+			o_ptr->sval = 254;
+			o_ptr->pval = 99;
+			browse_school_spell(254, 99, o_ptr);
+		}
+		return;
+	}
 
 	/* Get the item (in the pack) */
 	if (item >= 0)
@@ -2192,47 +2204,109 @@ u32b get_school_spell(cptr do_what, cptr check_fct, s16b force_book)
 	hack_force_spell = -1;
 	hack_force_spell_obj = NULL;
 
+	if (repeat_pull(&tmp))
+	{
+		return tmp;
+	}
+
 	/* Ok do we need to ask for a book ? */
 	if (!force_book)
 	{
-		get_item_extra_hook = get_item_hook_find_spell;
-		item_tester_hook = hook_school_spellable;
-		sprintf(buf2, "You have no book to %s from", do_what);
-		sprintf(buf3, "%s from which book?", do_what);
-		if (!get_item(&item, buf3, buf2, USE_INVEN | USE_EQUIP | USE_EXTRA )) return -1;
+		bool use_virtual_book = FALSE;
 
-		/* Get the item (in the pack) */
-		if (item >= 0)
+		/* Learned spells can be cast without carrying the physical book */
+		if (strcmp(do_what, "copy") != 0)
 		{
-			o_ptr = &p_ptr->inventory[item];
+			int learned_num = exec_lua("return fill_learned_spells(-1)");
+			if (learned_num > 20)
+			{
+				int sch_num = exec_lua("return get_learned_schools_num()");
+				if (sch_num > 0)
+				{
+					char sch_choice;
+					char sch_prompt[80];
+
+					character_icky = TRUE;
+					Term_save();
+					exec_lua("print_learned_schools()");
+					strnfmt(sch_prompt, 78, "(Schools a-%c, *=Book, ESC=exit) %^s from which school? ",
+					        I2A(sch_num - 1), do_what);
+					while (get_com(sch_prompt, &sch_choice))
+					{
+						int sch_idx;
+						if (sch_choice == '*')
+						{
+							break;
+						}
+						sch_idx = (islower((unsigned char)sch_choice) ? A2I(sch_choice) :
+						           (isupper((unsigned char)sch_choice) ? A2I(tolower((unsigned char)sch_choice)) : -1));
+						if (sch_idx >= 0 && sch_idx < sch_num)
+						{
+							exec_lua(format("return fill_learned_spells_by_school_idx(%d)", sch_idx));
+							use_virtual_book = TRUE;
+							break;
+						}
+						bell();
+					}
+					Term_load();
+					character_icky = FALSE;
+					if (!use_virtual_book && sch_choice != '*')
+					{
+						return -1;
+					}
+				}
+			}
+			else if (learned_num > 0)
+			{
+				use_virtual_book = TRUE;
+			}
 		}
 
-		/* Get the item (on the floor) */
+		if (use_virtual_book)
+		{
+			o_ptr = &forge;
+			object_wipe(o_ptr);
+			o_ptr->tval = TV_BOOK;
+			o_ptr->sval = 254;
+			o_ptr->pval = 99;
+		}
 		else
 		{
-			o_ptr = &o_list[0 - item];
-		}
+			get_item_extra_hook = get_item_hook_find_spell;
+			item_tester_hook = hook_school_spellable;
+			sprintf(buf2, "You have no book to %s from", do_what);
+			sprintf(buf3, "%s from which book?", do_what);
+			if (!get_item(&item, buf3, buf2, USE_INVEN | USE_EQUIP | USE_EXTRA )) return -1;
 
-		object_flags(o_ptr, &f1, &f2, &f3, &f4, &f5, &esp);
+			/* Get the item (in the pack) */
+			if (item >= 0)
+			{
+				o_ptr = &p_ptr->inventory[item];
+			}
 
-		/* If it can be wielded, it must */
-		if ((wield_slot(o_ptr) != -1) && (item < INVEN_WIELD) && (f5 & TR5_WIELD_CAST))
-		{
-			msg_format("You cannot %s from that object, it must be wielded first.", do_what);
-			return -1;
+			/* Get the item (on the floor) */
+			else
+			{
+				o_ptr = &o_list[0 - item];
+			}
+
+			object_flags(o_ptr, &f1, &f2, &f3, &f4, &f5, &esp);
+
+			/* If it can be wielded, it must */
+			if ((wield_slot(o_ptr) != -1) && (item < INVEN_WIELD) && (f5 & TR5_WIELD_CAST))
+			{
+				msg_format("You cannot %s from that object, it must be wielded first.", do_what);
+				return -1;
+			}
 		}
 	}
 	else
 	{
 		o_ptr = &forge;
+		object_wipe(o_ptr);
 		o_ptr->tval = TV_BOOK;
 		o_ptr->sval = force_book;
 		o_ptr->pval = 0;
-	}
-
-	if (repeat_pull(&tmp))
-	{
-		return tmp;
 	}
 
 	/* Nothing chosen yet */
@@ -2266,6 +2340,12 @@ u32b get_school_spell(cptr do_what, cptr check_fct, s16b force_book)
 	if (hack_force_spell == -1)
 	{
 		num = exec_lua(format("return book_spells_num(%d)", sval));
+
+		/* Automatically display the spell list so it is visible and mouse-clickable */
+		redraw = TRUE;
+		character_icky = TRUE;
+		Term_save();
+		call_lua("print_book", "(d,d,O)", "d", sval, pval, o_ptr, &where);
 
 		/* Build a prompt (accept all spells) */
 		strnfmt(out_val, 78, "(Spells %c-%c, Descs %c-%c, *=List, ESC=exit) %^s which spell? ",

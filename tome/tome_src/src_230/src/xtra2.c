@@ -6169,9 +6169,20 @@ bool target_set(int mode)
 	/* Start near the player */
 	m = 0;
 
+	/* Enable mouse targeting mode 1 */
+	{
+		extern int ibm_target_mode, ibm_target_y, ibm_target_x;
+		ibm_target_mode = 1;
+		ibm_target_y = -1;
+		ibm_target_x = -1;
+	}
+
 	/* Interact */
 	while (!done)
 	{
+		extern int ibm_target_mode, ibm_target_y, ibm_target_x;
+		ibm_target_mode = 1;
+
 		/* Interesting grids */
 		if (flag && temp_n)
 		{
@@ -6195,6 +6206,38 @@ bool target_set(int mode)
 
 			/* Describe and Prompt */
 			query = target_set_aux(y, x, mode, info);
+
+			if (ibm_target_y >= 0 && ibm_target_x >= 0)
+			{
+				y = ibm_target_y;
+				x = ibm_target_x;
+				ibm_target_y = -1;
+				ibm_target_x = -1;
+				c_ptr = &cave[y][x];
+				if (query == 't')
+				{
+					if (target_able(c_ptr->m_idx))
+					{
+						health_track(c_ptr->m_idx);
+						target_who = c_ptr->m_idx;
+						target_row = y;
+						target_col = x;
+						done = TRUE;
+					}
+					else if (mode & TARGET_KILL)
+					{
+						target_who = -1;
+						target_row = y;
+						target_col = x;
+						done = TRUE;
+					}
+					else
+					{
+						flag = FALSE;
+					}
+					continue;
+				}
+			}
 
 			/* Cancel tracking */
 			/* health_track(0); */
@@ -6357,6 +6400,19 @@ bool target_set(int mode)
 			/* Describe and Prompt (enable "TARGET_LOOK") */
 			query = target_set_aux(y, x, mode | TARGET_LOOK, info);
 
+			if (ibm_target_y >= 0 && ibm_target_x >= 0)
+			{
+				y = ibm_target_y;
+				x = ibm_target_x;
+				ibm_target_y = -1;
+				ibm_target_x = -1;
+				c_ptr = &cave[y][x];
+				if (query == 't' && !(mode & TARGET_KILL))
+				{
+					continue;
+				}
+			}
+
 			/* Cancel tracking */
 			/* health_track(0); */
 
@@ -6479,6 +6535,10 @@ bool target_set(int mode)
 	}
 
 	/* Forget */
+	{
+		extern int ibm_target_mode;
+		ibm_target_mode = 0;
+	}
 	temp_n = 0;
 
 	/* Clear the top line */
@@ -6519,6 +6579,10 @@ bool target_set(int mode)
  *
  * Note that confusion over-rides any (explicit?) user choice.
  */
+int ibm_target_mode = 0;
+int ibm_target_y = -1;
+int ibm_target_x = -1;
+
 bool get_aim_dir(int *dp)
 {
 	int dir;
@@ -6529,7 +6593,7 @@ bool get_aim_dir(int *dp)
 
 #ifdef ALLOW_REPEAT /* TNB */
 
-	if (repeat_pull(dp))
+	if (!command_dir && repeat_pull(dp))
 	{
 		/* Confusion? */
 
@@ -6565,7 +6629,13 @@ bool get_aim_dir(int *dp)
 		}
 
 		/* Get a command (or Cancel) */
-		if (!get_com(p, &command)) break;
+		ibm_target_mode = 2;
+		if (!get_com(p, &command))
+		{
+			ibm_target_mode = 0;
+			break;
+		}
+		ibm_target_mode = 0;
 
 		/* Convert various keys to "standard" keys */
 		switch (command)
@@ -6662,7 +6732,7 @@ bool get_rep_dir(int *dp)
 
 #ifdef ALLOW_REPEAT /* TNB */
 
-	if (repeat_pull(dp))
+	if (!command_dir && repeat_pull(dp))
 	{
 		return (TRUE);
 	}
@@ -6681,7 +6751,13 @@ bool get_rep_dir(int *dp)
 		char ch;
 
 		/* Get a command (or Cancel) */
-		if (!get_com("Direction (Escape to cancel)? ", &ch)) break;
+		ibm_target_mode = 3;
+		if (!get_com("Direction (Escape to cancel)? ", &ch))
+		{
+			ibm_target_mode = 0;
+			break;
+		}
+		ibm_target_mode = 0;
 
 		/* Look up the direction */
 		dir = get_keymap_dir(ch);
@@ -7196,7 +7272,24 @@ bool tgt_pt(int *x, int *y)
 	while ((ch != 27) && (ch != ' '))
 	{
 		move_cursor_relative(*y, *x);
+		ibm_target_mode = 4;
+		ibm_target_y = -1;
+		ibm_target_x = -1;
 		ch = inkey();
+		ibm_target_mode = 0;
+		if (ibm_target_y >= 0 && ibm_target_x >= 0)
+		{
+			*y = ibm_target_y;
+			*x = ibm_target_x;
+			ibm_target_y = -1;
+			ibm_target_x = -1;
+			if (*x >= cur_wid - 1) *x = cur_wid - 2;
+			if (*x <= 0) *x = 1;
+			if (*y >= cur_hgt - 1) *y = cur_hgt - 2;
+			if (*y <= 0) *y = 1;
+			success = TRUE;
+			break;
+		}
 		switch (ch)
 		{
 		case 27:
@@ -7279,7 +7372,13 @@ bool get_hack_dir(int *dp)
 		}
 
 		/* Get a command (or Cancel) */
-		if (!get_com(p, &command)) break;
+		ibm_target_mode = 2;
+		if (!get_com(p, &command))
+		{
+			ibm_target_mode = 0;
+			break;
+		}
+		ibm_target_mode = 0;
 
 		/* Convert various keys to "standard" keys */
 		switch (command)

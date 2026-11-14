@@ -3659,6 +3659,11 @@ void pause_line(int row)
 */
 static char request_command_buffer[256];
 
+/*
+* Bypass keymap and preserve pre-set command_dir/command_arg for mouse commands
+*/
+bool mouse_cmd_raw = FALSE;
+
 
 
 /*
@@ -3749,6 +3754,15 @@ void request_command(int shopping)
 
 		/* Clear top line */
 		prt("", 0, 0);
+
+		/* Mouse-injected raw command: bypass keymaps and preserve command_dir/command_arg */
+		if (mouse_cmd_raw)
+		{
+			mouse_cmd_raw = FALSE;
+			if (!cmd) continue;
+			command_cmd = cmd;
+			break;
+		}
 
 
 		/* Command Count */

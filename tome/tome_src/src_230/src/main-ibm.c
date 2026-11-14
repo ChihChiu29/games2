@@ -551,6 +551,1263 @@ static void curs_set(int v)
 }
 
 
+/*
+ * =========================================================================
+ * DOS Mouse Interface, Software Cursor, Command Dock (Row 24),
+ * Menu Click Handler & Styled Right-Click Context Menu
+ * =========================================================================
+ */
+
+extern bool mouse_cmd_raw;
+extern int mouse_dest_y, mouse_dest_x;
+extern int mouse_find_step(int ty, int tx);
+extern int ibm_target_mode, ibm_target_y, ibm_target_x;
+extern int ibm_skill_mode, ibm_skill_click_y, ibm_skill_click_x, ibm_skill_click_btn;
+
+static bool mouse_present = FALSE;
+static int mouse_x = 40;
+static int mouse_y = 12;
+static int mouse_last_buttons = 0;
+
+typedef struct dock_btn_type
+{
+	int x0, x1;
+	cptr label;
+	char cmd;
+} dock_btn_type;
+
+/* 12-button Command Dock spanning all 80 columns of Row 24 (y = 24) */
+#define DOCK_BTN_COUNT 12
+static const dock_btn_type dock_buttons[DOCK_BTN_COUNT] =
+{
+	{  0,  5, "[i]Inv",  'i' },
+	{  6, 11, "[e]Eqp",  'e' },
+	{ 12, 17, "[g]Get",  'g' },
+	{ 18, 24, "[m]Cast", 'm' },
+	{ 25, 30, "[z]Rod",  'z' },
+	{ 31, 37, "[a]Wand", 'a' },
+	{ 38, 44, "[u]Staf", 'u' },
+	{ 45, 51, "[q]Quaf", 'q' },
+	{ 52, 58, "[r]Read", 'r' },
+	{ 59, 65, "[f]Fire", 'f' },
+	{ 66, 72, "[G]Skil", 'G' },
+	{ 73, 79, "[+]More", '+' }
+};
+
+/* Flush one row from VirtualScreen to physical screen, overlaying software mouse cursor */
+static void ibm_flush_row(int r)
+{
+#ifdef USE_VIRTUAL
+	byte linebuf[160];
+
+	if (r < 0 || r >= rows || !VirtualScreen) return;
+
+	memcpy(linebuf, VirtualScreen + ((r * cols) << 1), 160);
+
+	if (mouse_present && r == mouse_y && mouse_x >= 0 && mouse_x < cols)
+	{
+		byte orig_attr = linebuf[(mouse_x << 1) + 1];
+		byte fg = orig_attr & 0x0F;
+		byte new_attr;
+
+		if (use_color_complex)
+		{
+			/* Orange/Gold cursor background (3) with contrasting foreground */
+			byte new_fg = (fg == TERM_ORANGE || fg == TERM_YELLOW || fg == TERM_WHITE) ? TERM_DARK : TERM_WHITE;
+			new_attr = (byte)((TERM_ORANGE << 4) | new_fg);
+		}
+		else
+		{
+			new_attr = (byte)(orig_attr ^ 0x7F);
+		}
+		linebuf[(mouse_x << 1) + 1] = new_attr;
+	}
+
+# ifdef USE_WAT
+	memcpy(PhysicalScreen + (r * 160), linebuf, 160);
+# else
+	ScreenUpdateLine(linebuf, r);
+# endif
+#endif
+}
+
+/* Render the 12-button Command Dock onto Row 24 of VirtualScreen and flush */
+static void ibm_draw_dock(void)
+{
+	int b, x;
+	byte *dest;
+
+	if (!VirtualScreen) return;
+	dest = VirtualScreen + ((24 * cols) << 1);
+
+	for (x = 0; x < cols; x++)
+	{
+		dest[x << 1] = ' ';
+		dest[(x << 1) + 1] = use_color_complex ? (byte)((TERM_L_DARK << 4) | TERM_WHITE) : 0x70;
+	}
+
+	for (b = 0; b < DOCK_BTN_COUNT; b++)
+	{
+		bool hov = (mouse_present && mouse_y == 24 &&
+		            mouse_x >= dock_buttons[b].x0 && mouse_x <= dock_buttons[b].x1);
+		byte bg = use_color_complex ?
+		          (hov ? TERM_BLUE : ((b & 1) ? TERM_DARK : TERM_L_DARK)) :
+		          (hov ? 0x10 : ((b & 1) ? 0x00 : 0x70));
+		cptr s = dock_buttons[b].label;
+		int len = strlen(s);
+
+		for (x = dock_buttons[b].x0; x <= dock_buttons[b].x1; x++)
+		{
+			int idx = x - dock_buttons[b].x0;
+			char ch = (idx < len) ? s[idx] : ' ';
+			byte fg;
+
+			if (use_color_complex)
+			{
+				if (hov)
+					fg = TERM_YELLOW;
+				else if (idx <= 2)
+					fg = TERM_YELLOW;
+				else
+					fg = TERM_WHITE;
+				dest[x << 1] = (byte)ch;
+				dest[(x << 1) + 1] = (byte)((bg << 4) | fg);
+			}
+			else
+			{
+				fg = (idx <= 2) ? (VID_YELLOW | VID_BRIGHT) : VID_WHITE;
+				dest[x << 1] = (byte)ch;
+				dest[(x << 1) + 1] = (byte)(bg | fg);
+			}
+		}
+	}
+
+	ibm_flush_row(24);
+}
+
+/* Initialize DOS mouse driver via INT 33h */
+static void ibm_mouse_init(void)
+{
+	union REGS r;
+
+	memset(&r, 0, sizeof(r));
+	r.x.ax = 0x0000;
+	int86(0x33, &r, &r);
+	if (r.x.ax == 0)
+	{
+		mouse_present = FALSE;
+		return;
+	}
+
+	mouse_present = TRUE;
+
+	/* Horizontal range 0..639 */
+	r.x.ax = 0x0007;
+	r.x.cx = 0;
+	r.x.dx = 639;
+	int86(0x33, &r, &r);
+
+	/* Vertical range 0..199 */
+	r.x.ax = 0x0008;
+	r.x.cx = 0;
+	r.x.dx = 199;
+	int86(0x33, &r, &r);
+
+	/* Keep hardware cursor hidden; we draw a clean software cursor */
+	r.x.ax = 0x0002;
+	int86(0x33, &r, &r);
+
+	mouse_x = 40;
+	mouse_y = 12;
+	mouse_last_buttons = 0;
+}
+
+/* Poll mouse position and newly-pressed buttons (bit 0 = left, bit 1 = right) */
+static int ibm_mouse_poll(int *out_x, int *out_y)
+{
+	union REGS r;
+	int nx, ny, btns, pressed;
+
+	if (!mouse_present) return (0);
+
+	r.x.ax = 0x0003;
+	int86(0x33, &r, &r);
+
+	btns = (int)(r.x.bx & 0x03);
+	nx = (int)(r.x.cx / 8);
+	ny = (int)(r.x.dx / 8);
+
+	if (nx < 0) nx = 0;
+	if (nx >= cols) nx = cols - 1;
+	if (ny < 0) ny = 0;
+	if (ny >= rows) ny = rows - 1;
+
+	if (nx != mouse_x || ny != mouse_y)
+	{
+		int old_y = mouse_y;
+		mouse_x = nx;
+		mouse_y = ny;
+		if (old_y == 24 || mouse_y == 24)
+		{
+			ibm_draw_dock();
+		}
+		if (old_y != 24) ibm_flush_row(old_y);
+		if (mouse_y != old_y && mouse_y != 24) ibm_flush_row(mouse_y);
+	}
+
+	pressed = btns & (~mouse_last_buttons);
+	mouse_last_buttons = btns;
+
+	if (out_x) *out_x = mouse_x;
+	if (out_y) *out_y = mouse_y;
+	return (pressed);
+}
+
+/* Helper: read character on VirtualScreen at (x, y) */
+static char ibm_vscr_char(int x, int y)
+{
+	if (!VirtualScreen || x < 0 || x >= cols || y < 0 || y >= rows) return (' ');
+	return ((char)VirtualScreen[((y * cols + x) << 1)]);
+}
+
+/* Helper: read a line of text from VirtualScreen */
+static void ibm_vscr_line(int y, char *buf)
+{
+	int x;
+	for (x = 0; x < cols; x++)
+	{
+		char c = ibm_vscr_char(x, y);
+		/* Non-ASCII font tiles map to spaces for text matching */
+		buf[x] = ((unsigned char)c >= 32 && (unsigned char)c < 127) ? c : ' ';
+	}
+	buf[cols] = '\0';
+}
+
+/* Convert (dy, dx) into an 8-way keypad direction (1..9, never 5) */
+static int ibm_dir_from_delta(int dy, int dx)
+{
+	int ady = (dy < 0) ? -dy : dy;
+	int adx = (dx < 0) ? -dx : dx;
+	int sy, sx;
+
+	if (dy == 0 && dx == 0) return (0);
+
+	if (ady > adx * 2) sx = 0;
+	else sx = (dx > 0) ? 1 : ((dx < 0) ? -1 : 0);
+
+	if (adx > ady * 2) sy = 0;
+	else sy = (dy > 0) ? 1 : ((dy < 0) ? -1 : 0);
+
+	if (sy < 0 && sx < 0) return (7);
+	if (sy < 0 && sx == 0) return (8);
+	if (sy < 0 && sx > 0) return (9);
+	if (sy == 0 && sx < 0) return (4);
+	if (sy == 0 && sx > 0) return (6);
+	if (sy > 0 && sx < 0) return (1);
+	if (sy > 0 && sx == 0) return (2);
+	if (sy > 0 && sx > 0) return (3);
+	return (0);
+}
+
+/* Check if grid (y, x) has a chest object */
+static bool ibm_has_chest(int y, int x)
+{
+	s16b o_idx;
+	if (!in_bounds(y, x)) return (FALSE);
+	for (o_idx = cave[y][x].o_idx; o_idx; o_idx = o_list[o_idx].next_o_idx)
+	{
+		if (o_list[o_idx].tval == TV_CHEST) return (TRUE);
+	}
+	return (FALSE);
+}
+
+/* Enqueue a sequence of keys into Term */
+static void ibm_send_keys(cptr s)
+{
+	while (*s)
+	{
+		Term_keypress((unsigned char)(*s));
+		s++;
+	}
+}
+
+/* Trigger school spellcasting directly if the player has learned school spells */
+static void ibm_cast_or_skill(void)
+{
+	if (exec_lua("return fill_learned_spells(-1)") > 0)
+	{
+		command_arg = MKEY_SCHOOL;
+	}
+	mouse_cmd_raw = TRUE;
+	Term_keypress('m');
+}
+
+/* Context menu action IDs */
+#define CTX_NONE          0
+#define CTX_RAW_CMD       1
+#define CTX_DIR_CMD       2
+#define CTX_AIM_CMD       3
+#define CTX_BFS_TRAVEL    4
+#define CTX_REST_HEAL     5
+#define CTX_CAST_SPELL    6
+#define CTX_TARGET_MON    7
+#define CTX_TARGET_LOC    8
+#define CTX_MON_LORE      9
+#define CTX_EXAMINE_TILE 10
+
+typedef struct ibm_ctx_item
+{
+	char label[44];
+	int action;
+	char cmd;
+	int dir;
+} ibm_ctx_item;
+
+static void ibm_add_ctx(ibm_ctx_item *items, int *cnt, cptr label, int action, char cmd, int dir)
+{
+	if (*cnt >= 14) return;
+	strncpy(items[*cnt].label, label, 43);
+	items[*cnt].label[43] = '\0';
+	items[*cnt].action = action;
+	items[*cnt].cmd = cmd;
+	items[*cnt].dir = dir;
+	(*cnt)++;
+}
+
+/* Draw a styled string into VirtualScreen at (x, y) */
+static void ibm_vscr_putstr(int x, int y, cptr s, byte attr)
+{
+	int i;
+	if (!VirtualScreen || y < 0 || y >= rows) return;
+	for (i = 0; s[i] && (x + i) < cols; i++)
+	{
+		if (x + i < 0) continue;
+		VirtualScreen[((y * cols + x + i) << 1)] = (byte)s[i];
+		VirtualScreen[((y * cols + x + i) << 1) + 1] = attr;
+	}
+}
+
+/* Display and run the interactive popup Context Menu for map grid (gy, gx) */
+static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
+{
+	ibm_ctx_item items[14];
+	int cnt = 0;
+	char title[48];
+	cave_type *c_ptr = NULL;
+	monster_type *m_ptr = NULL;
+	bool has_mon = FALSE;
+	int dist = 0;
+	int dir = 0;
+	byte *saved_vscr;
+	int box_w, box_h, box_x, box_y;
+	int i, r, c;
+	int chosen = -1;
+
+	if (!p_ptr->wild_mode && !in_bounds(gy, gx)) return (FALSE);
+
+	if (!p_ptr->wild_mode)
+	{
+		c_ptr = &cave[gy][gx];
+		if (c_ptr->m_idx > 0 && m_list[c_ptr->m_idx].ml)
+		{
+			m_ptr = &m_list[c_ptr->m_idx];
+			has_mon = TRUE;
+		}
+		dist = distance(p_ptr->py, p_ptr->px, gy, gx);
+		dir = ibm_dir_from_delta(gy - p_ptr->py, gx - p_ptr->px);
+	}
+	else
+	{
+		dist = distance(p_ptr->py, p_ptr->px, gy, gx);
+		dir = ibm_dir_from_delta(gy - p_ptr->py, gx - p_ptr->px);
+	}
+
+	/* Build title and context-sensitive menu items */
+	if (gy == p_ptr->py && gx == p_ptr->px)
+	{
+		strcpy(title, "Player Actions (@)");
+		if (p_ptr->wild_mode)
+		{
+			ibm_add_ctx(items, &cnt, "Enter local area (>)", CTX_RAW_CMD, '>', 0);
+		}
+		else
+		{
+			if (c_ptr->o_idx)
+				ibm_add_ctx(items, &cnt, "Pick up item (g)", CTX_RAW_CMD, 'g', 0);
+			if (c_ptr->feat == FEAT_LESS || c_ptr->feat == FEAT_WAY_LESS ||
+			    c_ptr->feat == FEAT_SHAFT_UP || c_ptr->feat == FEAT_QUEST_UP || dun_level == 0)
+				ibm_add_ctx(items, &cnt, (dun_level == 0) ? "World wilderness map (<)" : "Ascend stairs (<)", CTX_RAW_CMD, '<', 0);
+			if (c_ptr->feat == FEAT_MORE || c_ptr->feat == FEAT_WAY_MORE ||
+			    c_ptr->feat == FEAT_SHAFT_DOWN || c_ptr->feat == FEAT_QUEST_DOWN ||
+			    c_ptr->feat == FEAT_QUEST_ENTER || c_ptr->feat == FEAT_QUEST_EXIT)
+				ibm_add_ctx(items, &cnt, "Descend / Enter (>)", CTX_RAW_CMD, '>', 0);
+			if (c_ptr->feat == FEAT_FOUNTAIN)
+				ibm_add_ctx(items, &cnt, "Drink from fountain (H)", CTX_RAW_CMD, 'H', 0);
+			if (c_ptr->feat >= FEAT_ALTAR_HEAD && c_ptr->feat <= FEAT_ALTAR_TAIL)
+				ibm_add_ctx(items, &cnt, "Pray / Sacrifice (O)", CTX_RAW_CMD, 'O', 0);
+		}
+		ibm_add_ctx(items, &cnt, "Wait 1 turn (,)", CTX_RAW_CMD, ',', 0);
+		ibm_add_ctx(items, &cnt, "Rest until healed (R)", CTX_REST_HEAL, 'R', 0);
+		ibm_add_ctx(items, &cnt, "Search surroundings (s)", CTX_RAW_CMD, 's', 0);
+		ibm_add_ctx(items, &cnt, "Cast spell / Skill (m)", CTX_CAST_SPELL, 'm', 0);
+		ibm_add_ctx(items, &cnt, "Wear / Wield equipment (w)", CTX_RAW_CMD, 'w', 0);
+		ibm_add_ctx(items, &cnt, "Take off equipment (t)", CTX_RAW_CMD, 't', 0);
+		ibm_add_ctx(items, &cnt, "Drop item (d)", CTX_RAW_CMD, 'd', 0);
+		ibm_add_ctx(items, &cnt, "Eat food (E)", CTX_RAW_CMD, 'E', 0);
+		ibm_add_ctx(items, &cnt, "Activate artifact (A)", CTX_RAW_CMD, 'A', 0);
+		ibm_add_ctx(items, &cnt, "Racial / Class power (U)", CTX_RAW_CMD, 'U', 0);
+		ibm_add_ctx(items, &cnt, "Character sheet (C)", CTX_RAW_CMD, 'C', 0);
+		ibm_add_ctx(items, &cnt, "Game options (=)", CTX_RAW_CMD, '=', 0);
+		ibm_add_ctx(items, &cnt, "Save game (Ctrl-S)", CTX_RAW_CMD, KTRL('S'), 0);
+	}
+	else if (has_mon)
+	{
+		char m_name[48];
+		monster_desc(m_name, m_ptr, 0x08);
+		m_name[0] = toupper((unsigned char)m_name[0]);
+		strncpy(title, m_name, 42);
+		title[42] = '\0';
+
+		if (dist == 1)
+			ibm_add_ctx(items, &cnt, "Attack / Interact", CTX_DIR_CMD, ';', dir);
+		ibm_add_ctx(items, &cnt, "Cast spell at monster", CTX_AIM_CMD, 'm', 5);
+		ibm_add_ctx(items, &cnt, "Fire ranged weapon (f)", CTX_AIM_CMD, 'f', 5);
+		ibm_add_ctx(items, &cnt, "Zap rod at monster (z)", CTX_AIM_CMD, 'z', 5);
+		ibm_add_ctx(items, &cnt, "Aim wand at monster (a)", CTX_AIM_CMD, 'a', 5);
+		ibm_add_ctx(items, &cnt, "Throw item at monster (v)", CTX_AIM_CMD, 'v', 5);
+		if (dist == 1)
+			ibm_add_ctx(items, &cnt, "Steal from monster (Z)", CTX_DIR_CMD, 'Z', dir);
+		ibm_add_ctx(items, &cnt, "Target monster (*)", CTX_TARGET_MON, 0, 0);
+		ibm_add_ctx(items, &cnt, "Monster lore & stats", CTX_MON_LORE, 0, 0);
+		if (dist > 1)
+			ibm_add_ctx(items, &cnt, "Walk toward monster", CTX_DIR_CMD, ';', dir);
+	}
+	else if (!p_ptr->wild_mode && dist == 1)
+	{
+		if (c_ptr->o_idx && o_list[c_ptr->o_idx].marked)
+		{
+			object_desc(title, &o_list[c_ptr->o_idx], TRUE, 0);
+			title[42] = '\0';
+		}
+		else if (c_ptr->info & (CAVE_MARK | CAVE_SEEN))
+		{
+			strncpy(title, f_name + f_info[c_ptr->feat].name, 42);
+			title[42] = '\0';
+		}
+		else
+		{
+			strcpy(title, "Adjacent Tile");
+		}
+
+		if ((c_ptr->feat >= FEAT_DOOR_HEAD && c_ptr->feat <= FEAT_DOOR_TAIL) || ibm_has_chest(gy, gx))
+			ibm_add_ctx(items, &cnt, "Open door / chest (o)", CTX_DIR_CMD, 'o', dir);
+		if (c_ptr->feat >= FEAT_DOOR_HEAD && c_ptr->feat <= FEAT_DOOR_TAIL)
+		{
+			ibm_add_ctx(items, &cnt, "Bash door (B)", CTX_DIR_CMD, 'B', dir);
+			ibm_add_ctx(items, &cnt, "Spike door (j)", CTX_DIR_CMD, 'j', dir);
+		}
+		if (c_ptr->feat == FEAT_OPEN || c_ptr->feat == FEAT_BROKEN)
+			ibm_add_ctx(items, &cnt, "Close door (c)", CTX_DIR_CMD, 'c', dir);
+		if ((c_ptr->info & CAVE_TRDT) && c_ptr->t_idx != 0)
+			ibm_add_ctx(items, &cnt, "Disarm trap (D)", CTX_DIR_CMD, 'D', dir);
+		if (cave_floor_bold(gy, gx) || c_ptr->feat == FEAT_TREES || c_ptr->feat == FEAT_SHOP)
+		{
+			ibm_add_ctx(items, &cnt, "Step here (;)", CTX_DIR_CMD, ';', dir);
+			ibm_add_ctx(items, &cnt, "Run this way (.)", CTX_DIR_CMD, '.', dir);
+		}
+		if (f_info[c_ptr->feat].flags1 & FF1_TUNNELABLE)
+			ibm_add_ctx(items, &cnt, "Tunnel / Dig (T)", CTX_DIR_CMD, 'T', dir);
+		ibm_add_ctx(items, &cnt, "Alter / Attack tile (+)", CTX_DIR_CMD, '+', dir);
+		ibm_add_ctx(items, &cnt, "Examine tile", CTX_EXAMINE_TILE, 0, 0);
+	}
+	else
+	{
+		if (p_ptr->wild_mode)
+		{
+			strcpy(title, "Wilderness Tile");
+			ibm_add_ctx(items, &cnt, "Walk toward here", CTX_DIR_CMD, ';', dir);
+			ibm_add_ctx(items, &cnt, "Enter local area (>)", CTX_RAW_CMD, '>', 0);
+		}
+		else
+		{
+			if (c_ptr->o_idx && o_list[c_ptr->o_idx].marked)
+			{
+				object_desc(title, &o_list[c_ptr->o_idx], TRUE, 0);
+				title[42] = '\0';
+			}
+			else if (c_ptr->info & (CAVE_MARK | CAVE_SEEN))
+			{
+				strncpy(title, f_name + f_info[c_ptr->feat].name, 42);
+				title[42] = '\0';
+			}
+			else
+			{
+				strcpy(title, "Dungeon Location");
+			}
+
+			if (mouse_find_step(gy, gx) > 0)
+				ibm_add_ctx(items, &cnt, "Travel here (Shortest path)", CTX_BFS_TRAVEL, '.', 0);
+			ibm_add_ctx(items, &cnt, "Run in this direction (.)", CTX_DIR_CMD, '.', dir);
+			ibm_add_ctx(items, &cnt, "Step in this direction (;)", CTX_DIR_CMD, ';', dir);
+			ibm_add_ctx(items, &cnt, "Cast spell at tile (m)", CTX_AIM_CMD, 'm', 5);
+			ibm_add_ctx(items, &cnt, "Fire / Shoot at tile (f)", CTX_AIM_CMD, 'f', 5);
+			ibm_add_ctx(items, &cnt, "Target this location (*)", CTX_TARGET_LOC, 0, 0);
+			ibm_add_ctx(items, &cnt, "View dungeon map (M)", CTX_RAW_CMD, 'M', 0);
+			ibm_add_ctx(items, &cnt, "Examine tile", CTX_EXAMINE_TILE, 0, 0);
+		}
+	}
+
+	if (cnt == 0) return (FALSE);
+
+	/* Compute menu box dimensions */
+	box_w = strlen(title) + 6;
+	for (i = 0; i < cnt; i++)
+	{
+		int w = strlen(items[i].label) + 7;
+		if (w > box_w) box_w = w;
+	}
+	if (box_w > 48) box_w = 48;
+	box_h = cnt + 3;
+
+	box_x = scr_x + 1;
+	box_y = scr_y;
+	if (box_x + box_w + 1 >= cols) box_x = scr_x - box_w;
+	if (box_x < 1) box_x = 1;
+	if (box_y + box_h >= 24) box_y = 23 - box_h;
+	if (box_y < 1) box_y = 1;
+
+	/* Save VirtualScreen */
+	C_MAKE(saved_vscr, rows * cols * 2, byte);
+	memcpy(saved_vscr, VirtualScreen, rows * cols * 2);
+
+	/* Modal interaction loop */
+	while (TRUE)
+	{
+		int hovered = -1;
+		int pressed, mx, my;
+		byte border_attr = use_color_complex ? (byte)((TERM_L_DARK << 4) | TERM_L_WHITE) : 0x7F;
+		byte title_attr  = use_color_complex ? (byte)((TERM_BLUE << 4) | TERM_YELLOW) : 0x1E;
+		byte body_attr   = use_color_complex ? (byte)((TERM_L_DARK << 4) | TERM_WHITE) : 0x70;
+		byte key_attr    = use_color_complex ? (byte)((TERM_L_DARK << 4) | TERM_YELLOW) : 0x7E;
+		byte sel_attr    = use_color_complex ? (byte)((TERM_BLUE << 4) | TERM_YELLOW) : 0x1F;
+		byte shadow_attr = use_color_complex ? (byte)((TERM_DARK << 4) | TERM_L_DARK) : 0x08;
+
+		if (mouse_y >= box_y + 2 && mouse_y < box_y + 2 + cnt &&
+		    mouse_x >= box_x && mouse_x < box_x + box_w)
+		{
+			hovered = mouse_y - (box_y + 2);
+		}
+
+		/* Draw menu box into VirtualScreen */
+		for (r = 0; r < box_h; r++)
+		{
+			int sy = box_y + r;
+			for (c = 0; c < box_w; c++)
+			{
+				int sx = box_x + c;
+				char ch = ' ';
+				byte at = body_attr;
+
+				if (r == 0)
+				{
+					at = border_attr;
+					ch = (c == 0) ? (char)0xC9 : ((c == box_w - 1) ? (char)0xBB : (char)0xCD);
+				}
+				else if (r == box_h - 1)
+				{
+					at = border_attr;
+					ch = (c == 0) ? (char)0xC8 : ((c == box_w - 1) ? (char)0xBC : (char)0xCD);
+				}
+				else if (c == 0 || c == box_w - 1)
+				{
+					at = border_attr;
+					ch = (char)0xBA;
+				}
+				else if (r == 1)
+				{
+					at = title_attr;
+					ch = ' ';
+				}
+
+				VirtualScreen[((sy * cols + sx) << 1)] = (byte)ch;
+				VirtualScreen[((sy * cols + sx) << 1) + 1] = at;
+			}
+			/* Right-edge drop shadow */
+			if (box_x + box_w < cols && r > 0)
+			{
+				VirtualScreen[((sy * cols + box_x + box_w) << 1) + 1] = shadow_attr;
+			}
+		}
+		/* Bottom-edge drop shadow */
+		if (box_y + box_h < 24)
+		{
+			for (c = 1; c <= box_w && (box_x + c) < cols; c++)
+			{
+				VirtualScreen[(((box_y + box_h) * cols + box_x + c) << 1) + 1] = shadow_attr;
+			}
+		}
+
+		/* Title text */
+		ibm_vscr_putstr(box_x + 2, box_y + 1, title, title_attr);
+
+		/* Menu items */
+		for (i = 0; i < cnt; i++)
+		{
+			int sy = box_y + 2 + i;
+			bool is_hov = (i == hovered);
+			byte row_at = is_hov ? sel_attr : body_attr;
+			byte badge_at = is_hov ? sel_attr : key_attr;
+			char badge[6];
+
+			for (c = 1; c < box_w - 1; c++)
+			{
+				VirtualScreen[((sy * cols + box_x + c) << 1)] = ' ';
+				VirtualScreen[((sy * cols + box_x + c) << 1) + 1] = row_at;
+			}
+
+			sprintf(badge, "[%c] ", 'a' + i);
+			ibm_vscr_putstr(box_x + 2, sy, badge, badge_at);
+			ibm_vscr_putstr(box_x + 6, sy, items[i].label, row_at);
+		}
+
+		for (r = box_y; r <= box_y + box_h && r < 24; r++)
+		{
+			ibm_flush_row(r);
+		}
+
+		/* Check keyboard */
+		if (bioskey(1))
+		{
+			int k = bioskey(0x10) & 0xFF;
+			if (k == ESCAPE || k == ' ')
+			{
+				chosen = -1;
+				break;
+			}
+			else if (k >= 'a' && k < 'a' + cnt)
+			{
+				chosen = k - 'a';
+				break;
+			}
+			else if (k >= 'A' && k < 'A' + cnt)
+			{
+				chosen = k - 'A';
+				break;
+			}
+			else if (k >= '1' && k <= '9' && (k - '1') < cnt)
+			{
+				chosen = k - '1';
+				break;
+			}
+		}
+
+		/* Check mouse */
+		pressed = ibm_mouse_poll(&mx, &my);
+		if (pressed & 1)
+		{
+			if (my >= box_y + 2 && my < box_y + 2 + cnt &&
+			    mx >= box_x && mx < box_x + box_w)
+			{
+				chosen = my - (box_y + 2);
+			}
+			break;
+		}
+		else if (pressed & 2)
+		{
+			chosen = -1;
+			break;
+		}
+
+		delay(10);
+	}
+
+	/* Restore VirtualScreen and flush */
+	memcpy(VirtualScreen, saved_vscr, rows * cols * 2);
+	C_FREE(saved_vscr, rows * cols * 2, byte);
+	for (r = 0; r < 24; r++) ibm_flush_row(r);
+	ibm_draw_dock();
+
+	if (chosen < 0 || chosen >= cnt) return (FALSE);
+
+	/* Execute selected context menu action */
+	switch (items[chosen].action)
+	{
+	case CTX_RAW_CMD:
+		mouse_cmd_raw = TRUE;
+		Term_keypress(items[chosen].cmd);
+		return (TRUE);
+
+	case CTX_DIR_CMD:
+		command_dir = items[chosen].dir;
+		mouse_cmd_raw = TRUE;
+		Term_keypress(items[chosen].cmd);
+		return (TRUE);
+
+	case CTX_AIM_CMD:
+		if (has_mon)
+		{
+			target_who = c_ptr->m_idx;
+			target_row = gy;
+			target_col = gx;
+			health_track(target_who);
+		}
+		else
+		{
+			target_who = -1;
+			target_row = gy;
+			target_col = gx;
+		}
+		command_dir = 5;
+		if (items[chosen].cmd == 'm')
+		{
+			ibm_cast_or_skill();
+		}
+		else
+		{
+			mouse_cmd_raw = TRUE;
+			Term_keypress(items[chosen].cmd);
+		}
+		return (TRUE);
+
+	case CTX_BFS_TRAVEL:
+		{
+			int step_dir = mouse_find_step(gy, gx);
+			if (step_dir > 0)
+			{
+				mouse_dest_y = gy;
+				mouse_dest_x = gx;
+				command_dir = step_dir;
+				mouse_cmd_raw = TRUE;
+				Term_keypress('.');
+				return (TRUE);
+			}
+			return (FALSE);
+		}
+
+	case CTX_REST_HEAL:
+		mouse_cmd_raw = TRUE;
+		ibm_send_keys("R*\r");
+		return (TRUE);
+
+	case CTX_CAST_SPELL:
+		ibm_cast_or_skill();
+		return (TRUE);
+
+	case CTX_TARGET_MON:
+		if (has_mon)
+		{
+			char m_name[80];
+			target_who = c_ptr->m_idx;
+			target_row = gy;
+			target_col = gx;
+			health_track(target_who);
+			monster_desc(m_name, m_ptr, 0x00);
+			msg_format("Targeted %s.", m_name);
+		}
+		return (FALSE);
+
+	case CTX_TARGET_LOC:
+		target_who = -1;
+		target_row = gy;
+		target_col = gx;
+		msg_format("Targeted location (%d, %d).", gy, gx);
+		return (FALSE);
+
+	case CTX_MON_LORE:
+		if (has_mon)
+		{
+			int mx2, my2;
+			character_icky = TRUE;
+			Term_save();
+			screen_roff(m_ptr->r_idx, m_ptr->ego, 0);
+			Term_fresh();
+			while (TRUE)
+			{
+				if (bioskey(1))
+				{
+					(void)bioskey(0x10);
+					break;
+				}
+				if (ibm_mouse_poll(&mx2, &my2)) break;
+				delay(10);
+			}
+			Term_load();
+			character_icky = FALSE;
+			Term_fresh();
+		}
+		return (FALSE);
+
+	case CTX_EXAMINE_TILE:
+		if (!p_ptr->wild_mode && c_ptr)
+		{
+			if (c_ptr->o_idx && o_list[c_ptr->o_idx].marked)
+			{
+				char o_name[80];
+				object_desc(o_name, &o_list[c_ptr->o_idx], TRUE, 3);
+				msg_format("You see %s (%s).", o_name, f_name + f_info[c_ptr->feat].name);
+			}
+			else if (c_ptr->info & (CAVE_MARK | CAVE_SEEN))
+			{
+				msg_format("You see %s.", f_name + f_info[c_ptr->feat].name);
+			}
+			else
+			{
+				msg_print("You see nothing there.");
+			}
+		}
+		return (FALSE);
+	}
+
+	return (FALSE);
+}
+
+/* Scan a screen row for a selectable menu letter like "a) ", "  a - 2) ", or "[a]" */
+static char ibm_scan_row_choice(int my, int mx, int btn)
+{
+	char line[81];
+	char row0[81];
+	int x, start_x;
+
+	if (my < 1 || my >= 24) return (0);
+	ibm_vscr_line(my, line);
+	ibm_vscr_line(0, row0);
+
+	/* Special store/building footer keywords on rows 18..23 */
+	if (my >= 18)
+	{
+		if (strstr(line, "ESC)") && mx < 16) return (ESCAPE);
+		if (strstr(line, "SPACE)") && mx < 20) return (' ');
+		if (strstr(line, "-more-")) return (' ');
+	}
+
+	/* Scan leftward from mx, then rightward from 0, for "c) " or "c - d) " */
+	start_x = (mx < 78) ? mx : 77;
+	for (x = start_x; x >= 0; x--)
+	{
+		char c = line[x];
+		if ((isalnum((unsigned char)c)) &&
+		    (x == 0 || line[x - 1] == ' ' || line[x - 1] == '(' || line[x - 1] == '['))
+		{
+			if (line[x + 1] == ')' && line[x + 2] == ' ')
+			{
+				if (btn == 2 && strstr(row0, "Descs") && islower((unsigned char)c))
+					return ((char)toupper((unsigned char)c));
+				return (c);
+			}
+			if (line[x + 1] == ' ' && line[x + 2] == '-' && line[x + 3] == ' ')
+			{
+				return (c);
+			}
+		}
+	}
+	for (x = 0; x < 78; x++)
+	{
+		char c = line[x];
+		if ((isalnum((unsigned char)c)) &&
+		    (x == 0 || line[x - 1] == ' ' || line[x - 1] == '(' || line[x - 1] == '['))
+		{
+			if (line[x + 1] == ')' && line[x + 2] == ' ')
+			{
+				if (btn == 2 && strstr(row0, "Descs") && islower((unsigned char)c))
+					return ((char)toupper((unsigned char)c));
+				return (c);
+			}
+			if (line[x + 1] == ' ' && line[x + 2] == '-' && line[x + 3] == ' ')
+			{
+				return (c);
+			}
+		}
+	}
+
+	return (0);
+}
+
+/* Process a mouse click (btn: 1 = Left, 2 = Right) at screen (mx, my). Returns TRUE if key(s) queued */
+static bool ibm_handle_mouse_click(int mx, int my, int btn)
+{
+	char row0[81];
+	int b;
+
+	/* 1. If running, resting, or repeating a command, any click aborts it */
+	if (running || resting || command_rep)
+	{
+		Term_keypress(' ');
+		return (TRUE);
+	}
+
+	/* 2. If "-more-" message prompt is active, any click advances it */
+	if (msg_flag)
+	{
+		Term_keypress(' ');
+		return (TRUE);
+	}
+
+	ibm_vscr_line(0, row0);
+
+	/* 3. Yes/No confirmation prompt on Row 0 or in a message box */
+	if (strstr(row0, "[y/n]") || strstr(row0, "(y/n)"))
+	{
+		Term_keypress((btn == 1) ? 'y' : 'n');
+		return (TRUE);
+	}
+
+	/* 4. Skill tree screen (G) */
+	if (ibm_skill_mode == 1)
+	{
+		char line_mid[81];
+		ibm_vscr_line(12, line_mid);
+		if (strstr(line_mid, "(y/n)"))
+		{
+			Term_keypress((btn == 1) ? 'y' : 'n');
+			return (TRUE);
+		}
+		if (my >= 7 && my < 24)
+		{
+			ibm_skill_click_y = my;
+			ibm_skill_click_x = mx;
+			ibm_skill_click_btn = btn;
+			Term_keypress(' ');
+			return (TRUE);
+		}
+		if (btn == 2 || my == 0 || my == 24)
+		{
+			Term_keypress(ESCAPE);
+			return (TRUE);
+		}
+		return (FALSE);
+	}
+
+	/* 5. Targeting / Aiming / Direction prompts (ibm_target_mode 1..4) */
+	if (ibm_target_mode > 0)
+	{
+		if (btn == 2)
+		{
+			Term_keypress(ESCAPE);
+			return (TRUE);
+		}
+		if (my >= 1 && my <= 22 && mx >= 13 && mx <= 78)
+		{
+			int gy = panel_row_min + (my - 1);
+			int gx = panel_col_min + (mx - 13);
+
+			if (ibm_target_mode == 1)
+			{
+				ibm_target_y = gy;
+				ibm_target_x = gx;
+				Term_keypress('t');
+				return (TRUE);
+			}
+			else if (ibm_target_mode == 2)
+			{
+				if (in_bounds(gy, gx) && cave[gy][gx].m_idx > 0 && target_able(cave[gy][gx].m_idx))
+				{
+					target_who = cave[gy][gx].m_idx;
+					target_row = gy;
+					target_col = gx;
+					health_track(target_who);
+					Term_keypress('5');
+					return (TRUE);
+				}
+				else if (distance(p_ptr->py, p_ptr->px, gy, gx) == 1)
+				{
+					int d = ibm_dir_from_delta(gy - p_ptr->py, gx - p_ptr->px);
+					if (d > 0)
+					{
+						Term_keypress('0' + d);
+						return (TRUE);
+					}
+				}
+				else if (in_bounds(gy, gx))
+				{
+					target_who = -1;
+					target_row = gy;
+					target_col = gx;
+					Term_keypress('5');
+					return (TRUE);
+				}
+			}
+			else if (ibm_target_mode == 3)
+			{
+				int d = ibm_dir_from_delta(gy - p_ptr->py, gx - p_ptr->px);
+				if (d > 0)
+				{
+					Term_keypress('0' + d);
+					return (TRUE);
+				}
+			}
+			else if (ibm_target_mode == 4)
+			{
+				ibm_target_y = gy;
+				ibm_target_x = gx;
+				Term_keypress(' ');
+				return (TRUE);
+			}
+		}
+		return (FALSE);
+	}
+
+	/* 6. Command Dock on Row 24 */
+	if (my == 24)
+	{
+		for (b = 0; b < DOCK_BTN_COUNT; b++)
+		{
+			if (mx >= dock_buttons[b].x0 && mx <= dock_buttons[b].x1)
+			{
+				/* If a modal menu/list is currently open, close it first */
+				if (!inkey_flag || character_icky || command_see)
+				{
+					Term_keypress(ESCAPE);
+					return (TRUE);
+				}
+				if (dock_buttons[b].cmd == '+')
+				{
+					return (ibm_show_context_menu(p_ptr->py, p_ptr->px, mx, 22));
+				}
+				else if (dock_buttons[b].cmd == 'm')
+				{
+					ibm_cast_or_skill();
+					return (TRUE);
+				}
+				else
+				{
+					mouse_cmd_raw = TRUE;
+					Term_keypress(dock_buttons[b].cmd);
+					return (TRUE);
+				}
+			}
+		}
+		return (FALSE);
+	}
+
+	/* 7. Menus, Item Selection, Spell Lists, Stores, Character Birth (!inkey_flag or character_icky or command_see) */
+	if (!inkey_flag || character_icky || command_see || !character_dungeon)
+	{
+		char ch;
+
+		/* Right-click in menus (unless right-clicking a spell for its description) cancels/exits */
+		if (btn == 2)
+		{
+			ch = ibm_scan_row_choice(my, mx, 2);
+			if (ch && isupper((unsigned char)ch) && strstr(row0, "Descs"))
+			{
+				Term_keypress(ch);
+				return (TRUE);
+			}
+			Term_keypress(ESCAPE);
+			return (TRUE);
+		}
+
+		/* Row 0 prompt shortcuts ('/', '-', '*') */
+		if (my == 0)
+		{
+			char c0 = ibm_vscr_char(mx, 0);
+			if (c0 == '/' || c0 == '-' || c0 == '*' || c0 == '?')
+			{
+				Term_keypress(c0);
+				return (TRUE);
+			}
+			if (strstr(row0, "ESC"))
+			{
+				Term_keypress(ESCAPE);
+				return (TRUE);
+			}
+		}
+
+		ch = ibm_scan_row_choice(my, mx, btn);
+		if (ch)
+		{
+			/* If inside a store at top-level command prompt and clicking a store stock row (6..17), buy it */
+			if (character_icky && inkey_flag && my >= 6 && my <= 17 && islower((unsigned char)ch))
+			{
+				mouse_cmd_raw = TRUE;
+				Term_keypress('g');
+				Term_keypress(ch);
+				return (TRUE);
+			}
+			Term_keypress(ch);
+			return (TRUE);
+		}
+
+		/* Any other click on a "[Press any key to continue]" or birth/title screen advances */
+		{
+			char line23[81];
+			ibm_vscr_line(23, line23);
+			if (strstr(line23, "Press any key") || strstr(row0, "Press any key") || !character_dungeon)
+			{
+				Term_keypress(' ');
+				return (TRUE);
+			}
+		}
+
+		return (FALSE);
+	}
+
+	/* 8. Normal Dungeon / Town / Wilderness Map Mode (inkey_flag == TRUE) */
+	if (my >= 1 && my <= 22 && mx < 13)
+	{
+		/* Sidebar click: left-click top half opens Character Sheet, otherwise Player Context Menu */
+		if (btn == 1 && my <= 12)
+		{
+			mouse_cmd_raw = TRUE;
+			Term_keypress('C');
+			return (TRUE);
+		}
+		return (ibm_show_context_menu(p_ptr->py, p_ptr->px, mx, my));
+	}
+
+	if (my >= 1 && my <= 22 && mx >= 13 && mx <= 78)
+	{
+		int gy = panel_row_min + (my - 1);
+		int gx = panel_col_min + (mx - 13);
+		int dist, dir;
+		cave_type *c_ptr;
+
+		/* Right-click on map always opens the styled Context Menu */
+		if (btn == 2)
+		{
+			return (ibm_show_context_menu(gy, gx, mx, my));
+		}
+
+		/* Left-click on map in Wilderness Mode */
+		if (p_ptr->wild_mode)
+		{
+			if (gy == p_ptr->py && gx == p_ptr->px)
+			{
+				mouse_cmd_raw = TRUE;
+				Term_keypress('>');
+				return (TRUE);
+			}
+			dir = ibm_dir_from_delta(gy - p_ptr->py, gx - p_ptr->px);
+			if (dir > 0)
+			{
+				command_dir = dir;
+				mouse_cmd_raw = TRUE;
+				Term_keypress(';');
+				return (TRUE);
+			}
+			return (FALSE);
+		}
+
+		if (!in_bounds(gy, gx)) return (FALSE);
+		c_ptr = &cave[gy][gx];
+		dist = distance(p_ptr->py, p_ptr->px, gy, gx);
+		dir = ibm_dir_from_delta(gy - p_ptr->py, gx - p_ptr->px);
+
+		/* Left-click on Player's own tile */
+		if (dist == 0)
+		{
+			if (c_ptr->o_idx)
+			{
+				mouse_cmd_raw = TRUE;
+				Term_keypress('g');
+				return (TRUE);
+			}
+			if (c_ptr->feat == FEAT_LESS || c_ptr->feat == FEAT_WAY_LESS ||
+			    c_ptr->feat == FEAT_SHAFT_UP || c_ptr->feat == FEAT_QUEST_UP)
+			{
+				mouse_cmd_raw = TRUE;
+				Term_keypress('<');
+				return (TRUE);
+			}
+			if (c_ptr->feat == FEAT_MORE || c_ptr->feat == FEAT_WAY_MORE ||
+			    c_ptr->feat == FEAT_SHAFT_DOWN || c_ptr->feat == FEAT_QUEST_DOWN ||
+			    c_ptr->feat == FEAT_QUEST_ENTER || c_ptr->feat == FEAT_QUEST_EXIT)
+			{
+				mouse_cmd_raw = TRUE;
+				Term_keypress('>');
+				return (TRUE);
+			}
+			if (c_ptr->feat == FEAT_FOUNTAIN)
+			{
+				mouse_cmd_raw = TRUE;
+				Term_keypress('H');
+				return (TRUE);
+			}
+			if (c_ptr->feat >= FEAT_ALTAR_HEAD && c_ptr->feat <= FEAT_ALTAR_TAIL)
+			{
+				return (ibm_show_context_menu(gy, gx, mx, my));
+			}
+			mouse_cmd_raw = TRUE;
+			Term_keypress(',');
+			return (TRUE);
+		}
+
+		/* Left-click on an Adjacent Tile (dist == 1) */
+		if (dist == 1)
+		{
+			/* Monster: attack/interact */
+			if (c_ptr->m_idx > 0 && m_list[c_ptr->m_idx].ml)
+			{
+				command_dir = dir;
+				mouse_cmd_raw = TRUE;
+				Term_keypress(';');
+				return (TRUE);
+			}
+			/* Closed door or chest: open */
+			if ((c_ptr->feat >= FEAT_DOOR_HEAD && c_ptr->feat <= FEAT_DOOR_TAIL) || ibm_has_chest(gy, gx))
+			{
+				command_dir = dir;
+				mouse_cmd_raw = TRUE;
+				Term_keypress('o');
+				return (TRUE);
+			}
+			/* Known trap: disarm */
+			if ((c_ptr->info & CAVE_TRDT) && c_ptr->t_idx != 0)
+			{
+				command_dir = dir;
+				mouse_cmd_raw = TRUE;
+				Term_keypress('D');
+				return (TRUE);
+			}
+			/* Passable floor / trees / shop: step */
+			if (cave_floor_bold(gy, gx) || c_ptr->feat == FEAT_TREES || c_ptr->feat == FEAT_SHOP)
+			{
+				command_dir = dir;
+				mouse_cmd_raw = TRUE;
+				Term_keypress(';');
+				return (TRUE);
+			}
+			/* Tunnelable wall / rubble: tunnel */
+			if (f_info[c_ptr->feat].flags1 & FF1_TUNNELABLE)
+			{
+				command_dir = dir;
+				mouse_cmd_raw = TRUE;
+				Term_keypress('T');
+				return (TRUE);
+			}
+			/* Fallback: open Context Menu */
+			return (ibm_show_context_menu(gy, gx, mx, my));
+		}
+
+		/* Left-click on a Distant Tile (dist > 1) */
+		if (c_ptr->m_idx > 0 && m_list[c_ptr->m_idx].ml)
+		{
+			/* Distant visible monster: open Monster Context Menu */
+			return (ibm_show_context_menu(gy, gx, mx, my));
+		}
+
+		/* Try BFS pathfinding to (gy, gx) */
+		{
+			int step_dir = mouse_find_step(gy, gx);
+			if (step_dir > 0)
+			{
+				mouse_dest_y = gy;
+				mouse_dest_x = gx;
+				command_dir = step_dir;
+				mouse_cmd_raw = TRUE;
+				Term_keypress('.');
+				return (TRUE);
+			}
+		}
+
+		/* If unreachable / unexplored wall, open Context Menu */
+		return (ibm_show_context_menu(gy, gx, mx, my));
+	}
+
+	return (FALSE);
+}
+
+
 
 /*
  * Process an event (check for a keypress)
@@ -621,8 +1878,46 @@ static errr Term_xtra_ibm_event(int v)
 	bool ma = FALSE;
 
 
-	/* Hack -- Check for a keypress */
-	if (!v && !bioskey(1)) return (1);
+	/* Non-blocking check (e.g. during running/resting/macro scan) */
+	if (!v)
+	{
+		if (!bioskey(1))
+		{
+			if (mouse_present)
+			{
+				int mx, my;
+				int pressed = ibm_mouse_poll(&mx, &my);
+				if ((pressed & 3) && (running || resting || command_rep))
+				{
+					Term_keypress(' ');
+					return (0);
+				}
+			}
+			return (1);
+		}
+	}
+	else
+	{
+		/* Blocking wait for keyboard or mouse event */
+		ibm_draw_dock();
+		while (!bioskey(1))
+		{
+			if (mouse_present)
+			{
+				int mx, my;
+				int pressed = ibm_mouse_poll(&mx, &my);
+				if (pressed & 1)
+				{
+					if (ibm_handle_mouse_click(mx, my, 1)) return (0);
+				}
+				else if (pressed & 2)
+				{
+					if (ibm_handle_mouse_click(mx, my, 2)) return (0);
+				}
+			}
+			delay(5);
+		}
+	}
 
 	/* Wait for a keypress */
 	k = bioskey(0x10);
@@ -714,17 +2009,8 @@ static errr Term_xtra_ibm(int n, int v)
 
 #ifdef USE_VIRTUAL
 
-# ifdef USE_WAT
-
-			/* Copy the virtual screen to the physical screen */
-			memcpy(PhysicalScreen + (v*160), VirtualScreen + (v*160), 160);
-
-# else /* USE_WAT */
-
-			/* Apply the virtual screen to the physical screen */
-			ScreenUpdateLine(VirtualScreen + ((v*cols) << 1), v);
-
-# endif  /* USE_WAT */
+			/* Apply the virtual screen line (with mouse cursor overlay) to the physical screen */
+			ibm_flush_row(v);
 
 #endif /* USE_VIRTUAL */
 
@@ -764,6 +2050,9 @@ static errr Term_xtra_ibm(int n, int v)
 
 # endif  /* USE_WAT */
 
+			/* Keep the Command Dock on Row 24 visible */
+			ibm_draw_dock();
+
 # endif  /* USE_VIRTUAL */
 
 #endif /* USE_CONIO */
@@ -784,8 +2073,15 @@ static errr Term_xtra_ibm(int n, int v)
 		/* Flush events */
 	case TERM_XTRA_FLUSH:
 		{
-			/* Strip events */
-			while (!Term_xtra_ibm_event(FALSE)) /* loop */;
+			/* Strip keyboard events */
+			while (bioskey(1)) (void)bioskey(0x10);
+
+			/* Sync mouse button state without triggering actions */
+			if (mouse_present)
+			{
+				int mx, my;
+				(void)ibm_mouse_poll(&mx, &my);
+			}
 
 			/* Success */
 			return (0);
@@ -1531,6 +2827,9 @@ errr init_ibm(void)
 	C_MAKE(VirtualScreen, rows * cols * 2, byte);
 
 #endif /* USE_VIRTUAL */
+
+	/* Initialize the DOS mouse driver and Command Dock */
+	ibm_mouse_init();
 
 
 	/* Erase the screen */

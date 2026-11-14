@@ -4613,10 +4613,165 @@ static bool run_test(void)
 
 
 /*
+ * Mouse BFS travel destination (0 when inactive)
+ */
+int mouse_dest_y = 0;
+int mouse_dest_x = 0;
+
+#define MOUSE_BFS_H 51
+#define MOUSE_BFS_W 141
+
+static bool mouse_grid_passable(int y, int x)
+{
+	cave_type *c_ptr;
+	u32b f1;
+
+	if (!in_bounds(y, x)) return (FALSE);
+
+	if (p_ptr->wild_mode)
+	{
+		f1 = f_info[wild_map[y][x].feat].flags1;
+		if (f1 & FF1_WALL) return (FALSE);
+		return (TRUE);
+	}
+
+	c_ptr = &cave[y][x];
+	if (c_ptr->m_idx && m_list[c_ptr->m_idx].ml) return (FALSE);
+	if (c_ptr->info & CAVE_TRDT) return (FALSE);
+
+	/* Unexplored grids cannot be pathed through unless adjacent */
+	if (!(c_ptr->info & CAVE_MARK) && !(c_ptr->info & CAVE_SEEN)) return (FALSE);
+
+	f1 = f_info[c_ptr->feat].flags1;
+	if (f1 & FF1_DOOR) return (FALSE);
+	if ((f1 & FF1_WALL) && (c_ptr->feat != FEAT_TREES)) return (FALSE);
+	if (!cave_floor_grid(c_ptr) && (c_ptr->feat != FEAT_TREES)) return (FALSE);
+
+	return (TRUE);
+}
+
+int mouse_find_step(int ty, int tx)
+{
+	static s16b dist[MOUSE_BFS_H][MOUSE_BFS_W];
+	static byte qy[MOUSE_BFS_H * MOUSE_BFS_W];
+	static byte qx[MOUSE_BFS_H * MOUSE_BFS_W];
+	static const int ortho_diag_dirs[8] = { 2, 4, 6, 8, 1, 3, 7, 9 };
+	int y0, x0, py_rel, px_rel, ty_rel, tx_rel;
+	int head, tail, i, best_dir = 0;
+	s16b best_d = 30000;
+
+	if ((p_ptr->py == ty) && (p_ptr->px == tx)) return (0);
+
+	y0 = p_ptr->py - (MOUSE_BFS_H / 2);
+	x0 = p_ptr->px - (MOUSE_BFS_W / 2);
+	py_rel = p_ptr->py - y0;
+	px_rel = p_ptr->px - x0;
+	ty_rel = ty - y0;
+	tx_rel = tx - x0;
+
+	if (ty_rel < 0 || ty_rel >= MOUSE_BFS_H || tx_rel < 0 || tx_rel >= MOUSE_BFS_W)
+		return (0);
+
+	for (i = 0; i < MOUSE_BFS_H; i++)
+	{
+		int j;
+		for (j = 0; j < MOUSE_BFS_W; j++) dist[i][j] = -1;
+	}
+
+	head = 0;
+	tail = 0;
+	dist[ty_rel][tx_rel] = 0;
+	qy[tail] = (byte)ty_rel;
+	qx[tail] = (byte)tx_rel;
+	tail++;
+
+	while (head < tail)
+	{
+		int cy = qy[head];
+		int cx = qx[head];
+		s16b cd = dist[cy][cx];
+		head++;
+
+		if (cy == py_rel && cx == px_rel) break;
+
+		for (i = 0; i < 8; i++)
+		{
+			int d = ortho_diag_dirs[i];
+			int ny = cy + ddy[d];
+			int nx = cx + ddx[d];
+			if (ny < 0 || ny >= MOUSE_BFS_H || nx < 0 || nx >= MOUSE_BFS_W) continue;
+			if (dist[ny][nx] != -1) continue;
+			if (ny == py_rel && nx == px_rel)
+			{
+				dist[ny][nx] = cd + 1;
+				break;
+			}
+			if (!mouse_grid_passable(y0 + ny, x0 + nx)) continue;
+			dist[ny][nx] = cd + 1;
+			qy[tail] = (byte)ny;
+			qx[tail] = (byte)nx;
+			tail++;
+		}
+	}
+
+	if (dist[py_rel][px_rel] == -1) return (0);
+
+	for (i = 0; i < 8; i++)
+	{
+		int d = ortho_diag_dirs[i];
+		int ny = py_rel + ddy[d];
+		int nx = px_rel + ddx[d];
+		if (ny < 0 || ny >= MOUSE_BFS_H || nx < 0 || nx >= MOUSE_BFS_W) continue;
+		if (dist[ny][nx] >= 0 && dist[ny][nx] < best_d)
+		{
+			if (ny == ty_rel && nx == tx_rel && !mouse_grid_passable(ty, tx))
+			{
+				/* Destination itself is a wall/closed door: stop adjacent to it */
+				return (0);
+			}
+			best_d = dist[ny][nx];
+			best_dir = d;
+		}
+	}
+
+	return (best_dir);
+}
+
+/*
  * Take one step along the current "run" path
  */
 void run_step(int dir)
 {
+	/* Mouse BFS travel mode */
+	if (mouse_dest_y > 0 && mouse_dest_x > 0)
+	{
+		int step_dir;
+
+		/* Stop if arrived or disturbed by adjacent visible monster */
+		if ((p_ptr->py == mouse_dest_y && p_ptr->px == mouse_dest_x) ||
+		    --running <= 0)
+		{
+			disturb(0, 0);
+			return;
+		}
+
+		step_dir = mouse_find_step(mouse_dest_y, mouse_dest_x);
+		if (!step_dir)
+		{
+			disturb(0, 0);
+			return;
+		}
+
+		p_ptr->update |= (PU_TORCH);
+		energy_use = 100;
+		move_player_aux(step_dir, always_pickup, 1, TRUE);
+		if (p_ptr->py == mouse_dest_y && p_ptr->px == mouse_dest_x)
+		{
+			disturb(0, 0);
+		}
+		return;
+	}
+
 	/* Start running */
 	if (dir)
 	{

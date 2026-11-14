@@ -1309,6 +1309,8 @@ vesa_Init(void)
     memset(vesa_oview_tiles, 0, total_tiles_used * sizeof(void *));
     set_tile_type(vesa_pixel_size > 8);
 #endif
+    if (dos_mouse_available)
+        dos_mouse_set_range(vesa_x_res - 1, vesa_y_res - 1);
 }
 
 RESTORE_WARNING_FORMAT_NONLITERAL
@@ -2615,4 +2617,186 @@ vesa_HideCursor(void)
     }
 }
 #endif /* SIMULATE_CURSOR */
+
+void
+vesa_get_res(int *res_x, int *res_y)
+{
+    *res_x = (vesa_x_res > 0) ? (int) vesa_x_res : 640;
+    *res_y = (vesa_y_res > 0) ? (int) vesa_y_res : 480;
+}
+
+void
+vesa_mouse_to_cell(int px, int py, int *col, int *row)
+{
+    int cw = (vesa_char_width > 0) ? (int) vesa_char_width : 8;
+    int ch = (vesa_char_height > 0) ? (int) vesa_char_height : 16;
+
+    *col = (px - (int) vesa_x_center) / cw;
+    *row = (py - (int) vesa_y_center) / ch;
+}
+
+void
+vesa_mouse_to_map(int px, int py, int *map_x, int *map_y)
+{
+    int cw = (vesa_char_width > 0) ? (int) vesa_char_width : 8;
+    int ch = (vesa_char_height > 0) ? (int) vesa_char_height : 16;
+    int map_top = (int) vesa_y_center + TOP_MAP_ROW * ch;
+    int rel_x = px - (int) vesa_x_center;
+    int rel_y = py - map_top;
+
+    if (rel_x < 0 || rel_y < 0) {
+        *map_x = -1;
+        *map_y = -1;
+        return;
+    }
+
+#ifdef TILES_IN_GLYPHMAP
+    if (iflags.tile_view && !iflags.traditional_view && !Is_rogue_level(&u.uz)) {
+        if (iflags.over_view) {
+            int ow = (vesa_oview_width > 0) ? (int) vesa_oview_width : 8;
+            int oh = (vesa_oview_height > 0) ? (int) vesa_oview_height : 16;
+
+            *map_x = (rel_x / ow) + 1;
+            *map_y = (rel_y / oh);
+            return;
+        } else {
+            int tw = (iflags.wc_tile_width > 0) ? iflags.wc_tile_width : 16;
+            int th = (iflags.wc_tile_height > 0) ? iflags.wc_tile_height : 16;
+
+            *map_x = (rel_x / tw) + clipx + 1;
+            *map_y = (rel_y / th) + clipy;
+            return;
+        }
+    }
+#endif
+    *map_x = (rel_x / cw) + 1;
+    *map_y = (rel_y / ch);
+}
+
+boolean
+vesa_pan_to_pixel(int px, int py)
+{
+#if defined(TILES_IN_GLYPHMAP) && defined(POSITIONBAR)
+    int ch = (vesa_char_height > 0) ? (int) vesa_char_height : 16;
+    int row = (py - (int) vesa_y_center) / ch;
+
+    if (!iflags.tile_view || iflags.over_view || iflags.traditional_view
+        || Is_rogue_level(&u.uz))
+        return FALSE;
+    if (row != PBAR_ROW || vesa_x_res == 0)
+        return FALSE;
+
+    {
+        int target_col = (px * COLNO) / (int) vesa_x_res;
+        int new_clipx = target_col - (viewport_cols / 2);
+
+        if (new_clipx < 0)
+            new_clipx = 0;
+        if (new_clipx + viewport_cols > COLNO)
+            new_clipx = COLNO - viewport_cols;
+        if (new_clipx != clipx) {
+            clipx = new_clipx;
+            clipxmax = clipx + (viewport_cols - 1);
+            positionbar();
+            vesa_redrawmap();
+        }
+        return TRUE;
+    }
+#else
+    nhUse(px);
+    nhUse(py);
+    return FALSE;
+#endif
+}
+
+/* Software arrow cursor for VESA linear/banked modes where INT 33h
+ * does not render a hardware/driver cursor */
+#define VESA_MCUR_W 12
+#define VESA_MCUR_H 16
+static boolean vesa_mcur_drawn = FALSE;
+static int vesa_mcur_x = -1, vesa_mcur_y = -1;
+static unsigned long vesa_mcur_save[VESA_MCUR_H][VESA_MCUR_W];
+
+static const char vesa_mcur_shape[VESA_MCUR_H][VESA_MCUR_W + 1] = {
+    "100000000000",
+    "110000000000",
+    "121000000000",
+    "122100000000",
+    "122210000000",
+    "122221000000",
+    "122222100000",
+    "122222210000",
+    "122222221000",
+    "122222222100",
+    "122222111110",
+    "122122100000",
+    "121012210000",
+    "110012210000",
+    "100001221000",
+    "000000110000"
+};
+
+void
+vesa_hide_mouse_cursor(void)
+{
+    int dx, dy, sx, sy;
+
+    if (!vesa_mcur_drawn)
+        return;
+
+    for (dy = 0; dy < VESA_MCUR_H; ++dy) {
+        sy = vesa_mcur_y + dy;
+        if (sy < 0 || sy >= (int) vesa_y_res)
+            continue;
+        for (dx = 0; dx < VESA_MCUR_W; ++dx) {
+            sx = vesa_mcur_x + dx;
+            if (sx < 0 || sx >= (int) vesa_x_res)
+                continue;
+            if (vesa_mcur_shape[dy][dx] != '0') {
+                vesa_WritePixel32((unsigned) sx, (unsigned) sy,
+                                  vesa_mcur_save[dy][dx]);
+            }
+        }
+    }
+    vesa_mcur_drawn = FALSE;
+}
+
+void
+vesa_draw_mouse_cursor(int px, int py)
+{
+    int dx, dy, sx, sy;
+
+    if (vesa_x_res == 0 || vesa_y_res == 0)
+        return;
+
+    if (vesa_mcur_drawn && px == vesa_mcur_x && py == vesa_mcur_y)
+        return;
+
+    if (vesa_mcur_drawn)
+        vesa_hide_mouse_cursor();
+
+    vesa_mcur_x = px;
+    vesa_mcur_y = py;
+
+    for (dy = 0; dy < VESA_MCUR_H; ++dy) {
+        sy = py + dy;
+        if (sy < 0 || sy >= (int) vesa_y_res)
+            continue;
+        for (dx = 0; dx < VESA_MCUR_W; ++dx) {
+            sx = px + dx;
+            if (sx < 0 || sx >= (int) vesa_x_res)
+                continue;
+            if (vesa_mcur_shape[dy][dx] != '0') {
+                vesa_mcur_save[dy][dx] =
+                    vesa_ReadPixel32((unsigned) sx, (unsigned) sy);
+                vesa_WritePixel((unsigned) sx, (unsigned) sy,
+                                (vesa_mcur_shape[dy][dx] == '2')
+                                    ? (FIRST_TEXT_COLOR + CLR_WHITE)
+                                    : (FIRST_TEXT_COLOR + CLR_BLACK));
+            }
+        }
+    }
+    vesa_mcur_drawn = TRUE;
+}
+
 #endif /* SCREEN_VESA */

@@ -1020,6 +1020,8 @@ vga_Init(void)
     term_clear_screen();
     clipx = 0;
     clipxmax = clipx + (viewport_size - 1);
+    if (dos_mouse_available)
+        dos_mouse_set_range(SCREENWIDTH - 1, SCREENHEIGHT - 1);
 }
 
 /*
@@ -1861,6 +1863,63 @@ vga_HideCursor(void)
     egawriteplane(15);
 }
 #endif /* SIMULATE_CURSOR */
+
+void
+vga_mouse_to_map(int px, int py, int *map_x, int *map_y)
+{
+    int row = py / MAX_ROWS_PER_CELL;
+
+    if (row < TOP_MAP_ROW || row >= TOP_MAP_ROW + ROWNO) {
+        *map_x = -1;
+        *map_y = -1;
+        return;
+    }
+    *map_y = row - TOP_MAP_ROW;
+#ifdef TILES_IN_GLYPHMAP
+    if (iflags.tile_view && !iflags.over_view && !iflags.traditional_view
+        && !Is_rogue_level(&u.uz)) {
+        *map_x = (px / MAX_COLS_PER_CELL) + clipx + 1;
+        return;
+    }
+#endif
+    *map_x = (px / 8) + 1;
+}
+
+boolean
+vga_pan_to_pixel(int px, int py)
+{
+#if defined(TILES_IN_GLYPHMAP) && defined(POSITIONBAR)
+    int row = py / MAX_ROWS_PER_CELL;
+
+    if (!iflags.tile_view || iflags.over_view || iflags.traditional_view
+        || Is_rogue_level(&u.uz))
+        return FALSE;
+    if (row != PBAR_ROW)
+        return FALSE;
+
+    {
+        int target_col = (px * COLNO) / SCREENWIDTH;
+        int new_clipx = target_col - (viewport_size / 2);
+
+        if (new_clipx < 0)
+            new_clipx = 0;
+        if (new_clipx + viewport_size > COLNO)
+            new_clipx = COLNO - viewport_size;
+        if (new_clipx != clipx) {
+            clipx = new_clipx;
+            clipxmax = clipx + (viewport_size - 1);
+            positionbar();
+            vga_redrawmap(1);
+        }
+        return TRUE;
+    }
+#else
+    nhUse(px);
+    nhUse(py);
+    return FALSE;
+#endif
+}
+
 #endif /* SCREEN_VGA  */
 
 /* vidvga.c */

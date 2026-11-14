@@ -286,6 +286,8 @@ extern void vga_userpan(enum vga_pan_direction);
 extern void vga_overview(boolean);
 extern void vga_traditional(boolean);
 extern void vga_refresh(void);
+extern void vga_mouse_to_map(int, int, int *, int *);
+extern boolean vga_pan_to_pixel(int, int);
 #endif /* SCREEN_VGA */
 #ifdef SCREEN_VESA
 extern void vesa_backsp(void);
@@ -318,6 +320,12 @@ extern void vesa_overview(boolean);
 extern void vesa_traditional(boolean);
 extern void vesa_refresh(void);
 extern void vesa_flush_text(void);
+extern void vesa_get_res(int *, int *);
+extern void vesa_mouse_to_cell(int, int, int *, int *);
+extern void vesa_mouse_to_map(int, int, int *, int *);
+extern boolean vesa_pan_to_pixel(int, int);
+extern void vesa_draw_mouse_cursor(int, int);
+extern void vesa_hide_mouse_cursor(void);
 #endif /* SCREEN_VESA */
 #endif /* NO_TERMS   */
 

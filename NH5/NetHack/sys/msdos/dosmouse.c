@@ -13,6 +13,7 @@
 #ifdef MSDOS
 
 #include <dos.h>
+#include "pcvideo.h"
 #include "dosmouse.h"
 
 /* INT 33h function numbers */
@@ -66,6 +67,15 @@ dos_mouse_show(void)
     if (!dos_mouse_available || mouse_visible)
         return;
 
+#ifdef SCREEN_VESA
+    if (iflags.grmode && iflags.usevesa) {
+        regs.x.ax = MOUSE_GETPOS;
+        int86(MOUSE_INT, &regs, &regs);
+        vesa_draw_mouse_cursor((int) regs.x.cx, (int) regs.x.dx);
+        mouse_visible = 1;
+        return;
+    }
+#endif
     regs.x.ax = MOUSE_SHOW;
     int86(MOUSE_INT, &regs, &regs);
     mouse_visible = 1;
@@ -83,6 +93,13 @@ dos_mouse_hide(void)
     if (!dos_mouse_available || !mouse_visible)
         return;
 
+#ifdef SCREEN_VESA
+    if (iflags.grmode && iflags.usevesa) {
+        vesa_hide_mouse_cursor();
+        mouse_visible = 0;
+        return;
+    }
+#endif
     regs.x.ax = MOUSE_HIDE;
     int86(MOUSE_INT, &regs, &regs);
     mouse_visible = 0;
@@ -129,6 +146,14 @@ dos_mouse_poll(struct dos_mouse_event *ev)
 
     if (!dos_mouse_available)
         return 0;
+
+#ifdef SCREEN_VESA
+    if (mouse_visible && iflags.grmode && iflags.usevesa) {
+        regs.x.ax = MOUSE_GETPOS;
+        int86(MOUSE_INT, &regs, &regs);
+        vesa_draw_mouse_cursor((int) regs.x.cx, (int) regs.x.dx);
+    }
+#endif
 
     /* Check left button (button 0) press count */
     for (btn = 0; btn <= 1; btn++) {

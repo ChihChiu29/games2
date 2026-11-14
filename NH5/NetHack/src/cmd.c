@@ -2764,8 +2764,8 @@ commands_init(void)
         if (extcmd->key)
             cmdbind_add(extcmd->key, extcmd, FALSE);
 
-    (void) bind_mousebtn(1, "therecmdmenu");
-    (void) bind_mousebtn(2, "clicklook");
+    (void) bind_mousebtn(1, "mouseaction");
+    (void) bind_mousebtn(2, "therecmdmenu");
 
     /* number_pad */
     (void) bind_key(C('l'), "redraw", FALSE);
@@ -4639,6 +4639,12 @@ there_cmd_menu_next2u(
         mcmd_addmenu(win, MCMD_MOVE_DIR, "Move here"); ++K;
         *act = MCMD_MOVE_DIR;
     }
+
+    if (gi.invent)
+        mcmd_addmenu(win, MCMD_THROW_OBJ, "Throw something"), ++K;
+    if (typ > SCORR)
+        mcmd_addmenu(win, MCMD_SEARCH, "Search around you"), ++K;
+
     return K;
 }
 
@@ -4973,6 +4979,7 @@ domouseaction(void)
 {
     coordxy x, y;
     struct obj *o;
+    struct monst *mtmp;
     int dir;
 
     x = gc.clicklook_cc.x - u.ux;
@@ -4989,22 +4996,30 @@ domouseaction(void)
         }
 
         if (x == 0 && y == 0) {
-            /* here */
-            if (IS_FOUNTAIN(levl[u.ux][u.uy].typ)
-                || IS_SINK(levl[u.ux][u.uy].typ)) {
-                cmdq_add_ec(CQ_CANNED, dodrink);
-                return ECMD_OK;
-            } else if (IS_THRONE(levl[u.ux][u.uy].typ)) {
-                cmdq_add_ec(CQ_CANNED, dosit);
-                return ECMD_OK;
-            } else if (On_stairs_up(u.ux, u.uy)) {
+            /* here: perform most common self action */
+            if (On_stairs_up(u.ux, u.uy)) {
                 cmdq_add_ec(CQ_CANNED, doup);
                 return ECMD_OK;
             } else if (On_stairs_dn(u.ux, u.uy)) {
                 cmdq_add_ec(CQ_CANNED, dodown);
                 return ECMD_OK;
             } else if ((o = vobj_at(u.ux, u.uy)) != 0) {
-                cmdq_add_ec(CQ_CANNED, Is_container(o) ? doloot : dopickup);
+                cmdq_add_ec(CQ_CANNED,
+                            (Is_container(o) && !o->nexthere) ? doloot
+                                                              : dopickup);
+                return ECMD_OK;
+            } else if ((IS_FOUNTAIN(levl[u.ux][u.uy].typ)
+                        || IS_SINK(levl[u.ux][u.uy].typ))
+                       && can_reach_floor(FALSE)) {
+                cmdq_add_ec(CQ_CANNED, dodrink);
+                cmdq_add_key(CQ_CANNED, 'y');
+                return ECMD_OK;
+            } else if (IS_THRONE(levl[u.ux][u.uy].typ)) {
+                cmdq_add_ec(CQ_CANNED, dosit);
+                return ECMD_OK;
+            } else if (IS_ALTAR(levl[u.ux][u.uy].typ) && gi.invent) {
+                cmdq_add_ec(CQ_CANNED, dosacrifice);
+                cmdq_add_userinput(CQ_CANNED);
                 return ECMD_OK;
             } else {
                 cmdq_add_ec(CQ_CANNED, donull); /* just rest */
@@ -5012,19 +5027,39 @@ domouseaction(void)
             }
         }
 
-        /* directional commands */
-
+        /* directional commands on adjacent tile (u.ux + x, u.uy + y) */
         dir = xytodir(x, y);
-        if (!m_at(u.ux + x, u.uy + y)
-            && !test_move(u.ux, u.uy, x, y, TEST_MOVE)) {
+        mtmp = m_at(u.ux + x, u.uy + y);
+        if (mtmp && !canspotmon(mtmp))
+            mtmp = 0;
+
+        if (mtmp) {
+            if (mtmp->mpeaceful && !mtmp->mtame) {
+                /* Peaceful NPC (e.g. shopkeeper, priest, guard): talk */
+                cmdq_add_ec(CQ_CANNED, dotalk);
+                cmdq_add_dir(CQ_CANNED, x, y, 0);
+                return ECMD_OK;
+            }
+            /* Hostile monster (attack) or tame pet (swap places) */
+            cmdq_add_ec(CQ_CANNED, move_funcs[dir][MV_WALK]);
+            return ECMD_OK;
+        }
+
+        if (!test_move(u.ux, u.uy, x, y, TEST_MOVE)) {
             if (IS_DOOR(levl[u.ux + x][u.uy + y].typ)) {
-                /* slight assistance to player: choose kick/open for them */
-                if (levl[u.ux + x][u.uy + y].doormask & D_LOCKED) {
-                    cmdq_add_ec(CQ_CANNED, dokick);
-                    return ECMD_OK;
-                }
                 if (levl[u.ux + x][u.uy + y].doormask & D_CLOSED) {
                     cmdq_add_ec(CQ_CANNED, doopen);
+                    cmdq_add_dir(CQ_CANNED, x, y, 0);
+                    return ECMD_OK;
+                }
+                if (levl[u.ux + x][u.uy + y].doormask & D_LOCKED) {
+                    if (carrying(SKELETON_KEY) || carrying(LOCK_PICK)
+                        || carrying(CREDIT_CARD)) {
+                        act_on_act(MCMD_LOCK_DOOR, x, y);
+                    } else {
+                        cmdq_add_ec(CQ_CANNED, dokick);
+                        cmdq_add_dir(CQ_CANNED, x, y, 0);
+                    }
                     return ECMD_OK;
                 }
             }

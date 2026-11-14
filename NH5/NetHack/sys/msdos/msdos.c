@@ -96,6 +96,11 @@ tgetch(void)
                 int mcy = mev.cy;
                 int mch;
 
+#ifdef SCREEN_VESA
+                if (iflags.grmode && iflags.usevesa) {
+                    vesa_mouse_to_cell(mev.px, mev.py, &mcx, &mcy);
+                } else
+#endif
 #ifdef SCREEN_VGA
                 if (iflags.grmode) {
                     mcx = mev.px / 8;
@@ -514,25 +519,33 @@ dos_poskey(coordxy *x, coordxy *y, int *mod)
              * and screen column 0 corresponds to map column 1 (1..COLNO-1).
              */
             int map_x, map_y;
+            int mcx = mev.cx, mcy = mev.cy;
 
+#ifdef SCREEN_VESA
+            if (iflags.grmode && iflags.usevesa) {
+                vesa_mouse_to_cell(mev.px, mev.py, &mcx, &mcy);
+                vesa_mouse_to_map(mev.px, mev.py, &map_x, &map_y);
+            } else
+#endif
 #ifdef SCREEN_VGA
             if (iflags.grmode) {
-                /* Graphics/tile mode: cells are 16x16 pixels */
-                map_x = (mev.px / MAX_COLS_PER_CELL) + 1;
-                map_y = (mev.py / MAX_ROWS_PER_CELL) - 1;
+                mcx = mev.px / 8;
+                mcy = mev.py / 16;
+                vga_mouse_to_map(mev.px, mev.py, &map_x, &map_y);
             } else
 #endif
             {
                 /* Text mode: cells are 8x8 (virtual pixel coords) */
                 map_x = mev.cx + 1;
                 map_y = mev.cy - 1;  /* subtract 1 for message line */
-            }
 #ifdef CLIPPING
-            if (clipping) {
-                map_x += clipx;
-                map_y += clipy;
-            }
+                if (clipping) {
+                    map_x += clipx;
+                    map_y += clipy;
+                }
 #endif
+            }
+
             /* Dismiss --More-- prompt if active */
             if (ttyDisplay && ttyDisplay->toplin == TOPLINE_NEED_MORE) {
                 dos_mouse_hide();
@@ -598,8 +611,36 @@ dos_poskey(coordxy *x, coordxy *y, int *mod)
 #endif
                 return 0;  /* 0 signals mouse click to readchar_core() */
             }
+
+            /* Click on position bar in graphics mode -> pan map viewport */
+            if (iflags.grmode && program_state.input_state == commandInp) {
+                boolean panned = FALSE;
+
+                dos_mouse_hide();
+#ifdef SIMULATE_CURSOR
+                if (cursor_flag)
+                    HideCursor();
+#endif
+#ifdef SCREEN_VESA
+                if (iflags.usevesa)
+                    panned = vesa_pan_to_pixel(mev.px, mev.py);
+                else
+#endif
+#ifdef SCREEN_VGA
+                if (iflags.usevga)
+                    panned = vga_pan_to_pixel(mev.px, mev.py);
+#endif
+#ifdef SIMULATE_CURSOR
+                if (cursor_flag)
+                    DrawCursor();
+#endif
+                dos_mouse_show();
+                if (panned)
+                    continue;
+            }
+
             /* Click on message line (row 0) in command mode -> prev messages */
-            if (mev.cy == 0 && program_state.input_state == commandInp) {
+            if (mcy == 0 && program_state.input_state == commandInp) {
                 dos_mouse_hide();
 #ifdef SIMULATE_CURSOR
                 if (iflags.grmode && cursor_flag)

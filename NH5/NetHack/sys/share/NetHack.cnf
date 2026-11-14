@@ -26,7 +26,7 @@ OPTIONS=rawio,BIOS,symset:IBMGraphics_2,roguesymset:RogueEpyx
 
 # To use VGA graphical tiles on an MS-DOS PC with VGA or better,uncomment 
 # this:
-#OPTIONS=video:autodetect
+OPTIONS=video:autodetect
 # And to explicitly set the resolution:
 #OPTIONS=video_width:1024
 #OPTIONS=video_height:768
@@ -61,7 +61,7 @@ OPTIONS=boulder:0
 #
 # number_pad option can have an optional value of 0 (off), 1 (on), 
 # or 2(on,legacy-mode) which causes 5='g', alt-5='G', alt-0='I'
-OPTIONS=time,noshowexp,number_pad:2,lit_corridor,mouse_support
+OPTIONS=time,noshowexp,number_pad:0,lit_corridor,mouse_support
 
 # Treat space bar as rest. Warning: may be dangerous for new players.
 # OPTIONS=rest_on_space

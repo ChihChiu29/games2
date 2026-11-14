@@ -539,8 +539,25 @@ tty_init_nhwindows(int *argcp UNUSED, char **argv UNUSED)
     if (dos_mouse_init()) {
         /* Set mouse range to cover the screen.
          * Text mode: 80x25 chars, INT 33h uses 8x8 virtual pixels
-         * VGA mode: 640x480 pixels */
-        dos_mouse_set_range(wid * 8 - 1, hgt * 8 - 1);
+         * VGA/VESA mode: 640x480 (or VESA resolution) pixels */
+        int max_mx = wid * 8 - 1;
+        int max_my = hgt * (iflags.grmode ? 16 : 8) - 1;
+#ifdef SCREEN_VESA
+        if (iflags.grmode && iflags.usevesa) {
+            extern void vesa_get_res(int *, int *);
+            int rx, ry;
+            vesa_get_res(&rx, &ry);
+            max_mx = rx - 1;
+            max_my = ry - 1;
+        } else
+#endif
+#ifdef SCREEN_VGA
+        if (iflags.grmode && iflags.usevga) {
+            max_mx = 640 - 1;
+            max_my = 480 - 1;
+        }
+#endif
+        dos_mouse_set_range(max_mx, max_my);
         dos_mouse_hide();
         iflags.wc_mouse_support = TRUE;
     }

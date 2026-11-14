@@ -478,6 +478,10 @@ tty_yn_function(
                 q = def;
             break;
         } else if (strchr(quitchars, q)) {
+            if (q == ' ' && !def && strchr(resp, '?')) {
+                q = '?';
+                break;
+            }
             q = def;
             break;
         }

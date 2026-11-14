@@ -1396,14 +1396,12 @@ findtravelpath(int mode)
                         && (levl[nx][ny].seenv
                             || (!Blind && couldsee(nx, ny)))) {
                         if (nx == ux && ny == uy) {
-                            if (mode == TRAVP_TRAVEL || mode == TRAVP_VALID) {
+                            if (mode == TRAVP_TRAVEL) {
                                 boolean visited
                                     = selection_getpoint(x, y, gt.travelmap);
                                 u.dx = x - ux;
                                 u.dy = y - uy;
-                                if (mode == TRAVP_TRAVEL
-                                    && ((x == u.tx && y == u.ty)
-                                        || visited)) {
+                                if ((x == u.tx && y == u.ty) || visited) {
                                     nomul(0);
                                     /* reset run so domove run checks work */
                                     svc.context.run = 8;
@@ -1415,6 +1413,8 @@ findtravelpath(int mode)
                                 }
                                 selection_setpoint(u.ux, u.uy,
                                                    gt.travelmap, 1);
+                                return TRUE;
+                            } else if (mode == TRAVP_VALID) {
                                 return TRUE;
                             }
                         } else if (!travel[nx][ny]) {
@@ -1538,6 +1538,10 @@ is_valid_travelpt(coordxy x, coordxy y)
     u.tx = x;
     u.ty = y;
     ret = findtravelpath(TRAVP_VALID);
+    if (!svc.context.travel && gt.travelmap) {
+        selection_free(gt.travelmap, TRUE);
+        gt.travelmap = NULL;
+    }
     u.tx = tx;
     u.ty = ty;
     return ret;
@@ -1548,6 +1552,8 @@ can_travel_to(coordxy x, coordxy y)
 {
     int tx = u.tx, ty = u.ty;
     schar dx = u.dx, dy = u.dy;
+    short save_run = svc.context.run;
+    coord save_tcc = iflags.travelcc;
     boolean ret;
 
     if (!isok(x, y) || u_at(x, y))
@@ -1559,7 +1565,7 @@ can_travel_to(coordxy x, coordxy y)
     u.tx = x;
     u.ty = y;
     ret = findtravelpath(TRAVP_GUESS);
-    if (gt.travelmap) {
+    if (!svc.context.travel && gt.travelmap) {
         selection_free(gt.travelmap, TRUE);
         gt.travelmap = NULL;
     }
@@ -1567,6 +1573,8 @@ can_travel_to(coordxy x, coordxy y)
     u.ty = ty;
     u.dx = dx;
     u.dy = dy;
+    svc.context.run = save_run;
+    iflags.travelcc = save_tcc;
     return ret;
 }
 

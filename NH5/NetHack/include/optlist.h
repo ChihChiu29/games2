@@ -341,7 +341,7 @@ static int optfn_##a(int, int, boolean, char *, char *);
     NHOPTC(font_text, Advanced, 40, opt_in, set_gameview,
                 Yes, Yes, Yes, No, NoAlias, "font to use in text windows")
     NHOPTB(force_invmenu, Advanced, 0, opt_in, set_in_game,
-           Off, Yes, No, No, NoAlias, &iflags.force_invmenu, Term_False,
+           On, Yes, No, No, NoAlias, &iflags.force_invmenu, Term_False,
            "commands asking for inventory item show a menu")
     NHOPTC(fruit, General, PL_FSIZ, opt_in, set_in_game,
                 No, Yes, No, No, NoAlias, "name of a fruit you enjoy eating")

@@ -1213,18 +1213,26 @@ set_item_state(
     tty_menu_item *item)
 {
     struct WinDesc *cw = wins[window];
-    char ch = item->selected ? (item->count == -1L ? '+' : '#') : '-';
+    char ch = item->selected ? (item->count == -1L ? '+' : '#') : '\xFA';
 
     HUPSKIP();
     tty_curs(window, (cw && cw->offx) ? 5 : 4, lineno);
-    term_start_attr(item->attr);
-    if (item->color != NO_COLOR)
-        term_start_color(item->color);
-    (void) putchar(ch);
+    if (item->selected) {
+        toggle_menu_attr(TRUE, CLR_YELLOW, ATR_BOLD);
+        (void) putchar(ch);
+        toggle_menu_attr(FALSE, CLR_YELLOW, ATR_BOLD);
+    } else if (iflags.use_menu_glyphs && item->glyphinfo.glyph != NO_GLYPH) {
+        int gcolor = item->glyphinfo.gm.sym.color;
+
+        toggle_menu_attr(TRUE, gcolor, ATR_NONE);
+        (void) putchar(item->glyphinfo.ttychar);
+        toggle_menu_attr(FALSE, gcolor, ATR_NONE);
+    } else {
+        toggle_menu_attr(TRUE, CLR_CYAN, ATR_NONE);
+        (void) putchar(ch);
+        toggle_menu_attr(FALSE, CLR_CYAN, ATR_NONE);
+    }
     ttyDisplay->curx++;
-    if (item->color != NO_COLOR)
-        term_end_color();
-    term_end_attr(item->attr);
 }
 
 /* select all [ignores pending count, if any] */
@@ -1502,7 +1510,7 @@ process_menu_window(winid window, struct WinDesc *cw)
                     tty_curs(window, 1, page_lines);
                     if (cw->offx) {
                         cl_end();
-                        if (page_lines == 1 && !curr->identifier.a_void
+                        if (page_lines > 0 && !curr->identifier.a_void
                             && !curr->str[0]) {
                             int k, dlen = (int) cw->cols - 2;
 
@@ -1572,7 +1580,9 @@ process_menu_window(winid window, struct WinDesc *cw)
                             char c = (curr->count == -1L) ? '*' : '#';
 
                             /* all selected: '*' vs count selected: '#' */
+                            toggle_menu_attr(TRUE, CLR_YELLOW, ATR_BOLD);
                             (void) putchar(c);
+                            toggle_menu_attr(FALSE, CLR_YELLOW, ATR_BOLD);
                         } else if (n == 2 && curr->identifier.a_void != 0
                                    && show_obj_syms
                                    && curr->glyphinfo.glyph != NO_GLYPH) {
@@ -2875,11 +2885,11 @@ tty_end_menu(
         char buf[QBUFSZ];
         /* produce the largest demo string */
         Sprintf(buf, "(%ld of %ld) ", cw->npages, cw->npages);
-        len = strlen(buf);
+        len = strlen(buf) + 4;
         cw->morestr = dupstr("");
     } else {
         cw->morestr = dupstr("(end) ");
-        len = strlen(cw->morestr);
+        len = strlen(cw->morestr) + 4;
     }
 
     if (len > (int) ttyDisplay->cols) {
@@ -4277,6 +4287,9 @@ tty_nh_poskey(coordxy *x UNUSED, coordxy *y UNUSED, int *mod UNUSED)
         ttyDisplay->toplin = TOPLINE_NON_EMPTY;
 #elif defined(MSDOS)
     /* [MODIFIED] DOS mouse support via INT 33h */
+    (void) fflush(stdout);
+    if (WIN_MESSAGE != WIN_ERR && wins[WIN_MESSAGE])
+        wins[WIN_MESSAGE]->flags &= ~WIN_STOP;
     {
         extern int dos_mouse_available;
         extern int dos_poskey(coordxy *, coordxy *, int *);

@@ -996,6 +996,7 @@ vesa_redrawmap(void)
     }
 
     free(p_row);
+    vesa_draw_dock();
 }
 #endif /* TILES_IN_GLYPHMAP && CLIPPING */
 
@@ -2366,7 +2367,10 @@ positionbar(void)
     int pixy = (PBAR_ROW * vesa_char_height);
     int tmp;
 
-    if (!iflags.grmode || !iflags.tile_view)
+    if (!iflags.grmode)
+        return;
+    vesa_draw_dock();
+    if (!iflags.tile_view)
         return;
     if ((clipx < 0) || (clipxmax <= 0) || (clipx >= clipxmax))
         nowhere = TRUE;
@@ -2662,13 +2666,25 @@ vesa_mouse_to_map(int px, int py, int *map_x, int *map_y)
         } else {
             int tw = (iflags.wc_tile_width > 0) ? iflags.wc_tile_width : 16;
             int th = (iflags.wc_tile_height > 0) ? iflags.wc_tile_height : 16;
+            int vx = rel_x / tw;
+            int vy = rel_y / th;
 
-            *map_x = (rel_x / tw) + clipx + 1;
-            *map_y = (rel_y / th) + clipy;
+            if (vx >= viewport_cols || vy >= viewport_rows) {
+                *map_x = -1;
+                *map_y = -1;
+                return;
+            }
+            *map_x = vx + clipx + 1;
+            *map_y = vy + clipy;
             return;
         }
     }
 #endif
+    if (rel_x / cw >= COLNO - 1 || rel_y / ch >= ROWNO) {
+        *map_x = -1;
+        *map_y = -1;
+        return;
+    }
     *map_x = (rel_x / cw) + 1;
     *map_y = (rel_y / ch);
 }
@@ -2683,7 +2699,7 @@ vesa_pan_to_pixel(int px, int py)
     if (!iflags.tile_view || iflags.over_view || iflags.traditional_view
         || Is_rogue_level(&u.uz))
         return FALSE;
-    if (row != PBAR_ROW || vesa_x_res == 0)
+    if ((row != PBAR_ROW && (py / ch) != PBAR_ROW) || vesa_x_res == 0)
         return FALSE;
 
     {
@@ -2797,6 +2813,98 @@ vesa_draw_mouse_cursor(int px, int py)
         }
     }
     vesa_mcur_drawn = TRUE;
+}
+
+#define VESA_DOCK_BTNS 12
+static const struct {
+    char cmd;
+    char key;
+    const char *label;
+} vesa_dock_btns[VESA_DOCK_BTNS] = {
+    { 'i', 'i', "Inv"   },
+    { 'Z', 'Z', "Cast"  },
+    { 'z', 'z', "Zap"   },
+    { 'q', 'q', "Quaff" },
+    { 'r', 'r', "Read"  },
+    { 'e', 'e', "Eat"   },
+    { 'a', 'a', "Apply" },
+    { 'f', 'f', "Fire"  },
+    { 't', 't', "Throw" },
+    { 's', 's', "Srch"  },
+    { '.', '.', "Wait"  },
+    { '+', '+', "More"  }
+};
+
+void
+vesa_draw_dock(void)
+{
+    int ch = (vesa_char_height > 0) ? (int) vesa_char_height : 16;
+    int cw = (vesa_char_width > 0) ? (int) vesa_char_width : 8;
+    int pixy = (int) vesa_y_center + LI * ch;
+    int b;
+
+    if (!iflags.grmode || vesa_x_res == 0
+        || pixy + ch > (int) vesa_y_res)
+        return;
+
+    vesa_flush_text();
+    vesa_FillRect(0, (unsigned) pixy, vesa_x_res, (unsigned) ch,
+                  BACKGROUND_VESA_COLOR);
+
+    for (b = 0; b < VESA_DOCK_BTNS; ++b) {
+        int x0 = (b * (int) vesa_x_res) / VESA_DOCK_BTNS;
+        int x1 = ((b + 1) * (int) vesa_x_res) / VESA_DOCK_BTNS - 1;
+        int bx = x0 + 1;
+        int bw = x1 - x0 - 1;
+        int nchars = 1 + (int) strlen(vesa_dock_btns[b].label);
+        int text_w = nchars * cw;
+        int tx = bx + (bw - text_w) / 2;
+        const char *lbl = vesa_dock_btns[b].label;
+        int j;
+
+        if (bw <= 4)
+            continue;
+        if (tx < bx)
+            tx = bx;
+
+        /* Top/bottom cyan border, subtle dark slate side edges */
+        vesa_FillRect((unsigned) bx, (unsigned) pixy,
+                      (unsigned) bw, 1, CLR_CYAN + FIRST_TEXT_COLOR);
+        vesa_FillRect((unsigned) bx, (unsigned) (pixy + ch - 1),
+                      (unsigned) bw, 1, CLR_CYAN + FIRST_TEXT_COLOR);
+        if (ch > 2) {
+            vesa_FillRect((unsigned) bx, (unsigned) (pixy + 1),
+                          1, (unsigned) (ch - 2), NO_COLOR + FIRST_TEXT_COLOR);
+            vesa_FillRect((unsigned) (bx + bw - 1), (unsigned) (pixy + 1),
+                          1, (unsigned) (ch - 2), NO_COLOR + FIRST_TEXT_COLOR);
+        }
+
+        /* Highlighted hotkey in bright yellow, label in white */
+        vesa_WriteCharTransparent((unsigned char) vesa_dock_btns[b].key,
+                                  tx, pixy, CLR_YELLOW);
+        for (j = 0; lbl[j] != '\0'; ++j) {
+            vesa_WriteCharTransparent((unsigned char) lbl[j],
+                                      tx + (1 + j) * cw, pixy, CLR_WHITE);
+        }
+    }
+}
+
+char
+vesa_dock_click(int px, int py)
+{
+    int ch = (vesa_char_height > 0) ? (int) vesa_char_height : 16;
+    int pixy = (int) vesa_y_center + LI * ch;
+    int b;
+
+    if (!iflags.grmode || vesa_x_res == 0)
+        return 0;
+    if (py < pixy || py >= pixy + ch || px < 0 || px >= (int) vesa_x_res)
+        return 0;
+
+    b = (px * VESA_DOCK_BTNS) / (int) vesa_x_res;
+    if (b < 0 || b >= VESA_DOCK_BTNS)
+        return 0;
+    return vesa_dock_btns[b].cmd;
 }
 
 #endif /* SCREEN_VESA */

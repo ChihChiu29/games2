@@ -53,6 +53,7 @@ void get_cursor(int *, int *);
 
 static char DOSgetch(void);
 static char BIOSgetch(void);
+static char BIOSgetch_once(void);
 /* static long freediskspace(char *path); */
 unsigned long sys_random_seed(void);
 
@@ -86,9 +87,11 @@ tgetch(void)
         for (;;) {
             if (kbhit()) {
                 if (iflags.BIOS)
-                    ch = BIOSgetch();
+                    ch = BIOSgetch_once();
                 else
                     ch = DOSgetch();
+                if (!ch)
+                    continue;
                 break;
             }
             if (dos_mouse_poll(&mev)) {
@@ -309,6 +312,64 @@ static const char numeric_scanmap[] = { /* ... */
 #endif /* PC9800 */
 
 static char
+BIOSgetch_once(void)
+{
+    unsigned char scan, shift, ch = 0;
+    const struct pad *kpad;
+    union REGS regs;
+
+    regs.h.ah = READCHAR;
+    int86(KEYBRD_BIOS, &regs, &regs);
+    ch = regs.h.al;
+    scan = regs.h.ah;
+
+    regs.h.ah = GETKEYFLAGS;
+    int86(KEYBRD_BIOS, &regs, &regs);
+    shift = regs.h.al;
+
+    if (iskeypad(scan)) {
+        kpad = iflags.num_pad ? numpad : keypad;
+        if (shift & SHIFT)
+            ch = kpad[scan - KEYPADLO].shift;
+        else if (shift & CTRL)
+            ch = kpad[scan - KEYPADLO].cntrl;
+        else
+            ch = kpad[scan - KEYPADLO].normal;
+    }
+#ifdef NO_TERMS
+    if (dos_mouse_available)
+        dos_mouse_hide();
+    if (pckeys(scan, shift)) {
+#ifdef SCREEN_VESA
+        if (iflags.usevesa)
+            vesa_flush_text();
+#endif
+        if (dos_mouse_available)
+            dos_mouse_show();
+        return 0;
+    }
+    if (dos_mouse_available)
+        dos_mouse_show();
+#endif
+#ifdef PC9800
+    if (shift & KANA)
+        return 0;
+    if ((shift & GRPH) && (ch >= 0x80)) {
+#else
+    if ((shift & ALT) && !ch) {
+#endif
+        if (inmap(scan))
+            ch = scanmap[scan - SCANLO];
+#ifdef NEW_ALT
+        else if (in_numericmap(scan))
+            ch = numeric_scanmap[scan - NUMERIC_SCANLO];
+#endif
+        return (isprint(ch) ? M(ch) : ch);
+    }
+    return ch;
+}
+
+static char
 BIOSgetch(void)
 {
     unsigned char scan, shift, ch = 0;
@@ -424,10 +485,17 @@ dos_poskey(coordxy *x, coordxy *y, int *mod)
 {
     struct dos_mouse_event mev;
 
-    /* Flush VESA text buffer before waiting for input */
+    /* Flush VESA text buffer and ensure command dock is drawn */
 #ifdef SCREEN_VESA
     if (iflags.usevesa) {
         vesa_flush_text();
+        if (iflags.grmode && svp.pl_character[0])
+            vesa_draw_dock();
+    } else
+#endif
+#ifdef SCREEN_VGA
+    if (iflags.grmode && iflags.usevga && svp.pl_character[0]) {
+        vga_draw_dock();
     }
 #endif
 
@@ -470,9 +538,19 @@ dos_poskey(coordxy *x, coordxy *y, int *mod)
                         ch = kpad[scan - KEYPADLO].normal;
                 }
 #ifdef NO_TERMS
+                if (dos_mouse_available)
+                    dos_mouse_hide();
                 if (pckeys(scan, shift)) {
+#ifdef SCREEN_VESA
+                    if (iflags.usevesa)
+                        vesa_flush_text();
+#endif
+                    if (dos_mouse_available)
+                        dos_mouse_show();
                     continue;  /* consumed by pckeys; try again */
                 }
+                if (dos_mouse_available)
+                    dos_mouse_show();
 #endif
                 /* Alt-letters */
 #ifndef PC9800
@@ -549,6 +627,14 @@ dos_poskey(coordxy *x, coordxy *y, int *mod)
             /* Direction prompt ("In what direction?"): convert clicked tile
              * to a direction character relative to the hero */
             if (program_state.input_state == getdirInp) {
+                if (mev.pressed == 2) {
+                    dos_mouse_hide();
+#ifdef SIMULATE_CURSOR
+                    if (iflags.grmode && cursor_flag)
+                        HideCursor();
+#endif
+                    return '\033';
+                }
                 if (map_x >= 1 && map_x < COLNO
                     && map_y >= 0 && map_y < ROWNO) {
                     int dch;
@@ -567,14 +653,6 @@ dos_poskey(coordxy *x, coordxy *y, int *mod)
 #endif
                     return dch;
                 }
-                if (mev.pressed == 2) {
-                    dos_mouse_hide();
-#ifdef SIMULATE_CURSOR
-                    if (iflags.grmode && cursor_flag)
-                        HideCursor();
-#endif
-                    return '\033';
-                }
                 continue;
             }
 
@@ -588,7 +666,49 @@ dos_poskey(coordxy *x, coordxy *y, int *mod)
                 return (mev.pressed == 1) ? ' ' : '\033';
             }
 
+            /* Command dock at bottom of screen (row LI) in command mode */
+            if (iflags.grmode && program_state.input_state == commandInp) {
+                char dock_ch = 0;
+
+#ifdef SCREEN_VESA
+                if (iflags.usevesa)
+                    dock_ch = vesa_dock_click(mev.px, mev.py);
+                else
+#endif
+#ifdef SCREEN_VGA
+                if (iflags.usevga)
+                    dock_ch = vga_dock_click(mev.px, mev.py);
+#endif
+                if (dock_ch == '+') {
+                    /* "More" button -> open hero context menu */
+                    *x = u.ux;
+                    *y = u.uy;
+                    *mod = CLICK_2;
+                    dos_mouse_hide();
+#ifdef SIMULATE_CURSOR
+                    if (cursor_flag)
+                        HideCursor();
+#endif
+                    return 0;
+                } else if (dock_ch != 0) {
+                    dos_mouse_hide();
+#ifdef SIMULATE_CURSOR
+                    if (cursor_flag)
+                        HideCursor();
+#endif
+                    return (int) (unsigned char) dock_ch;
+                }
+            }
+
             /* Normal map click (commandInp or getposInp) */
+            if (program_state.input_state == getposInp && mev.pressed == 2) {
+                dos_mouse_hide();
+#ifdef SIMULATE_CURSOR
+                if (iflags.grmode && cursor_flag)
+                    HideCursor();
+#endif
+                return '\033';
+            }
             if (map_x >= 1 && map_x < COLNO
                 && map_y >= 0 && map_y < ROWNO) {
                 *x = (coordxy) map_x;
@@ -603,7 +723,8 @@ dos_poskey(coordxy *x, coordxy *y, int *mod)
             }
 
             /* Click on position bar in graphics mode -> pan map viewport */
-            if (iflags.grmode && program_state.input_state == commandInp) {
+            if (iflags.grmode && (program_state.input_state == commandInp
+                                  || program_state.input_state == getposInp)) {
                 boolean panned = FALSE;
 
                 dos_mouse_hide();

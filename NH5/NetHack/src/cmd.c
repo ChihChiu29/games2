@@ -4358,11 +4358,12 @@ dotherecmdmenu(void)
     coordxy y = gc.clicklook_cc.y;
 
     if (isok(x, y) && iflags.getdir_click) {
+        iflags.getdir_click = 0;
+        gc.clicklook_cc.x = gc.clicklook_cc.y = -1;
         if (x == u.ux && y == u.uy)
             ch = here_cmd_menu();
         else
-            ch = there_cmd_menu(x, y, iflags.getdir_click);
-        iflags.getdir_click = 0;
+            ch = there_cmd_menu(x, y, CLICK_2);
         return (ch && ch != '\033') ? ECMD_TIME : ECMD_OK;
     }
 
@@ -4599,9 +4600,16 @@ there_cmd_menu_next2u(
     if (!next2u(x, y))
         return K;
 
-    if (IS_DOOR(typ)) {
+    mtmp = m_at(x, y);
+    if (mtmp && !canspotmon(mtmp))
+        mtmp = 0;
+
+    if (IS_DOOR(typ) || (mtmp && is_door_mappear(mtmp)
+                         && !Protection_from_shape_changers)) {
         boolean key_or_pick, card;
-        int dm = levl[x][y].doormask;
+        int dm = IS_DOOR(typ) ? levl[x][y].doormask : D_CLOSED;
+        if (mtmp && is_door_mappear(mtmp) && !Protection_from_shape_changers)
+            dm = D_CLOSED;
 
         if ((dm & (D_CLOSED | D_LOCKED))) {
             mcmd_addmenu(win, MCMD_OPEN_DOOR, "Open the door"), ++K;
@@ -4639,8 +4647,8 @@ there_cmd_menu_next2u(
     if (levl[x][y].glyph == objnum_to_glyph(BOULDER))
         mcmd_addmenu(win, MCMD_MOVE_DIR, "Push the boulder"), ++K;
 
-    mtmp = m_at(x, y);
-    if (mtmp && !canspotmon(mtmp))
+    if (mtmp && M_AP_TYPE(mtmp) && M_AP_TYPE(mtmp) != M_AP_MONSTER
+        && !Protection_from_shape_changers)
         mtmp = 0;
     if (mtmp && which_armor(mtmp, W_SADDLE)) {
         char *mnam = x_monnam(mtmp, ARTICLE_THE, (char *) 0,
@@ -4794,8 +4802,10 @@ act_on_act(
         if (otmp) {
             cmdq_add_ec(CQ_CANNED, doapply);
             cmdq_add_key(CQ_CANNED, otmp->invlet);
-            cmdq_add_dir(CQ_CANNED, dx, dy, 0);
-            cmdq_add_key(CQ_CANNED, 'y'); /* "Lock it?" */
+            if (!gx.xlock.usedtime || gx.xlock.picktyp != otmp->otyp) {
+                cmdq_add_dir(CQ_CANNED, dx, dy, 0);
+                cmdq_add_key(CQ_CANNED, 'y'); /* "Lock/Unlock it?" */
+            }
         }
         break;
     case MCMD_UNTRAP_DOOR:
@@ -4990,16 +5000,27 @@ there_cmd_menu(coordxy x, coordxy y, int mod)
         struct obj *otmp = vobj_at(x, y);
         struct trap *ttmp = t_at(x, y);
         schar typ = levl[x][y].typ;
+        boolean door_mimic = FALSE;
 
         if (mtmp && !canspotmon(mtmp))
             mtmp = 0;
+        if (mtmp && is_door_mappear(mtmp) && !Protection_from_shape_changers) {
+            door_mimic = TRUE;
+            mtmp = 0;
+        } else if (mtmp && M_AP_TYPE(mtmp) && M_AP_TYPE(mtmp) != M_AP_MONSTER
+                   && !Protection_from_shape_changers) {
+            mtmp = 0;
+        }
 
         if (u_at(x, y)) {
             Strcpy(titlebuf, "Actions: Yourself");
         } else if (mtmp) {
-            Sprintf(titlebuf, "Actions: %s", upstart(mon_nam(mtmp)));
-        } else if (IS_DOOR(typ) && (levl[x][y].seenv || next2u(x, y))) {
-            int dm = levl[x][y].doormask;
+            Sprintf(titlebuf, "Actions: %s",
+                    x_monnam(mtmp, ARTICLE_NONE, (char *) 0,
+                             SUPPRESS_SADDLE, FALSE));
+        } else if (door_mimic
+                   || (IS_DOOR(typ) && (levl[x][y].seenv || next2u(x, y)))) {
+            int dm = door_mimic ? D_CLOSED : levl[x][y].doormask;
 
             Sprintf(titlebuf, "Actions: %s",
                     (dm & (D_CLOSED | D_LOCKED)) ? "Closed door"
@@ -5021,7 +5042,8 @@ there_cmd_menu(coordxy x, coordxy y, int mod)
         }
         if (!strncmp(titlebuf, "Actions: ", 9) && titlebuf[9])
             titlebuf[9] = highc(titlebuf[9]);
-        titlebuf[38] = '\0';
+        if (strlen(titlebuf) > 38)
+            Strcpy(titlebuf + 35, "...");
         end_menu(win, titlebuf);
         npick = select_menu(win, PICK_ONE, &picks);
         ch = '\033';
@@ -5066,7 +5088,11 @@ domouseaction(void)
     struct obj *o;
     struct monst *mtmp;
     struct trap *ttmp;
+    boolean door_mimic = FALSE;
     int dir;
+
+    iflags.getdir_click = 0;
+    gc.clicklook_cc.x = gc.clicklook_cc.y = -1;
 
     if (!isok(tx, ty))
         return ECMD_OK;
@@ -5093,7 +5119,8 @@ domouseaction(void)
             } else if (On_stairs_dn(u.ux, u.uy)) {
                 cmdq_add_ec(CQ_CANNED, dodown);
                 return ECMD_OK;
-            } else if ((o = vobj_at(u.ux, u.uy)) != 0) {
+            } else if ((o = vobj_at(u.ux, u.uy)) != 0
+                       && !(o->otyp == BOULDER && !o->nexthere)) {
                 cmdq_add_ec(CQ_CANNED,
                             (Is_container(o) && !o->nexthere) ? doloot
                                                               : dopickup);
@@ -5122,6 +5149,13 @@ domouseaction(void)
         mtmp = m_at(tx, ty);
         if (mtmp && !canspotmon(mtmp))
             mtmp = 0;
+        if (mtmp && is_door_mappear(mtmp) && !Protection_from_shape_changers) {
+            door_mimic = TRUE;
+            mtmp = 0;
+        } else if (mtmp && M_AP_TYPE(mtmp) && M_AP_TYPE(mtmp) != M_AP_MONSTER
+                   && !Protection_from_shape_changers) {
+            mtmp = 0;
+        }
 
         if (mtmp) {
             if (mtmp->mpeaceful && !mtmp->mtame) {
@@ -5144,8 +5178,8 @@ domouseaction(void)
             return ECMD_OK;
         }
 
-        if (IS_DOOR(levl[tx][ty].typ)) {
-            int dm = levl[tx][ty].doormask;
+        if (door_mimic || IS_DOOR(levl[tx][ty].typ)) {
+            int dm = door_mimic ? D_CLOSED : levl[tx][ty].doormask;
 
             if (dm & D_CLOSED) {
                 cmdq_add_ec(CQ_CANNED, doopen);
@@ -5153,12 +5187,16 @@ domouseaction(void)
                 return ECMD_OK;
             }
             if (dm & D_LOCKED) {
-                if (carrying(SKELETON_KEY) || carrying(LOCK_PICK)
-                    || carrying(CREDIT_CARD)) {
+                if (!nohands(gy.youmonst.data)
+                    && !(u.utrap && u.utraptype == TT_PIT)
+                    && (carrying(SKELETON_KEY) || carrying(LOCK_PICK)
+                        || carrying(CREDIT_CARD))) {
                     act_on_act(MCMD_LOCK_DOOR, x, y);
-                } else {
+                } else if (!*in_rooms(tx, ty, SHOPBASE) && !u.usteed) {
                     cmdq_add_ec(CQ_CANNED, dokick);
                     cmdq_add_dir(CQ_CANNED, x, y, 0);
+                } else {
+                    (void) there_cmd_menu(tx, ty, CLICK_1);
                 }
                 return ECMD_OK;
             }
@@ -5495,7 +5533,7 @@ readchar_core(coordxy *x, coordxy *y, int *mod)
         else if (sym != '\033')
             sym |= 0200; /* force 8th bit on */
 #endif /*ALTMETA*/
-    } else if (sym == 0) {
+    } else if (sym == 0 && program_state.input_state != getposInp) {
         /* click event */
         gc.clicklook_cc.x = gc.clicklook_cc.y = -1;
         click_to_cmd(*x, *y, *mod);

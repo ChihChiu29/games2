@@ -1353,6 +1353,8 @@ spelleffects_check(int spell, int *res, int *energy)
                 hungr /= 2;
                 break;
             }
+            /* [MODIFIED] Reduce spell hunger to 1/5 of standard value */
+            hungr /= 5;
             /* don't put player (quite) into fainting from
              * casting a spell, particularly since they might
              * not even be hungry at the beginning; however,

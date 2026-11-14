@@ -3012,7 +3012,8 @@ dispinv_with_action(
     char c, save_sortloot = 0;
     unsigned len = lets ? (unsigned) strlen(lets) : 0U;
     boolean menumode = (len != 1 || iflags.menu_requested) ? TRUE : FALSE,
-            save_force_invmenu = iflags.force_invmenu;
+            save_force_invmenu = iflags.force_invmenu,
+            save_menu_requested = iflags.menu_requested;
 
     if (use_inuse_ordering) {
         save_accessories = inuse_headers[4];
@@ -3023,6 +3024,8 @@ dispinv_with_action(
             inuse_headers[4] = alt_label;
     }
     iflags.force_invmenu = FALSE;
+    if (save_force_invmenu && menumode)
+        iflags.menu_requested = TRUE;
 
     c = display_inventory(lets, menumode);
 
@@ -3031,6 +3034,7 @@ dispinv_with_action(
         inuse_headers[4] = save_accessories;
     }
     iflags.force_invmenu = save_force_invmenu;
+    iflags.menu_requested = save_menu_requested;
 
     if (c && c != '\033') {
         for (otmp = gi.invent; otmp; otmp = nextobj) {

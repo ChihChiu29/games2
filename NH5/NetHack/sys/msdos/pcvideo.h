@@ -288,6 +288,8 @@ extern void vga_traditional(boolean);
 extern void vga_refresh(void);
 extern void vga_mouse_to_map(int, int, int *, int *);
 extern boolean vga_pan_to_pixel(int, int);
+extern void vga_draw_dock(void);
+extern char vga_dock_click(int, int);
 #endif /* SCREEN_VGA */
 #ifdef SCREEN_VESA
 extern void vesa_backsp(void);
@@ -326,6 +328,8 @@ extern void vesa_mouse_to_map(int, int, int *, int *);
 extern boolean vesa_pan_to_pixel(int, int);
 extern void vesa_draw_mouse_cursor(int, int);
 extern void vesa_hide_mouse_cursor(void);
+extern void vesa_draw_dock(void);
+extern char vesa_dock_click(int, int);
 #endif /* SCREEN_VESA */
 #endif /* NO_TERMS   */
 

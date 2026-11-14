@@ -1208,8 +1208,8 @@ vga_WriteChar(uint32 chr, int col, int row, int colour, int inverse)
     }
 #endif
 
-    x = min(col, (CO - 1));         /* min() used protection from callers */
-    pixy = min(row, (LI - 1)) * 16; /* assumes 8 x 16 char set */
+    x = min(col, (CO - 1));     /* min() used protection from callers */
+    pixy = min(row, LI) * 16;   /* assumes 8 x 16 char set */
     vplane = ~actual_colour & ~bgcolor & 0xF;
     if (vplane != 0) {
         egawriteplane(vplane);
@@ -1918,6 +1918,73 @@ vga_pan_to_pixel(int px, int py)
     nhUse(py);
     return FALSE;
 #endif
+}
+
+#define VGA_DOCK_BTNS 12
+static const struct {
+    char cmd;
+    char key;
+    const char *label;
+    int col_start;
+    int col_end;
+} vga_dock_btns[VGA_DOCK_BTNS] = {
+    { 'i', 'i', "Inv",    0,  5 },
+    { 'Z', 'Z', "Cast",   6, 12 },
+    { 'z', 'z', "Zap",   13, 18 },
+    { 'q', 'q', "Quaff", 19, 25 },
+    { 'r', 'r', "Read",  26, 32 },
+    { 'e', 'e', "Eat",   33, 38 },
+    { 'a', 'a', "Apply", 39, 45 },
+    { 'f', 'f', "Fire",  46, 52 },
+    { 't', 't', "Throw", 53, 59 },
+    { 's', 's', "Srch",  60, 66 },
+    { '.', '.', "Wait",  67, 73 },
+    { '+', '+', "More",  74, 79 }
+};
+
+void
+vga_draw_dock(void)
+{
+    int b, c;
+
+    if (!iflags.grmode)
+        return;
+
+    for (c = 0; c < CO; ++c)
+        vga_WriteChar(' ', c, LI, CLR_BLACK, 0);
+
+    for (b = 0; b < VGA_DOCK_BTNS; ++b) {
+        int col = vga_dock_btns[b].col_start;
+        const char *lbl = vga_dock_btns[b].label;
+        int j;
+
+        if (b > 0)
+            vga_WriteChar(0xB3, col++, LI, CLR_CYAN, 0);
+        else
+            col++;
+        vga_WriteChar((unsigned char) vga_dock_btns[b].key, col++, LI,
+                      CLR_YELLOW, 0);
+        for (j = 0; lbl[j] != '\0' && col <= vga_dock_btns[b].col_end; ++j)
+            vga_WriteChar((unsigned char) lbl[j], col++, LI, CLR_WHITE, 0);
+    }
+}
+
+char
+vga_dock_click(int px, int py)
+{
+    int row = py / MAX_ROWS_PER_CELL;
+    int col = px / 8;
+    int b;
+
+    if (!iflags.grmode || row != LI || col < 0 || col >= CO)
+        return 0;
+
+    for (b = 0; b < VGA_DOCK_BTNS; ++b) {
+        if (col >= vga_dock_btns[b].col_start
+            && col <= vga_dock_btns[b].col_end)
+            return vga_dock_btns[b].cmd;
+    }
+    return 0;
 }
 
 #endif /* SCREEN_VGA  */

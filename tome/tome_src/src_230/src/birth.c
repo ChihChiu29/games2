@@ -2462,7 +2462,11 @@ static bool player_birth_aux_ask()
 					strcpy(inp, "20");
 
 					/* Get a response (or escape) */
+					ibm_numeric_input = TRUE;
+					ibm_numeric_min = 0;
+					ibm_numeric_max = MAX_RANDOM_QUEST - 1;
 					if (!askfor_aux(inp, 2)) inp[0] = '\0';
+					ibm_numeric_input = FALSE;
 					if (inp[0] == '*') v = rand_int(MAX_RANDOM_QUEST);
 					else v = atoi(inp);
 

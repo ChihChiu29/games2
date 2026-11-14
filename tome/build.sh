@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-2.3.3}"
+VERSION="${1:-2.3.5}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_ROOT="${SCRIPT_DIR}/tome_src/src_230"
 SRC_DIR="${SRC_ROOT}/src"

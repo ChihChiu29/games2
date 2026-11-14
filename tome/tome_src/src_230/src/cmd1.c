@@ -4971,7 +4971,8 @@ void do_cmd_pet(void)
 		        '0' + num - 27);
 	}
 
-	/* Get a command from the user */
+	/* Get a command from the user (auto-list on open for mouse friendliness) */
+	Term_keypress('*');
 	while (!flag && get_com(out_val, &choice))
 	{
 		/* Request redraw */

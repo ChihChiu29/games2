@@ -3330,6 +3330,11 @@ static int complete_command(char *buf, int clen, int mlen)
 * RETURN accepts the current buffer contents and returns TRUE.
 */
 bool askfor_aux_complete = FALSE;
+bool ibm_numeric_input = FALSE;
+s32b ibm_numeric_min = 0;
+s32b ibm_numeric_max = 9999;
+int ibm_numeric_bar_y = -1;
+int ibm_numeric_action = 0;
 bool askfor_aux(char *buf, int len)
 {
 	int y, x;
@@ -3339,6 +3344,8 @@ bool askfor_aux(char *buf, int len)
 	int k = 0;
 
 	bool done = FALSE;
+
+	int bar_y = -1;
 
 
 	/* Locate the cursor */
@@ -3368,6 +3375,19 @@ bool askfor_aux(char *buf, int len)
 		screen_save();
 		complete_where = 0;
 		strncpy(complete_buf, buf, 100);
+	}
+	else if (ibm_numeric_input)
+	{
+		bar_y = (y == 0) ? 1 : (y >= 23 ? y - 1 : y + 1);
+		ibm_numeric_bar_y = bar_y;
+		ibm_numeric_action = 0;
+		screen_save();
+		Term_erase(0, bar_y, 80);
+		Term_putstr(2, bar_y, -1, TERM_L_BLUE, "[Min] [-10] [-1] [+1] [+10] [Max] ");
+		Term_putstr(36, bar_y, -1, TERM_L_GREEN, "[OK] ");
+		Term_putstr(41, bar_y, -1, TERM_L_RED, "[Esc]");
+		Term_erase(x, y, len);
+		Term_putstr(x, y, -1, TERM_YELLOW, buf);
 	}
 
 	/* Process input */
@@ -3411,6 +3431,28 @@ bool askfor_aux(char *buf, int len)
 			strncpy(complete_buf, buf, k);
 			break;
 
+		case '\x1f':
+			if (ibm_numeric_input && ibm_numeric_action != 0)
+			{
+				s32b cur = atol(buf);
+				switch (ibm_numeric_action)
+				{
+					case 1: cur = ibm_numeric_min; break;
+					case 2: cur -= 10; break;
+					case 3: cur -= 1; break;
+					case 4: cur += 1; break;
+					case 5: cur += 10; break;
+					case 6: cur = ibm_numeric_max; break;
+				}
+				ibm_numeric_action = 0;
+				if (cur < ibm_numeric_min) cur = ibm_numeric_min;
+				if (cur > ibm_numeric_max) cur = ibm_numeric_max;
+				sprintf(buf, "%ld", (long)cur);
+				k = (int)strlen(buf);
+				if (k > len) { k = len; buf[k] = '\0'; }
+			}
+			break;
+
 		default:
 			if ((k < len) && (isprint(i)))
 			{
@@ -3434,6 +3476,11 @@ bool askfor_aux(char *buf, int len)
 
 	if (askfor_aux_complete)
 	{
+		screen_load();
+	}
+	else if (ibm_numeric_input)
+	{
+		ibm_numeric_bar_y = -1;
 		screen_load();
 	}
 
@@ -3616,7 +3663,15 @@ s32b get_quantity(cptr prompt, s32b max)
 	sprintf(buf, "%ld", amt);
 
 	/* Ask for a quantity */
-	if (!get_string(prompt, buf, 9)) return (0);
+	ibm_numeric_input = TRUE;
+	ibm_numeric_min = 0;
+	ibm_numeric_max = max;
+	if (!get_string(prompt, buf, 9))
+	{
+		ibm_numeric_input = FALSE;
+		return (0);
+	}
+	ibm_numeric_input = FALSE;
 
 	/* Extract a number */
 	amt = atoi(buf);

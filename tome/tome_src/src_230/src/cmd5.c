@@ -954,7 +954,8 @@ int use_symbiotic_power(int r_idx, bool great, bool only_number, bool no_cost)
 	        "(Powers a-%c, *=List, ESC=exit) Use which power of your %s? ",
 	        label, (no_cost ? "symbiote" : "body"));
 
-	/* Get a spell from the user */
+	/* Get a spell from the user (auto-list on open for mouse friendliness) */
+	Term_keypress('*');
 	while (!flag && get_com(out_val, &choice))
 	{
 		/* Request redraw */

@@ -1453,7 +1453,7 @@ static bool ibm_show_more_menu(void)
 		{ 'd', "Toggle search mode (S)",   'S',     FALSE },
 		{ 'e', "Look around (l)",          'l',     FALSE },
 		{ 'f', "Full dungeon map (M)",     'M',     FALSE },
-		{ 'g', "Locate player (L)",        'L',     FALSE },
+		{ '?', "Help / Tutorial (?)",      '?',     FALSE },
 		{ 'h', "Wear / Wield item (w)",    'w',     FALSE },
 		{ 'i', "Take off item (t)",        't',     FALSE },
 		{ 'j', "Drop item (d)",            'd',     FALSE },
@@ -2045,6 +2045,28 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 		}
 
 		/* 7e. Text / Number input prompts (askfor_aux / get_name) */
+		if (ibm_numeric_input && ibm_numeric_bar_y >= 0)
+		{
+			if (btn == 2)
+			{
+				Term_keypress(ESCAPE);
+				return (TRUE);
+			}
+			if (my == ibm_numeric_bar_y)
+			{
+				if (mx >= 2 && mx <= 6)        { ibm_numeric_action = 1; Term_keypress('\x1f'); }
+				else if (mx >= 8 && mx <= 12)  { ibm_numeric_action = 2; Term_keypress('\x1f'); }
+				else if (mx >= 14 && mx <= 17) { ibm_numeric_action = 3; Term_keypress('\x1f'); }
+				else if (mx >= 19 && mx <= 22) { ibm_numeric_action = 4; Term_keypress('\x1f'); }
+				else if (mx >= 24 && mx <= 28) { ibm_numeric_action = 5; Term_keypress('\x1f'); }
+				else if (mx >= 30 && mx <= 34) { ibm_numeric_action = 6; Term_keypress('\x1f'); }
+				else if (mx >= 36 && mx <= 39) { Term_keypress('\r'); }
+				else if (mx >= 41 && mx <= 45) { Term_keypress(ESCAPE); }
+				return (TRUE);
+			}
+			Term_keypress('\r');
+			return (TRUE);
+		}
 		if (strstr(line23, "Enter the name of") ||
 		    strstr(line23, "Enter your player's name") ||
 		    strstr(line20, "Number of quests?") ||
@@ -2144,19 +2166,35 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 			}
 		}
 
-		/* Row 0 prompt shortcuts ('/', '-', '*', '?') */
+		/* Row 0 prompt shortcuts ('/', '-', '*', '?', 'ESC') */
 		if (my == 0)
 		{
 			char c0 = ibm_vscr_char(mx, 0);
+			const char *p_star = strchr(row0, '*');
+			const char *p_esc  = strstr(row0, "ESC");
+
 			if (c0 == '/' || c0 == '-' || c0 == '*' || c0 == '?')
 			{
 				Term_keypress(c0);
 				return (TRUE);
 			}
-			if (strstr(row0, "ESC"))
+			if (p_star)
 			{
-				Term_keypress(ESCAPE);
-				return (TRUE);
+				int sx = (int)(p_star - row0);
+				if (mx >= sx - 1 && mx <= sx + 8)
+				{
+					Term_keypress('*');
+					return (TRUE);
+				}
+			}
+			if (p_esc)
+			{
+				int ex = (int)(p_esc - row0);
+				if (mx >= ex - 1 && mx <= ex + 8)
+				{
+					Term_keypress(ESCAPE);
+					return (TRUE);
+				}
 			}
 		}
 

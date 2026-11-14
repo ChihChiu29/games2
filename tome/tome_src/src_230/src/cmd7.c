@@ -195,7 +195,8 @@ bool get_magic_power(int *sn, magic_power *powers, int max_powers,
 	character_icky = TRUE;
 	Term_save();
 
-	/* Get a spell from the user */
+	/* Get a spell from the user (auto-list on open for mouse friendliness) */
+	Term_keypress('*');
 	while (!flag && get_com(out_val, &choice))
 	{
 		/* Request redraw */
@@ -4507,10 +4508,8 @@ static random_spell* select_spell_from_batch(int batch, bool quick)
 
 	prt(tmp, 0, 0);
 
-	if (quick)
-	{
-		print_spell_batch(batch, mut_max);
-	}
+	(void)quick;
+	print_spell_batch(batch, mut_max);
 
 	while (1)
 	{
@@ -6343,10 +6342,8 @@ static rune_spell* select_runespell_from_batch(int batch, bool quick,
 
 	prt(tmp, 0, 0);
 
-	if (quick)
-	{
-		print_runespell_batch(batch, mut_max);
-	}
+	(void)quick;
+	print_runespell_batch(batch, mut_max);
 
 	while (1)
 	{

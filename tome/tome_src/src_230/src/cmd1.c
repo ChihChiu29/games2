@@ -4643,7 +4643,7 @@ static bool mouse_grid_passable(int y, int x)
 	if (!(c_ptr->info & CAVE_MARK) && !(c_ptr->info & CAVE_SEEN)) return (FALSE);
 
 	f1 = f_info[c_ptr->feat].flags1;
-	if (f1 & FF1_DOOR) return (FALSE);
+	if (c_ptr->feat >= FEAT_DOOR_HEAD && c_ptr->feat <= FEAT_DOOR_TAIL) return (FALSE);
 	if ((f1 & FF1_WALL) && (c_ptr->feat != FEAT_TREES)) return (FALSE);
 	if (!cave_floor_grid(c_ptr) && (c_ptr->feat != FEAT_TREES)) return (FALSE);
 

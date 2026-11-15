@@ -1,4 +1,5 @@
 #include "platform.h"
+#include "vga.h"
 #include <dos.h>
 #include <dpmi.h>
 #include <go32.h>
@@ -69,7 +70,7 @@ void platform_init(void)
 {
     union REGS r;
 
-    platform_init_palette_data();
+    vga_init_palette_data();
 
     /* 1. Enter VGA Mode 13h: 320x200 256-color linear framebuffer at 0xA0000 */
     memset(&r, 0, sizeof(r));
@@ -126,7 +127,7 @@ bool platform_key_pressed(int scancode)
     return curr_key_pressed[scancode] != 0;
 }
 
-void platform_present(void)
+void vga_present(void)
 {
     dosmemput(framebuffer, sizeof(framebuffer), 0xA0000);
 }

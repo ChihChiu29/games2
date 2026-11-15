@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 199309L
 #include "platform.h"
+#include "term_ascii.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,12 +10,30 @@
 #include <signal.h>
 #include <time.h>
 
+typedef struct {
+    char ch;
+    uint8_t fg;
+    uint8_t bg;
+} TermCell;
+
+static TermCell term_buf[TERM_H][TERM_W];
+
 static struct termios orig_termios;
 static bool term_initialized = false;
 
 static int key_hold_timer[128];
 static uint8_t curr_key_down[128];
 static uint8_t curr_key_pressed[128];
+
+static const int col_to_ansi_fg[16] = {
+    30, 34, 32, 36, 31, 35, 33, 37,
+    90, 94, 92, 96, 91, 95, 93, 97
+};
+
+static const int col_to_ansi_bg[16] = {
+    40, 44, 42, 46, 41, 45, 43, 47,
+    100, 104, 102, 106, 101, 105, 103, 107
+};
 
 void platform_shutdown(void)
 {
@@ -36,8 +55,6 @@ static void handle_sig(int sig)
 
 void platform_init(void)
 {
-    platform_init_palette_data();
-
     if (tcgetattr(STDIN_FILENO, &orig_termios) == 0) {
         struct termios raw = orig_termios;
         raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
@@ -63,7 +80,7 @@ void platform_init(void)
     memset(curr_key_down, 0, sizeof(curr_key_down));
     memset(curr_key_pressed, 0, sizeof(curr_key_pressed));
 
-    const char *init_seq = "\033[?1049h\033[8;50;80t\033[?25l\033[2J";
+    const char *init_seq = "\033[?1049h\033[?25l\033[2J";
     if (write(STDOUT_FILENO, init_seq, strlen(init_seq)) < 0) {
     }
 }
@@ -181,69 +198,78 @@ bool platform_key_pressed(int scancode)
     return curr_key_pressed[scancode] != 0;
 }
 
-/* Downsample 320x200 256-color framebuffer into 80x50 terminal cells using
- * UTF-8 upper-half blocks (▀) and 24-bit TrueColor ANSI escape sequences! */
-static uint8_t sample_block(int bx, int by)
-{
-    int dy, dx;
-    uint8_t best = framebuffer[by][bx];
-    /* Prefer non-background pixels so thin weapon blades & outlines stay visible */
-    for (dy = 0; dy < 2; dy++) {
-        for (dx = 0; dx < 4; dx++) {
-            uint8_t c = framebuffer[by + dy][bx + dx];
-            if (c != PAL_FLOOR_DARK && c != PAL_FLOOR_MID && c != COL_BLACK) {
-                return c;
-            }
-        }
-    }
-    return best;
-}
-
-void platform_present(void)
-{
-    static char out_buf[80 * 50 * 44 + 1024];
-    int pos = 0;
-    int row, col;
-    int last_top = -1, last_bot = -1;
-
-    pos += snprintf(out_buf + pos, sizeof(out_buf) - pos, "\033[H");
-
-    for (row = 0; row < 50; row++) {
-        if (row > 0) {
-            out_buf[pos++] = '\r';
-            out_buf[pos++] = '\n';
-        }
-        int py_top = row * 4;
-        int py_bot = row * 4 + 2;
-        for (col = 0; col < 80; col++) {
-            int px = col * 4;
-            uint8_t c_top = sample_block(px, py_top);
-            uint8_t c_bot = sample_block(px, py_bot);
-
-            if ((int)c_top != last_top || (int)c_bot != last_bot) {
-                pos += snprintf(out_buf + pos, sizeof(out_buf) - pos,
-                    "\033[38;2;%d;%d;%d;48;2;%d;%d;%dm",
-                    palette_rgb[c_top][0], palette_rgb[c_top][1], palette_rgb[c_top][2],
-                    palette_rgb[c_bot][0], palette_rgb[c_bot][1], palette_rgb[c_bot][2]);
-                last_top = (int)c_top;
-                last_bot = (int)c_bot;
-            }
-            /* UTF-8 Upper Half Block '▀' (\xE2\x96\x80) */
-            out_buf[pos++] = '\xE2';
-            out_buf[pos++] = '\x96';
-            out_buf[pos++] = '\x80';
-        }
-    }
-    pos += snprintf(out_buf + pos, sizeof(out_buf) - pos, "\033[0m");
-
-    if (write(STDOUT_FILENO, out_buf, (size_t)pos) < 0) {
-    }
-}
-
 void platform_wait_frame(void)
 {
     struct timespec ts;
     ts.tv_sec = 0;
     ts.tv_nsec = 16666667L;
     nanosleep(&ts, NULL);
+}
+
+void term_clear(uint8_t fg, uint8_t bg)
+{
+    int y, x;
+    for (y = 0; y < TERM_H; y++) {
+        for (x = 0; x < TERM_W; x++) {
+            term_buf[y][x].ch = ' ';
+            term_buf[y][x].fg = fg;
+            term_buf[y][x].bg = bg;
+        }
+    }
+}
+
+void term_put_cell(int x, int y, char ch, uint8_t fg, uint8_t bg)
+{
+    if ((unsigned)x >= TERM_W || (unsigned)y >= TERM_H) return;
+    term_buf[y][x].ch = ch;
+    term_buf[y][x].fg = fg;
+    term_buf[y][x].bg = bg;
+}
+
+void term_put_str(int x, int y, const char *s, uint8_t fg, uint8_t bg)
+{
+    if ((unsigned)y >= TERM_H || !s) return;
+    while (*s && x < TERM_W) {
+        if (x >= 0) {
+            term_buf[y][x].ch = *s;
+            term_buf[y][x].fg = fg;
+            term_buf[y][x].bg = bg;
+        }
+        x++;
+        s++;
+    }
+}
+
+void term_present(void)
+{
+    static char out_buf[TERM_H * TERM_W * 16 + 512];
+    int pos = 0;
+    int y, x;
+    int last_fg = -1, last_bg = -1;
+
+    pos += snprintf(out_buf + pos, sizeof(out_buf) - pos, "\033[H");
+
+    for (y = 0; y < TERM_H; y++) {
+        if (y > 0) {
+            out_buf[pos++] = '\r';
+            out_buf[pos++] = '\n';
+        }
+        for (x = 0; x < TERM_W; x++) {
+            uint8_t fg = term_buf[y][x].fg & 0x0F;
+            uint8_t bg = term_buf[y][x].bg & 0x0F;
+            char ch = term_buf[y][x].ch;
+            if ((unsigned char)ch < 32 || (unsigned char)ch > 126) ch = ' ';
+            if ((int)fg != last_fg || (int)bg != last_bg) {
+                pos += snprintf(out_buf + pos, sizeof(out_buf) - pos,
+                                "\033[%d;%dm", col_to_ansi_fg[fg], col_to_ansi_bg[bg]);
+                last_fg = (int)fg;
+                last_bg = (int)bg;
+            }
+            out_buf[pos++] = ch;
+        }
+    }
+    pos += snprintf(out_buf + pos, sizeof(out_buf) - pos, "\033[0m");
+
+    if (write(STDOUT_FILENO, out_buf, (size_t)pos) < 0) {
+    }
 }

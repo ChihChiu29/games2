@@ -1,4 +1,5 @@
 #include "render.h"
+#include "vga.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,7 +63,6 @@ static void canv_rect(int x, int y, int w, int h, uint8_t col)
     }
 }
 
-/* Shaded box with top-left highlight and bottom-right shadow */
 static void canv_shaded_box(int x, int y, int w, int h, uint8_t dark, uint8_t mid, uint8_t light)
 {
     int py, px;
@@ -91,8 +91,6 @@ static void canv_line(int x0, int y0, int x1, int y1, uint8_t col)
     }
 }
 
-/* Generates a 1px PAL_OUTLINE border around all non-zero pixels and blits
- * to the main 320x200 framebuffer with optional scaling & hurt/crit tint. */
 static void canv_blit_outlined(int world_cx, int world_cy, int scale_pct, uint8_t tint_col)
 {
     int y, x;
@@ -123,13 +121,12 @@ static void canv_blit_outlined(int world_cx, int world_cy, int scale_pct, uint8_
                 if (tint_col != 0 && col != PAL_OUTLINE) {
                     col = tint_col;
                 }
-                platform_put_pixel(world_cx + x, world_cy + y, col);
+                vga_put_pixel(world_cx + x, world_cy + y, col);
             }
         }
     }
 }
 
-/* Draws a dithered oval drop shadow on the dungeon floor beneath a character */
 static void draw_floor_shadow(int cx, int cy, int rx, int ry)
 {
     int y, x;
@@ -137,7 +134,7 @@ static void draw_floor_shadow(int cx, int cy, int rx, int ry)
         for (x = -rx; x <= rx; x++) {
             if ((x * x * 100) / (rx * rx) + (y * y * 100) / (ry * ry) <= 100) {
                 if (((cx + x + cy + y) & 1) == 0) {
-                    platform_put_pixel(cx + x, cy + y, PAL_SHADOW);
+                    vga_put_pixel(cx + x, cy + y, PAL_SHADOW);
                 }
             }
         }
@@ -152,7 +149,6 @@ static void generate_knight_rig(const Character *c, int stride, int bob)
 {
     Direction dir = c->dir;
 
-    /* 1. Back Cape when facing DOWN, LEFT, or RIGHT */
     if (dir == DIR_DOWN) {
         canv_shaded_box(-5, -2 + bob, 10, 9, PAL_BLUE_DARK, PAL_BLUE_MID, PAL_BLUE_LIGHT);
     } else if (dir == DIR_RIGHT) {
@@ -161,7 +157,6 @@ static void generate_knight_rig(const Character *c, int stride, int bob)
         canv_shaded_box(1, -2 + bob, 5, 9, PAL_BLUE_DARK, PAL_BLUE_MID, PAL_BLUE_LIGHT);
     }
 
-    /* 2. Articulated Armored Legs / Boots */
     if (dir == DIR_DOWN || dir == DIR_UP) {
         canv_shaded_box(-4, 4 + stride, 3, 5, PAL_STEEL_DARK, PAL_STEEL_MID, PAL_STEEL_LIGHT);
         canv_shaded_box( 1, 4 - stride, 3, 5, PAL_STEEL_DARK, PAL_STEEL_MID, PAL_STEEL_LIGHT);
@@ -170,34 +165,26 @@ static void generate_knight_rig(const Character *c, int stride, int bob)
         canv_shaded_box(-1 - stride, 4, 3, 5, PAL_STEEL_DARK, PAL_STEEL_MID, PAL_STEEL_LIGHT);
     }
 
-    /* 3. Armored Breastplate, Surcoat & Shoulder Pauldrons */
     if (dir == DIR_DOWN || dir == DIR_UP) {
-        /* Breastplate */
         canv_shaded_box(-4, -3 + bob, 8, 7, PAL_STEEL_DARK, PAL_STEEL_MID, PAL_STEEL_LIGHT);
-        /* Royal blue surcoat belt & tabard */
         canv_rect(-3, 1 + bob, 6, 3, PAL_BLUE_MID);
         canv_rect(-3, 1 + bob, 6, 1, PAL_GOLD_MID);
-        /* Left & Right Pauldrons */
         canv_shaded_box(-7, -3 + bob, 3, 4, PAL_STEEL_DARK, PAL_STEEL_LIGHT, PAL_STEEL_SHINE);
         canv_shaded_box( 4, -3 + bob, 3, 4, PAL_STEEL_DARK, PAL_STEEL_MID,   PAL_STEEL_LIGHT);
         canv_put(-6, -3 + bob, PAL_GOLD_LIGHT);
         canv_put( 5, -3 + bob, PAL_GOLD_LIGHT);
-        /* Flowing Cape over back when facing UP */
         if (dir == DIR_UP) {
             canv_shaded_box(-4, -2 + bob, 8, 8, PAL_BLUE_DARK, PAL_BLUE_MID, PAL_BLUE_LIGHT);
             canv_rect(-3, -2 + bob, 6, 1, PAL_GOLD_MID);
         }
     } else {
-        /* Side profile torso & pauldron */
         canv_shaded_box(-3, -3 + bob, 6, 7, PAL_STEEL_DARK, PAL_STEEL_MID, PAL_STEEL_LIGHT);
         canv_rect(-3, 1 + bob, 6, 2, PAL_BLUE_MID);
         canv_shaded_box(-2, -2 + bob, 4, 4, PAL_STEEL_MID, PAL_STEEL_LIGHT, PAL_STEEL_SHINE);
         canv_put(0, -2 + bob, PAL_GOLD_LIGHT);
     }
 
-    /* 4. Great-Helm, Visor & Crimson Plume */
     int hy = -9 + bob;
-    /* Plume curving backward */
     if (dir == DIR_DOWN || dir == DIR_UP) {
         canv_rect(-1, hy - 3, 3, 3, PAL_CRIMSON_LIGHT);
         canv_put(0, hy - 4, PAL_CRIMSON_HOT);
@@ -209,10 +196,8 @@ static void generate_knight_rig(const Character *c, int stride, int bob)
         canv_rect(4, hy - 1, 2, 3, PAL_CRIMSON_MID);
     }
 
-    /* Helmet Dome */
     canv_shaded_box(-3, hy, 7, 6, PAL_STEEL_DARK, PAL_STEEL_LIGHT, PAL_STEEL_SHINE);
     if (dir == DIR_DOWN) {
-        /* Gold cross-trim & dark T-visor */
         canv_rect(-2, hy + 2, 5, 1, PAL_GOLD_LIGHT);
         canv_rect(-2, hy + 3, 5, 1, PAL_OUTLINE);
         canv_rect( 0, hy + 3, 1, 3, PAL_OUTLINE);
@@ -225,7 +210,6 @@ static void generate_knight_rig(const Character *c, int stride, int bob)
         canv_rect(-3, hy + 3, 3, 1, PAL_OUTLINE);
         canv_rect(-2, hy + 3, 1, 2, PAL_OUTLINE);
     } else {
-        /* Back of helmet */
         canv_rect(-2, hy + 4, 5, 1, PAL_GOLD_MID);
     }
 }
@@ -235,12 +219,10 @@ static void generate_skeleton_rig(const Character *c, int stride, int bob, bool 
     Direction dir = c->dir;
     int recoil = (c->action == ACT_STAGGER || c->action == ACT_CRIT_HURT) ? 2 : 0;
 
-    /* 1. Tattered Crimson Mantle for Skeleton Lord */
     if (is_lord) {
         canv_shaded_box(-5, -3 + bob, 11, 8, PAL_CRIMSON_DARK, PAL_CRIMSON_MID, PAL_CRIMSON_LIGHT);
     }
 
-    /* 2. Bony Legs (Femur + Knee Knob + Tibia) */
     if (dir == DIR_DOWN || dir == DIR_UP) {
         canv_line(-3, 4, -3, 8 + stride, PAL_BONE_MID);
         canv_put(-3, 6 + stride / 2, PAL_BONE_SHINE);
@@ -251,12 +233,10 @@ static void generate_skeleton_rig(const Character *c, int stride, int bob, bool 
         canv_line( 1 - stride, 4,  2 - stride, 8, PAL_BONE_LIGHT);
     }
 
-    /* 3. Bone Pelvis, Spine & Ribcage */
     canv_rect(-3, 3 + bob, 7, 2, PAL_BONE_MID);
     canv_line(0, -3 + bob, 0, 3 + bob, PAL_BONE_DARK);
 
     if (dir == DIR_DOWN || dir == DIR_UP) {
-        /* 3 Distinct Curved Ribs with dark intercostal gaps */
         canv_rect(-4, -3 + bob, 9, 1, PAL_BONE_SHINE);
         canv_rect(-4, -1 + bob, 9, 1, PAL_BONE_LIGHT);
         canv_rect(-3,  1 + bob, 7, 1, PAL_BONE_MID);
@@ -264,14 +244,11 @@ static void generate_skeleton_rig(const Character *c, int stride, int bob, bool 
             canv_put(0, -2 + bob, PAL_BONE_MID);
             canv_put(0,  0 + bob, PAL_BONE_MID);
         } else {
-            /* Prominent vertebral column on back */
             canv_line(0, -4 + bob, 0, 3 + bob, PAL_BONE_SHINE);
         }
-        /* Bony Arms */
         canv_line(-5, -3 + bob, -6 - recoil, 2 + bob - recoil, PAL_BONE_LIGHT);
         canv_line( 5, -3 + bob,  6 + recoil, 2 + bob - recoil, PAL_BONE_LIGHT);
     } else {
-        /* Side profile ribcage */
         canv_rect(-2, -3 + bob, 5, 1, PAL_BONE_SHINE);
         canv_rect(-2, -1 + bob, 5, 1, PAL_BONE_LIGHT);
         canv_rect(-2,  1 + bob, 4, 1, PAL_BONE_MID);
@@ -279,25 +256,19 @@ static void generate_skeleton_rig(const Character *c, int stride, int bob, bool 
     }
 
     if (is_lord) {
-        /* Dark iron & gold pauldrons on Skeleton Lord */
         canv_shaded_box(-7, -4 + bob, 3, 3, PAL_STEEL_DARK, PAL_STEEL_MID, PAL_GOLD_LIGHT);
         canv_shaded_box( 5, -4 + bob, 3, 3, PAL_STEEL_DARK, PAL_STEEL_MID, PAL_GOLD_LIGHT);
     }
 
-    /* 4. Skull, Jaw & Glowing Red Eye Sockets */
     int hy = -9 + bob - recoil;
-    /* Rounded cranium */
     canv_shaded_box(-3, hy, 7, 5, PAL_BONE_MID, PAL_BONE_LIGHT, PAL_BONE_SHINE);
-    /* Narrower jawbone */
     canv_rect(-2, hy + 5, 5, 2, PAL_BONE_MID);
 
     if (dir == DIR_DOWN) {
-        /* Two dark eye sockets with glowing red pupils */
         canv_rect(-2, hy + 2, 2, 2, PAL_OUTLINE);
         canv_rect( 1, hy + 2, 2, 2, PAL_OUTLINE);
         canv_put(-2, hy + 2, PAL_CRIMSON_HOT);
         canv_put( 1, hy + 2, PAL_CRIMSON_HOT);
-        /* Nasal cavity & teeth */
         canv_put(0, hy + 4, PAL_OUTLINE);
         canv_put(-1, hy + 6, PAL_OUTLINE);
         canv_put( 1, hy + 6, PAL_OUTLINE);
@@ -311,7 +282,6 @@ static void generate_skeleton_rig(const Character *c, int stride, int bob, bool 
         canv_put(-1, hy + 6, PAL_OUTLINE);
     }
 
-    /* Jagged Gold Crown on Skeleton Lord */
     if (is_lord) {
         canv_rect(-3, hy - 1, 7, 1, PAL_GOLD_MID);
         canv_put(-3, hy - 2, PAL_GOLD_SHINE);
@@ -321,19 +291,63 @@ static void generate_skeleton_rig(const Character *c, int stride, int bob, bool 
 }
 
 /* =========================================================================
- * Procedural Weapon, Shield & Hitbox Arc Renderer
+ * Pixel-Art Kite Shield & Curved Slash/Thrust Trails (No Debug Rectangles!)
  * ========================================================================= */
 
 static void draw_outlined_world_line(int x0, int y0, int x1, int y1, uint8_t col)
 {
-    platform_draw_line(x0 - 1, y0, x1 - 1, y1, PAL_OUTLINE);
-    platform_draw_line(x0 + 1, y0, x1 + 1, y1, PAL_OUTLINE);
-    platform_draw_line(x0, y0 - 1, x1, y1 - 1, PAL_OUTLINE);
-    platform_draw_line(x0, y0 + 1, x1, y1 + 1, PAL_OUTLINE);
-    platform_draw_line(x0, y0, x1, y1, col);
+    vga_draw_line(x0 - 1, y0, x1 - 1, y1, PAL_OUTLINE);
+    vga_draw_line(x0 + 1, y0, x1 + 1, y1, PAL_OUTLINE);
+    vga_draw_line(x0, y0 - 1, x1, y1 - 1, PAL_OUTLINE);
+    vga_draw_line(x0, y0 + 1, x1, y1 + 1, PAL_OUTLINE);
+    vga_draw_line(x0, y0, x1, y1, col);
 }
 
-/* Renders an articulated melee weapon from local (hand_fwd, hand_right) to (tip_fwd, tip_right) */
+/* Draws a proper pixel-art Kite/Heater Shield on the 48x48 outlined canvas */
+static void draw_procedural_shield(const Character *c)
+{
+    if (!c->left_weapon || c->left_weapon->kind != WEAPON_SHIELD) return;
+
+    bool blocking = (c->action == ACT_BLOCK);
+    int parry_win = (c->left_weapon->parry_window_frames > 0) ? c->left_weapon->parry_window_frames : 11;
+    bool is_parry = blocking && (c->block_hold_frames <= parry_win);
+
+    int sx, sy;
+    if (blocking) {
+        render_local_to_world(c, 8, 0, &sx, &sy);
+    } else {
+        render_local_to_world(c, 1, -7, &sx, &sy);
+    }
+
+    canv_clear();
+    uint8_t rim  = is_parry ? PAL_GOLD_SHINE : PAL_STEEL_LIGHT;
+    uint8_t face = is_parry ? PAL_GOLD_LIGHT : PAL_BLUE_MID;
+    uint8_t boss = is_parry ? COL_WHITE      : PAL_GOLD_LIGHT;
+
+    if (blocking) {
+        /* Large raised Kite Shield (11px tall, tapered point at bottom) */
+        canv_rect(-4, -5, 9, 6, rim);
+        canv_rect(-3, -4, 7, 5, face);
+        canv_rect(-3,  1, 7, 2, rim);
+        canv_rect(-2,  1, 5, 2, face);
+        canv_rect(-1,  3, 3, 2, rim);
+        canv_put(  0,  3, face);
+        canv_put(  0,  5, rim);
+        /* Gold Cross Emblem */
+        canv_line(0, -3, 0, 2, boss);
+        canv_line(-2, -1, 2, -1, boss);
+    } else {
+        /* Compact idle Heater Shield on left arm */
+        canv_rect(-3, -3, 6, 4, rim);
+        canv_rect(-2, -2, 4, 3, face);
+        canv_rect(-2,  1, 4, 1, rim);
+        canv_rect(-1,  2, 2, 1, rim);
+        canv_put(  0, -1, boss);
+    }
+
+    canv_blit_outlined(sx, sy, 100, 0);
+}
+
 static void draw_procedural_melee_weapon(const Character *c, const WeaponDef *w,
                                          int hand_fwd, int hand_right, int tip_fwd, int tip_right,
                                          bool windup_glint)
@@ -343,82 +357,76 @@ static void draw_procedural_melee_weapon(const Character *c, const WeaponDef *w,
     render_local_to_world(c, tip_fwd, tip_right, &tx, &ty);
 
     if (w->style == WSTYLE_SPEAR) {
-        /* Wooden shaft from hand to 70% toward tip, gleaming steel spearhead for last 30% */
         int mx = hx + ((tx - hx) * 7) / 10;
         int my = hy + ((ty - hy) * 7) / 10;
         draw_outlined_world_line(hx, hy, mx, my, PAL_WOOD_LIGHT);
         draw_outlined_world_line(mx, my, tx, ty, windup_glint ? PAL_GOLD_SHINE : PAL_STEEL_SHINE);
     } else {
-        /* Sword / Greatsword: Pommel/Hilt + Gold Crossguard + Broad Steel Blade */
         int gx = hx + ((tx - hx) * 2) / 10;
         int gy = hy + ((ty - hy) * 2) / 10;
         draw_outlined_world_line(hx, hy, gx, gy, PAL_WOOD_LIGHT);
         draw_outlined_world_line(gx, gy, tx, ty, windup_glint ? PAL_GOLD_SHINE : PAL_STEEL_SHINE);
-        /* Crossguard perpendicular to blade */
         int px = -(ty - hy) / 5;
         int py =  (tx - hx) / 5;
         draw_outlined_world_line(gx - px, gy - py, gx + px, gy + py, PAL_GOLD_LIGHT);
     }
 
     if (windup_glint) {
-        platform_fill_rect(tx - 1, ty - 1, 3, 3, PAL_GOLD_SHINE);
-        platform_put_pixel(tx, ty, COL_WHITE);
+        vga_fill_rect(tx - 1, ty - 1, 3, 3, PAL_GOLD_SHINE);
+        vga_put_pixel(tx, ty, COL_WHITE);
     }
 }
 
-static void draw_procedural_shield(const Character *c)
+/* Draws a curved pixel-art slash swoosh or piercing thrust streak (never a rectangle!) */
+static void draw_weapon_motion_trail(const Character *c, const AttackDef *atk,
+                                     int rel, int total, int reach, int width)
 {
-    if (!c->left_weapon || c->left_weapon->kind != WEAPON_SHIELD) return;
-
-    if (c->action == ACT_BLOCK && c->shield_box.active) {
-        int parry_win = (c->left_weapon->parry_window_frames > 0) ? c->left_weapon->parry_window_frames : 11;
-        bool is_parry = (c->block_hold_frames <= parry_win);
-        uint8_t fill_c = is_parry ? PAL_GOLD_LIGHT : PAL_BLUE_MID;
-        uint8_t rim_c  = is_parry ? PAL_GOLD_SHINE : PAL_STEEL_SHINE;
-
-        int w = c->shield_box.x2 - c->shield_box.x1 + 1;
-        int h = c->shield_box.y2 - c->shield_box.y1 + 1;
-        platform_fill_rect(c->shield_box.x1 - 1, c->shield_box.y1 - 1, w + 2, h + 2, PAL_OUTLINE);
-        platform_fill_rect(c->shield_box.x1, c->shield_box.y1, w, h, fill_c);
-        platform_draw_rect(c->shield_box.x1, c->shield_box.y1, w, h, rim_c);
-    } else {
-        /* Idle Kite Shield held on Left Arm (right = -7) */
-        int sx, sy;
-        render_local_to_world(c, 1, -7, &sx, &sy);
-        platform_fill_rect(sx - 3, sy - 4, 6, 8, PAL_OUTLINE);
-        platform_fill_rect(sx - 2, sy - 3, 4, 6, PAL_BLUE_MID);
-        platform_draw_rect(sx - 2, sy - 3, 4, 6, PAL_STEEL_LIGHT);
-        platform_put_pixel(sx - 1, sy, PAL_GOLD_LIGHT);
-        platform_put_pixel(sx,     sy, PAL_GOLD_LIGHT);
-    }
-}
-
-static void draw_active_hitbox_zone(const Character *c)
-{
-    if (!c->hitbox.active) return;
-
-    const AttackDef *atk = character_get_active_attack(c);
-    bool is_crit = (c->action == ACT_CRIT_ATTACK) || (atk && atk->is_critical);
+    bool is_crit = (c->action == ACT_CRIT_ATTACK) || atk->is_critical;
     bool is_spec = (c->attack_slot == WATK_SPECIAL);
 
-    uint8_t fill_a = is_crit ? PAL_GOLD_LIGHT  : (is_spec ? PAL_ARCANE_MID   : PAL_CRIMSON_MID);
-    uint8_t fill_b = is_crit ? PAL_CRIMSON_HOT : (is_spec ? PAL_ARCANE_LIGHT : PAL_CRIMSON_LIGHT);
-    uint8_t border = is_crit ? COL_WHITE       : (is_spec ? PAL_ARCANE_HOT   : PAL_GOLD_LIGHT);
+    uint8_t col_outer = is_crit ? COL_WHITE       : (is_spec ? PAL_ARCANE_HOT   : PAL_GOLD_SHINE);
+    uint8_t col_mid   = is_crit ? PAL_GOLD_LIGHT  : (is_spec ? PAL_ARCANE_LIGHT : PAL_CRIMSON_LIGHT);
+    uint8_t col_tail  = is_crit ? PAL_CRIMSON_MID : (is_spec ? PAL_ARCANE_MID   : PAL_CRIMSON_DARK);
 
-    int x, y;
-    for (y = c->hitbox.y1; y <= c->hitbox.y2; y++) {
-        if ((unsigned)y >= SCREEN_H) continue;
-        for (x = c->hitbox.x1; x <= c->hitbox.x2; x++) {
-            if ((unsigned)x >= SCREEN_W) continue;
-            /* Translucent/dithered pattern so floor & characters remain visible underneath */
-            if (((x + y) & 1) == 0) {
-                framebuffer[y][x] = ((x ^ y) & 2) ? fill_b : fill_a;
-            }
-        }
+    if (atk->anim_type == ANIM_SLASH) {
+        int cur_r = width - (rel * width * 2) / total;
+        int prev_r1 = cur_r + width / 3;
+        int prev_r2 = cur_r + (width * 2) / 3;
+        if (prev_r1 > width) prev_r1 = width;
+        if (prev_r2 > width) prev_r2 = width;
+
+        int f0 = reach - iabs(cur_r) / 3;
+        int f1 = reach - iabs(prev_r1) / 3;
+        int f2 = reach - iabs(prev_r2) / 3;
+
+        int x0, y0, x1, y1, x2, y2;
+        render_local_to_world(c, f0, cur_r,   &x0, &y0);
+        render_local_to_world(c, f1, prev_r1, &x1, &y1);
+        render_local_to_world(c, f2, prev_r2, &x2, &y2);
+
+        /* Outer bright curved arc + inner fading smear */
+        vga_draw_line(x2, y2, x1, y1, col_tail);
+        vga_draw_line(x1, y1, x0, y0, col_mid);
+        vga_draw_line(x1 + 1, y1, x0 + 1, y0, col_outer);
+
+        int ix0, iy0, ix1, iy1;
+        render_local_to_world(c, f0 - 3, cur_r,   &ix0, &iy0);
+        render_local_to_world(c, f1 - 3, prev_r1, &ix1, &iy1);
+        vga_draw_line(ix1, iy1, ix0, iy0, col_tail);
+    } else {
+        /* Piercing thrust / cleave speed-lines along the blade axis */
+        int sx, sy, ex, ey;
+        render_local_to_world(c, 6, -2, &sx, &sy);
+        render_local_to_world(c, reach + 2, -2, &ex, &ey);
+        vga_draw_line(sx, sy, ex, ey, col_tail);
+
+        render_local_to_world(c, 8, 3, &sx, &sy);
+        render_local_to_world(c, reach + 2, 3, &ex, &ey);
+        vga_draw_line(sx, sy, ex, ey, col_mid);
+
+        render_local_to_world(c, reach, 1, &ex, &ey);
+        vga_fill_rect(ex - 1, ey - 1, 3, 3, col_outer);
     }
-    platform_draw_rect(c->hitbox.x1, c->hitbox.y1,
-                       c->hitbox.x2 - c->hitbox.x1 + 1,
-                       c->hitbox.y2 - c->hitbox.y1 + 1, border);
 }
 
 static void draw_character_weapon_anim(const Character *c)
@@ -431,14 +439,12 @@ static void draw_character_weapon_anim(const Character *c)
     if (len < 12) len = 16;
 
     if (c->action == ACT_STAGGER || c->action == ACT_CRIT_HURT) {
-        /* Stunned: Weapon flung wide open to the side! */
         draw_procedural_melee_weapon(c, w, -2, 8, -6, 8 + len / 2, false);
         return;
     }
 
     const AttackDef *atk = character_get_active_attack(c);
     if (!atk) {
-        /* Idle Pose: held in right hand angled slightly forward */
         draw_procedural_melee_weapon(c, w, -2, 7, len - 4, 8, false);
         return;
     }
@@ -449,7 +455,6 @@ static void draw_character_weapon_anim(const Character *c)
     int active_end   = atk->windup_frames + atk->active_frames;
 
     if (c->action_frame <= atk->windup_frames) {
-        /* Windup Pose: pulled back or cocked wide with warning glint! */
         bool glint = (c->action_frame > atk->windup_frames - 10) && ((c->action_frame & 1) == 0);
         if (atk->anim_type == ANIM_SLASH) {
             draw_procedural_melee_weapon(c, w, -2, 8, 2, 8 + len, glint);
@@ -457,9 +462,11 @@ static void draw_character_weapon_anim(const Character *c)
             draw_procedural_melee_weapon(c, w, -6, 6, len - 8, 6, glint);
         }
     } else if (c->action_frame <= active_end) {
-        /* Active Attack Pose: smoothly interpolates across slash arc or thrust extension! */
         int rel = c->action_frame - active_start;
         int total = (atk->active_frames > 1) ? (atk->active_frames - 1) : 1;
+
+        draw_weapon_motion_trail(c, atk, rel, total, reach, width);
+
         if (atk->anim_type == ANIM_SLASH) {
             int tip_r = width - (rel * width * 2) / total;
             int tip_f = reach - (iabs(tip_r) / 3);
@@ -468,7 +475,6 @@ static void draw_character_weapon_anim(const Character *c)
             draw_procedural_melee_weapon(c, w, 4, 1, reach, 1, (c->action == ACT_CRIT_ATTACK));
         }
     } else {
-        /* Recovery Pose */
         if (atk->anim_type == ANIM_SLASH) {
             draw_procedural_melee_weapon(c, w, 1, -6, 4, -6 - len / 2, false);
         } else {
@@ -477,7 +483,6 @@ static void draw_character_weapon_anim(const Character *c)
     }
 }
 
-/* Draws flying bone shards & crimson/gold sparks when critically struck */
 static void draw_crit_shatter_particles(const Character *c)
 {
     static const int8_t dir_vx[8] = { -3,  3, -4,  4, -2,  2,  0,  0 };
@@ -490,25 +495,20 @@ static void draw_crit_shatter_particles(const Character *c)
         int px = c->cx + (dir_vx[i] * t) / 4;
         int py = c->cy + (dir_vy[i] * t) / 4;
         uint8_t col = (i & 1) ? PAL_BONE_SHINE : ((t & 2) ? PAL_GOLD_SHINE : PAL_CRIMSON_HOT);
-        platform_fill_rect(px - 1, py - 1, 2, 2, col);
-        platform_put_pixel(px + 1, py, PAL_OUTLINE);
+        vga_fill_rect(px - 1, py - 1, 2, 2, col);
+        vga_put_pixel(px + 1, py, PAL_OUTLINE);
     }
 }
 
-void render_character(const Character *c)
+static void render_character_vga(const Character *c)
 {
     if (!c || !c->active || !c->def) return;
 
     int scale = (c->def->scale_pct > 0) ? c->def->scale_pct : 100;
     int rad   = character_radius(c);
 
-    /* 1. Draw Active Hitbox Zone on the floor/air first so characters & blades draw cleanly on top */
-    draw_active_hitbox_zone(c);
-
-    /* 2. Floor Drop Shadow */
     draw_floor_shadow(c->cx, c->cy + (8 * scale) / 100, rad, rad / 2 + 1);
 
-    /* 3. Dodge Roll Animation */
     if (c->is_player && c->action == ACT_ROLL) {
         canv_clear();
         uint8_t roll_c = (c->action_frame <= player_def.roll_iframes) ? PAL_EMERALD_LIGHT : PAL_BLUE_LIGHT;
@@ -517,13 +517,11 @@ void render_character(const Character *c)
         return;
     }
 
-    /* 4. Compute Procedural Walk Cycle Stride & Torso Bob */
     static const int8_t stride_tbl[8] = { 0, 1, 2, 1, 0, -1, -2, -1 };
     int phase  = (c->walk_ticks / 4) & 7;
     int stride = stride_tbl[phase];
     int bob    = (stride != 0) ? -1 : 0;
 
-    /* 5. Generate Articulated Body Rig on 48x48 Canvas */
     canv_clear();
     if (c->def->body_style == BSTYLE_KNIGHT) {
         generate_knight_rig(c, stride, bob);
@@ -542,20 +540,17 @@ void render_character(const Character *c)
 
     canv_blit_outlined(c->cx, c->cy, scale, tint);
 
-    /* 6. Draw Equipped Shield & Melee Weapon */
     draw_procedural_shield(c);
     draw_character_weapon_anim(c);
 
-    /* 7. Stunned Stars above Head (`ACT_STAGGER`) */
     if (c->action == ACT_STAGGER) {
         int sy = c->cy - (13 * scale) / 100;
         int offset = ((c->action_frame / 4) & 1) ? 4 : -4;
-        platform_fill_rect(c->cx - 5, sy, 2, 2, PAL_GOLD_SHINE);
-        platform_fill_rect(c->cx + 4, sy, 2, 2, PAL_GOLD_SHINE);
-        platform_put_pixel(c->cx + offset, sy - 2, COL_WHITE);
+        vga_fill_rect(c->cx - 5, sy, 2, 2, PAL_GOLD_SHINE);
+        vga_fill_rect(c->cx + 4, sy, 2, 2, PAL_GOLD_SHINE);
+        vga_put_pixel(c->cx + offset, sy - 2, COL_WHITE);
     }
 
-    /* 8. Critical-Attacked Bone/Spark Burst (`ACT_CRIT_HURT`) */
     if (c->action == ACT_CRIT_HURT) {
         draw_crit_shatter_particles(c);
     }
@@ -568,16 +563,12 @@ void render_character(const Character *c)
 static void draw_dungeon_arena(void)
 {
     int y, x;
+    vga_fill_rect(0, 0, VGA_W, ARENA_TOP, COL_BLACK);
 
-    /* Fill HUD background */
-    platform_fill_rect(0, 0, SCREEN_W, ARENA_TOP, COL_BLACK);
-
-    /* Fill Dungeon Stone Floor with subtle flagstone tile pattern */
-    for (y = ARENA_TOP; y < SCREEN_H; y++) {
-        for (x = 0; x < SCREEN_W; x++) {
+    for (y = ARENA_TOP; y < VGA_H; y++) {
+        for (x = 0; x < VGA_W; x++) {
             uint8_t col = PAL_FLOOR_MID;
             int ty = y - ARENA_TOP;
-            /* 16x16 stone tiles with staggered mortar joints */
             int row_idx = ty >> 4;
             int gx = (x + (row_idx & 1) * 8) & 15;
             int gy = ty & 15;
@@ -590,28 +581,27 @@ static void draw_dungeon_arena(void)
         }
     }
 
-    /* Stone Brick Perimeter Walls */
-    platform_fill_rect(0, ARENA_TOP, SCREEN_W, 4, PAL_WALL_MID);
-    platform_fill_rect(0, ARENA_BOTTOM, SCREEN_W, SCREEN_H - ARENA_BOTTOM, PAL_WALL_MID);
-    platform_fill_rect(0, ARENA_TOP, ARENA_LEFT, SCREEN_H - ARENA_TOP, PAL_WALL_MID);
-    platform_fill_rect(ARENA_RIGHT, ARENA_TOP, SCREEN_W - ARENA_RIGHT, SCREEN_H - ARENA_TOP, PAL_WALL_MID);
+    vga_fill_rect(0, ARENA_TOP, VGA_W, 4, PAL_WALL_MID);
+    vga_fill_rect(0, ARENA_BOTTOM, VGA_W, VGA_H - ARENA_BOTTOM, PAL_WALL_MID);
+    vga_fill_rect(0, ARENA_TOP, ARENA_LEFT, VGA_H - ARENA_TOP, PAL_WALL_MID);
+    vga_fill_rect(ARENA_RIGHT, ARENA_TOP, VGA_W - ARENA_RIGHT, VGA_H - ARENA_TOP, PAL_WALL_MID);
 
-    platform_draw_rect(ARENA_LEFT, ARENA_TOP + 3,
-                       ARENA_RIGHT - ARENA_LEFT,
-                       ARENA_BOTTOM - ARENA_TOP - 3, PAL_WALL_LIGHT);
+    vga_draw_rect(ARENA_LEFT, ARENA_TOP + 3,
+                  ARENA_RIGHT - ARENA_LEFT,
+                  ARENA_BOTTOM - ARENA_TOP - 3, PAL_WALL_LIGHT);
 }
 
 static void draw_hud_bar(int x, int y, int w, int h, int val, int max_val, uint8_t fill_col, uint8_t shine_col)
 {
-    platform_fill_rect(x, y, w, h, PAL_FLOOR_DARK);
+    vga_fill_rect(x, y, w, h, PAL_FLOOR_DARK);
     if (max_val > 0 && val > 0) {
         int fw = (val * w) / max_val;
         if (fw == 0) fw = 1;
         if (fw > w) fw = w;
-        platform_fill_rect(x, y, fw, h, fill_col);
-        platform_fill_rect(x, y, fw, 1, shine_col);
+        vga_fill_rect(x, y, fw, h, fill_col);
+        vga_fill_rect(x, y, fw, 1, shine_col);
     }
-    platform_draw_rect(x - 1, y - 1, w + 2, h + 2, PAL_STEEL_MID);
+    vga_draw_rect(x - 1, y - 1, w + 2, h + 2, PAL_STEEL_MID);
 }
 
 void render_scene(const char *status_msg, uint8_t status_col)
@@ -621,10 +611,9 @@ void render_scene(const char *status_msg, uint8_t status_col)
 
     draw_dungeon_arena();
 
-    /* Draw Enemies & Overhead HP Bars */
     for (i = 0; i < MAX_ENEMIES; i++) {
         if (!enemies[i].active) continue;
-        render_character(&enemies[i]);
+        render_character_vga(&enemies[i]);
 
         int scale = (enemies[i].def && enemies[i].def->scale_pct > 0) ? enemies[i].def->scale_pct : 100;
         int bar_y = enemies[i].cy - (16 * scale) / 100;
@@ -635,19 +624,18 @@ void render_scene(const char *status_msg, uint8_t status_col)
     }
 
     if (player.active) {
-        render_character(&player);
+        render_character_vga(&player);
     }
 
-    /* Top Graphical HUD (Rows 0..27) */
-    platform_draw_str(4, 2, "HP", COL_LIGHTRED, -1);
+    vga_draw_str(4, 2, "HP", COL_LIGHTRED, -1);
     draw_hud_bar(16, 2, 64, 5, player.hp, player.max_hp, PAL_CRIMSON_MID, PAL_CRIMSON_LIGHT);
 
-    platform_draw_str(4, 10, "ST", COL_LIGHTGREEN, -1);
+    vga_draw_str(4, 10, "ST", COL_LIGHTGREEN, -1);
     draw_hud_bar(16, 10, 64, 5, player.stamina, player.max_stamina, PAL_EMERALD_MID, PAL_EMERALD_LIGHT);
 
     const char *r_wep = player.right_weapon ? player.right_weapon->name : "NONE";
     snprintf(buf, sizeof(buf), "WEP:%s [TAB]", r_wep);
-    platform_draw_str(88, 2, buf, PAL_GOLD_LIGHT, -1);
+    vga_draw_str(88, 2, buf, PAL_GOLD_LIGHT, -1);
 
     const char *stance = "READY";
     uint8_t stance_col = COL_LIGHTGRAY;
@@ -675,15 +663,14 @@ void render_scene(const char *status_msg, uint8_t status_col)
         stance_col = COL_LIGHTRED;
     }
     snprintf(buf, sizeof(buf), "STATE:%s", stance);
-    platform_draw_str(88, 10, buf, stance_col, -1);
+    vga_draw_str(88, 10, buf, stance_col, -1);
 
-    /* Enemy status readout on top-right */
     for (i = 0; i < 2; i++) {
         int y = (i == 0) ? 2 : 10;
         const char *ename = enemies[i].def ? enemies[i].def->name : "ENEMY";
         if (!enemies[i].active) {
             snprintf(buf, sizeof(buf), "%s:SLAIN", ename);
-            platform_draw_str(196, y, buf, COL_DARKGRAY, -1);
+            vga_draw_str(196, y, buf, COL_DARKGRAY, -1);
         } else {
             const char *est = "OK";
             uint8_t ecol = COL_LIGHTGRAY;
@@ -700,12 +687,10 @@ void render_scene(const char *status_msg, uint8_t status_col)
                 ecol = wind ? PAL_GOLD_LIGHT : COL_LIGHTRED;
             }
             snprintf(buf, sizeof(buf), "%s:%d/%d %s", ename, enemies[i].hp, enemies[i].max_hp, est);
-            platform_draw_str(196, y, buf, ecol, -1);
+            vga_draw_str(196, y, buf, ecol, -1);
         }
     }
 
-    /* Status message bar at row 19 */
-    platform_draw_str(4, 19, status_msg, status_col, -1);
-
-    platform_present();
+    vga_draw_str(4, 19, status_msg, status_col, -1);
+    vga_present();
 }

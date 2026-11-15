@@ -18,11 +18,10 @@ LUA_SRCS=(
 )
 
 GAME_SRCS=(
-  gfx.c
   weapon.c
   character.c
   combat.c
-  render.c
+  render_ascii.c
   data_lua.c
   main.c
   platform_linux.c

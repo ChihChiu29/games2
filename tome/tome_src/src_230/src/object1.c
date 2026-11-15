@@ -4647,7 +4647,7 @@ void show_inven_aux(bool mirror, bool everything)
 
 		/* Prepare an index --(-- */
 		/* Prepare a blank index if not selectable */
-		if ( i > 0 )
+		if ( i > 0 && !item_tester_full )
 			sprintf(tmp_val, "%c)", index_to_label(i - 1));
 		else
 			sprintf(tmp_val, "  ");
@@ -4880,7 +4880,7 @@ void show_equip_aux(bool mirror, bool everything)
 		prt("", row + j, col ? col - 2 : col);
 
 		/* Prepare an index --(-- */
-		if (out_index[j] >= 0 )
+		if (out_index[j] >= 0 && !item_tester_full)
 			sprintf(tmp_val, "%c)", index_to_label(out_rindex[j]));
 		else
 			sprintf(tmp_val, "  ");

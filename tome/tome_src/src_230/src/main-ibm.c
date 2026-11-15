@@ -1739,17 +1739,32 @@ static char ibm_scan_row_choice(int my, int mx, int btn)
 	for (x = 0; x < 77 && count < 16; x++)
 	{
 		char c = line[x];
-		if ((isalnum((unsigned char)c)) &&
-		    (x == 0 || line[x - 1] == ' ' || line[x - 1] == '(' || line[x - 1] == '['))
+		if (isalpha((unsigned char)c) &&
+		    (x == 0 || line[x - 1] == ' ') &&
+		    line[x + 1] == ' ' && line[x + 2] == '-' && line[x + 3] == ' ')
 		{
-			if ((line[x + 1] == ')' && line[x + 2] == ' ') ||
-			    (x > 0 && line[x - 1] == '[' && line[x + 1] == ']' && line[x + 2] == ' ') ||
-			    (line[x + 1] == ' ' && line[x + 2] == '-' && line[x + 3] == ' '))
-			{
-				pos[count] = x;
-				chs[count] = c;
-				count++;
-			}
+			/* Single-column skill batch row like "  b - 7) Use Necromancy" */
+			pos[count] = x;
+			chs[count] = c;
+			count++;
+			break;
+		}
+		if (isalpha((unsigned char)c) &&
+		    (x == 0 || line[x - 1] == ' ' || line[x - 1] == '(') &&
+		    line[x + 1] == ')' && line[x + 2] == ' ')
+		{
+			pos[count] = x;
+			chs[count] = c;
+			count++;
+			/* Right-side popup lists (inventory, equipment, spells) are always 1-column */
+			if (pos[0] >= 13) break;
+		}
+		else if (isalnum((unsigned char)c) &&
+		         x > 0 && line[x - 1] == '[' && line[x + 1] == ']' && line[x + 2] == ' ')
+		{
+			pos[count] = x;
+			chs[count] = c;
+			count++;
 		}
 	}
 
@@ -1951,11 +1966,19 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 		{
 			if (mx >= dock_buttons[b].x0 && mx <= dock_buttons[b].x1)
 			{
-				/* If a modal menu/list is currently open, close it first */
+				/* If a modal menu/list is currently open, close it first (unless at Inventory/Equipment "Command:" prompt) */
 				if (!inkey_flag || character_icky || command_see)
 				{
-					Term_keypress(ESCAPE);
-					return (TRUE);
+					bool inv_cmd = (strstr(row0, "Inventory: carrying") != NULL);
+					bool eqp_cmd = (strstr(row0, "Equipment: carrying") != NULL);
+					if ((!inv_cmd && !eqp_cmd) ||
+					    (inv_cmd && dock_buttons[b].cmd == 'i') ||
+					    (eqp_cmd && dock_buttons[b].cmd == 'e') ||
+					    dock_buttons[b].cmd == '+')
+					{
+						Term_keypress(ESCAPE);
+						return (TRUE);
+					}
 				}
 				if (dock_buttons[b].cmd == '+')
 				{

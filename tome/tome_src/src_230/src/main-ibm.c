@@ -1706,6 +1706,7 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 {
 	char row0[81];
 	char line[81];
+	char line20[81];
 	char line23[81];
 	int b;
 
@@ -1725,13 +1726,15 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 
 	ibm_vscr_line(0, row0);
 	ibm_vscr_line(my, line);
+	ibm_vscr_line(20, line20);
 	ibm_vscr_line(23, line23);
 
-	/* 3. Yes/No confirmation prompt on Row 0 or on the clicked row (e.g. "Use quick start (y/n)?") */
+	/* 3. Yes/No confirmation prompt on Row 0, clicked row, or Row 20 during birth (e.g. "Use quick start (y/n)?") */
 	if (strstr(row0, "[y/n]") || strstr(row0, "(y/n)") ||
 	    strstr(row0, "[Y/N]") || strstr(row0, "(Y/N)") ||
 	    strstr(line, "[y/n]") || strstr(line, "(y/n)") ||
-	    strstr(line, "[Y/N]") || strstr(line, "(Y/N)"))
+	    strstr(line, "[Y/N]") || strstr(line, "(Y/N)") ||
+	    (!character_dungeon && (strstr(line20, "(y/n)") || strstr(line20, "[y/n]"))))
 	{
 		const char *yn = strstr(line, "(y/n)");
 		if (!yn) yn = strstr(line, "[y/n]");
@@ -1928,13 +1931,14 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 			if (my >= 2 && my <= 22 && line[48] == ':')
 			{
 				int cur_r = -1, n_opt = 0, r_idx;
+				byte want_attr = use_color_complex ? TERM_L_BLUE : ibm_color_simple[TERM_L_BLUE];
 				for (r_idx = 2; r_idx <= 22; r_idx++)
 				{
 					char rline[81];
 					ibm_vscr_line(r_idx, rline);
 					if (rline[48] == ':')
 					{
-						if ((VirtualScreen[((r_idx * cols) << 1) + 1] & 0x0F) == TERM_L_BLUE)
+						if ((VirtualScreen[((r_idx * cols) << 1) + 1] & 0x0F) == want_attr)
 							cur_r = r_idx;
 						n_opt++;
 					}
@@ -2034,7 +2038,8 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 				Term_keypress('h');
 				return (TRUE);
 			}
-			return (FALSE);
+			Term_keypress('r');
+			return (TRUE);
 		}
 
 		/* 7d. Character Background Edit Mode */

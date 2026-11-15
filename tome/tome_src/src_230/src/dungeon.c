@@ -5740,6 +5740,7 @@ void play_game(bool new_game)
 		}
 
 		process_hooks(HOOK_INIT, "()");
+		msg_print(NULL);
 
 		/* The dungeon is not ready */
 		character_dungeon = FALSE;

@@ -1717,17 +1717,17 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 		return (TRUE);
 	}
 
-	/* 2. If "-more-" message prompt is active, any click advances it */
-	if (msg_flag)
-	{
-		Term_keypress(' ');
-		return (TRUE);
-	}
-
 	ibm_vscr_line(0, row0);
 	ibm_vscr_line(my, line);
 	ibm_vscr_line(20, line20);
 	ibm_vscr_line(23, line23);
+
+	/* 2. If "-more-" message prompt is active, any click advances it */
+	if (msg_flag && (character_dungeon || strstr(row0, "-more-")))
+	{
+		Term_keypress(' ');
+		return (TRUE);
+	}
 
 	/* 3. Yes/No confirmation prompt on Row 0, clicked row, or Row 20 during birth (e.g. "Use quick start (y/n)?") */
 	if (strstr(row0, "[y/n]") || strstr(row0, "(y/n)") ||

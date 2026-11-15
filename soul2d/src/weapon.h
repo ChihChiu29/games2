@@ -3,10 +3,7 @@
 
 #include "platform.h"
 
-#define MAX_HITBOX_CELLS  48
-#define MAX_POSE_CELLS    16
-#define MAX_ATTACK_PHASES  4
-#define MAX_WEAPON_TYPES  16
+#define MAX_WEAPON_TYPES 16
 
 typedef enum {
     DIR_UP = 0,
@@ -22,6 +19,20 @@ typedef enum {
 } WeaponKind;
 
 typedef enum {
+    WSTYLE_SPEAR = 0,
+    WSTYLE_SWORD,
+    WSTYLE_GREATSWORD,
+    WSTYLE_SHIELD
+} WeaponStyle;
+
+typedef enum {
+    ANIM_THRUST = 0,
+    ANIM_SLASH,
+    ANIM_CLEAVE,
+    ANIM_IMPALE
+} AttackAnimType;
+
+typedef enum {
     SLOT_LEFT_HAND = 0,
     SLOT_RIGHT_HAND = 1
 } WeaponSlot;
@@ -34,49 +45,24 @@ typedef enum {
     WATK_COUNT   = 3
 } WeaponAttackSlot;
 
-/* Relative cell in DIR_UP local coordinates (fwd > 0 is front, right > 0 is right hand) */
-typedef struct {
-    int8_t fwd;
-    int8_t right;
-    uint8_t ch;
-    uint8_t attr;
-} SpriteCell;
-
-typedef struct {
-    int x, y;
-    uint8_t ch;
-    uint8_t attr;
-} WorldCell;
-
-/* One active hitbox phase within an attack animation */
-typedef struct {
-    int duration_frames;
-    int num_cells;
-    SpriteCell cells[MAX_HITBOX_CELLS];
-} AttackPhase;
-
-/* Complete data-driven attack animation & combat properties */
+/* Complete data-driven attack animation & hitbox geometry (in 320x200 pixel space) */
 typedef struct {
     bool valid;
     char name[24];
+    AttackAnimType anim_type;
     int windup_frames;
-    int active_frames;     /* Sum of phases[i].duration_frames */
+    int active_frames;
     int recovery_frames;
+
+    int reach_px;          /* Forward reach from character center (pixels) */
+    int width_px;          /* Half-width of hitbox perpendicular to facing (pixels) */
+
     int damage;
     int chip_damage;
     int stamina_cost;
     int stamina_damage;
     bool causes_stagger;
     bool is_critical;
-
-    int num_windup_cells;
-    SpriteCell windup_cells[MAX_POSE_CELLS];
-
-    int num_recovery_cells;
-    SpriteCell recovery_cells[MAX_POSE_CELLS];
-
-    int num_phases;
-    AttackPhase phases[MAX_ATTACK_PHASES];
 } AttackDef;
 
 /* Base Weapon / Equipment Class Definition (registered in data/weapons/) */
@@ -85,13 +71,13 @@ typedef struct {
     char id[24];
     char name[32];
     WeaponKind kind;
-    bool authored_left;    /* true if idle_cells were authored for left hand (right < 0) */
+    WeaponStyle style;
 
-    int num_idle_cells;
-    SpriteCell idle_cells[MAX_POSE_CELLS];
+    int length_px;         /* Total weapon length in pixels */
+    int blade_width_px;    /* Blade width in pixels */
 
     /* Shield properties (when kind == WEAPON_SHIELD) */
-    int block_move_cd;
+    int block_speed_fp;    /* Walk speed while blocking (1/16 px per frame) */
     int parry_window_frames;
 
     /* Melee attack animations: Normal, Special, and Critical (Riposte/Backstab) */

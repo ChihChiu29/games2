@@ -3,88 +3,68 @@
 #include "game.h"
 #include <string.h>
 
-static void add_hitbox_local(Character *c, int fwd, int right, uint8_t base_ch, uint8_t attr)
+static void set_local_rect(const Character *c, int fwd1, int fwd2, int right1, int right2, HitRect *out)
 {
-    if (c->num_hitbox >= MAX_HITBOX_CELLS) return;
-    int wx, wy;
-    render_local_to_world(c, fwd, right, &wx, &wy);
-    if (wx <= ARENA_LEFT || wx >= ARENA_RIGHT || wy <= ARENA_TOP || wy >= ARENA_BOTTOM) return;
-    c->hitbox[c->num_hitbox].x = wx;
-    c->hitbox[c->num_hitbox].y = wy;
-    c->hitbox[c->num_hitbox].ch = render_rot_tile(base_ch, c->dir);
-    c->hitbox[c->num_hitbox].attr = attr;
-    c->num_hitbox++;
+    int wx1, wy1, wx2, wy2;
+    render_local_to_world(c, fwd1, right1, &wx1, &wy1);
+    render_local_to_world(c, fwd2, right2, &wx2, &wy2);
+
+    out->active = true;
+    out->x1 = (wx1 < wx2) ? wx1 : wx2;
+    out->x2 = (wx1 > wx2) ? wx1 : wx2;
+    out->y1 = (wy1 < wy2) ? wy1 : wy2;
+    out->y2 = (wy1 > wy2) ? wy1 : wy2;
 }
 
-static void add_shield_local(Character *c, int fwd, int right, uint8_t base_ch, uint8_t attr)
+static bool rects_intersect(const HitRect *a, const HitRect *b)
 {
-    if (c->num_shield >= 16) return;
-    int wx, wy;
-    render_local_to_world(c, fwd, right, &wx, &wy);
-    if (wx <= ARENA_LEFT || wx >= ARENA_RIGHT || wy <= ARENA_TOP || wy >= ARENA_BOTTOM) return;
-    c->shield[c->num_shield].x = wx;
-    c->shield[c->num_shield].y = wy;
-    c->shield[c->num_shield].ch = render_rot_tile(base_ch, c->dir);
-    c->shield[c->num_shield].attr = attr;
-    c->num_shield++;
+    if (!a->active || !b->active) return false;
+    return !(a->x2 < b->x1 || a->x1 > b->x2 || a->y2 < b->y1 || a->y1 > b->y2);
 }
 
 void combat_build_hitboxes(Character *c)
 {
-    int i, r;
-    c->num_hitbox = 0;
-    c->num_shield = 0;
+    c->hitbox.active = false;
+    c->shield_box.active = false;
     if (!c->active || !c->def) return;
+
+    int rad = character_radius(c);
 
     /* 1. Shield Barrier when Blocking / Parrying */
     if (c->action == ACT_BLOCK && c->left_weapon && c->left_weapon->kind == WEAPON_SHIELD) {
-        int parry_win = (c->left_weapon->parry_window_frames > 0) ? c->left_weapon->parry_window_frames : 11;
-        bool is_parry = (c->block_hold_frames <= parry_win);
-        uint8_t sh_attr = is_parry
-            ? ATTR(COL_YELLOW, COL_CYAN)
-            : ATTR(COL_LIGHTCYAN, COL_BLUE);
-        uint8_t edge_ch = is_parry ? TILE_PARRY_STAR : TILE_SHIELD_EDGE;
-        uint8_t mid_ch  = is_parry ? TILE_SLASH_ARC  : TILE_SHIELD_MID;
-
-        for (r = -2; r <= 2; r++) {
-            uint8_t ch = (r == -2 || r == 2) ? edge_ch : mid_ch;
-            add_shield_local(c, 2, r, ch, sh_attr);
-            add_shield_local(c, 3, r, ch, sh_attr);
-        }
+        set_local_rect(c, rad - 1, rad + 6, -10, 10, &c->shield_box);
     }
 
-    /* 2. Active Weapon Hitboxes */
+    /* 2. Active Weapon Hitbox */
     const AttackDef *atk = character_get_active_attack(c);
     if (atk) {
-        const WeaponDef *w = character_get_weapon(c, c->active_hand);
-        bool mirror = w && ((c->active_hand == SLOT_LEFT_HAND && !w->authored_left) ||
-                            (c->active_hand == SLOT_RIGHT_HAND && w->authored_left));
         int active_start = atk->windup_frames + 1;
         int active_end   = atk->windup_frames + atk->active_frames;
 
         if (c->action_frame >= active_start && c->action_frame <= active_end) {
             int rel = c->action_frame - active_start;
-            int accum = 0;
-            for (i = 0; i < atk->num_phases; i++) {
-                const AttackPhase *ph = &atk->phases[i];
-                if (rel < accum + ph->duration_frames) {
-                    int cell_i;
-                    for (cell_i = 0; cell_i < ph->num_cells; cell_i++) {
-                        int right_coord = mirror ? -ph->cells[cell_i].right : ph->cells[cell_i].right;
-                        add_hitbox_local(c, ph->cells[cell_i].fwd, right_coord,
-                                         ph->cells[cell_i].ch, ph->cells[cell_i].attr);
-                    }
-                    break;
+            int total = (atk->active_frames > 0) ? atk->active_frames : 1;
+            int reach = (atk->reach_px * (c->def->scale_pct > 0 ? c->def->scale_pct : 100)) / 100;
+            int w     = (atk->width_px * (c->def->scale_pct > 0 ? c->def->scale_pct : 100)) / 100;
+
+            if (atk->anim_type == ANIM_SLASH) {
+                /* 3-stage sweeping arc from right -> center -> left */
+                if (rel * 3 < total) {
+                    set_local_rect(c, rad - 2, reach, -2, w, &c->hitbox);
+                } else if (rel * 3 < total * 2) {
+                    set_local_rect(c, rad, reach + 2, -(w * 2) / 3, (w * 2) / 3, &c->hitbox);
+                } else {
+                    set_local_rect(c, rad - 2, reach, -w, 2, &c->hitbox);
                 }
-                accum += ph->duration_frames;
+            } else {
+                /* Thrust / Cleave / Impale corridor */
+                int cur_reach = (rel * 4 < total) ? (rad + (reach - rad) * 2 / 3) : reach;
+                set_local_rect(c, rad - 1, cur_reach, -w, w, &c->hitbox);
             }
         }
     }
 }
 
-/* Finds an enemy in front of `attacker` eligible for an immediate Critical Attack:
- * - Enemy is stunned (`ACT_STAGGER`, e.g. parried), OR
- * - Attacker is behind the enemy's back (`character_is_behind`). */
 Character *combat_find_crit_target(const Character *attacker)
 {
     int i;
@@ -102,7 +82,7 @@ Character *combat_find_crit_target(const Character *attacker)
         int fwd_dist = rx * fdx + ry * fdy;
         int side_dist = (fdx != 0) ? iabs(ry) : iabs(rx);
 
-        if (fwd_dist >= 4 && fwd_dist <= 8 && side_dist <= 3) {
+        if (fwd_dist >= 12 && fwd_dist <= 34 && side_dist <= 14) {
             if (e->action == ACT_STAGGER || character_is_behind(attacker, e)) {
                 return e;
             }
@@ -113,48 +93,37 @@ Character *combat_find_crit_target(const Character *attacker)
 
 static bool check_hitbox_vs_body(const Character *atk, const Character *tgt)
 {
-    int i;
+    if (!atk->hitbox.active || !tgt->active) return false;
     int rad = character_radius(tgt);
-    for (i = 0; i < atk->num_hitbox; i++) {
-        int hx = atk->hitbox[i].x;
-        int hy = atk->hitbox[i].y;
-        if (hx >= tgt->cx - rad && hx <= tgt->cx + rad &&
-            hy >= tgt->cy - rad && hy <= tgt->cy + rad) {
-            return true;
-        }
-    }
-    return false;
+    HitRect body = { true, tgt->cx - rad, tgt->cy - rad, tgt->cx + rad, tgt->cy + rad };
+    return rects_intersect(&atk->hitbox, &body);
 }
 
 static bool check_hitbox_vs_shield(const Character *atk, const Character *tgt)
 {
-    int i, j;
-    if (tgt->action != ACT_BLOCK) return false;
+    if (!atk->hitbox.active || tgt->action != ACT_BLOCK || !tgt->shield_box.active) return false;
 
-    for (i = 0; i < atk->num_hitbox; i++) {
-        int hx = atk->hitbox[i].x;
-        int hy = atk->hitbox[i].y;
-        for (j = 0; j < tgt->num_shield; j++) {
-            if (iabs(hx - tgt->shield[j].x) <= 1 && iabs(hy - tgt->shield[j].y) <= 1) {
-                return true;
-            }
-        }
+    if (rects_intersect(&atk->hitbox, &tgt->shield_box)) {
+        return true;
     }
 
-    int rel_x = atk->cx - tgt->cx;
-    int rel_y = atk->cy - tgt->cy;
-    switch (tgt->dir) {
-    case DIR_UP:    return (rel_y <= 1);
-    case DIR_DOWN:  return (rel_y >= -1);
-    case DIR_LEFT:  return (rel_x <= 1);
-    case DIR_RIGHT: return (rel_x >= -1);
+    /* Also block if hitbox hits body from the front hemisphere while shield is raised */
+    if (check_hitbox_vs_body(atk, tgt)) {
+        int rel_x = atk->cx - tgt->cx;
+        int rel_y = atk->cy - tgt->cy;
+        switch (tgt->dir) {
+        case DIR_UP:    return (rel_y <= 4);
+        case DIR_DOWN:  return (rel_y >= -4);
+        case DIR_LEFT:  return (rel_x <= 4);
+        case DIR_RIGHT: return (rel_x >= -4);
+        }
     }
     return false;
 }
 
 void combat_resolve_all(void)
 {
-    int i;
+    int i, k;
 
     combat_build_hitboxes(&player);
     for (i = 0; i < MAX_ENEMIES; i++) {
@@ -162,7 +131,7 @@ void combat_resolve_all(void)
     }
 
     /* 1. Player Weapon Hitbox vs Enemies */
-    if (player.active && player.num_hitbox > 0 && !player.hit_dealt) {
+    if (player.active && player.hitbox.active && !player.hit_dealt) {
         const AttackDef *patk = character_get_active_attack(&player);
         const WeaponDef *pwep = character_get_weapon(&player, player.active_hand);
 
@@ -182,42 +151,42 @@ void combat_resolve_all(void)
                 }
 
                 sk->hp -= dmg;
-                sk->hurt_flash = 12;
+                sk->hurt_flash = 14;
                 player.hit_dealt = true;
 
-                /* Knockback (2 cells on critical hit, 1 cell on normal hit) */
-                character_try_move(sk, dir_dx[player.dir], dir_dy[player.dir]);
-                if (is_crit) {
-                    character_try_move(sk, dir_dx[player.dir], dir_dy[player.dir]);
+                /* Pixel knockback */
+                int kb_px = is_crit ? 10 : 5;
+                for (k = 0; k < kb_px; k++) {
+                    character_try_move_px(sk, dir_dx[player.dir], dir_dy[player.dir]);
                 }
 
                 if (is_crit) {
                     sk->action = ACT_CRIT_HURT;
                     sk->action_frame = 1;
-                    sk->num_hitbox = 0;
+                    sk->hitbox.active = false;
                 } else if (patk->causes_stagger && sk->action != ACT_STAGGER) {
                     sk->action = ACT_STAGGER;
-                    sk->action_frame = 45;
-                    sk->num_hitbox = 0;
+                    sk->action_frame = 35;
+                    sk->hitbox.active = false;
                 }
 
                 if (sk->hp <= 0) {
                     sk->hp = 0;
                     sk->active = false;
-                    game_set_status("ENEMY FELLED! (Press [R] to reload Lua & respawn, [TAB] to swap weapon)",
-                                    ATTR(COL_LIGHTGREEN, COL_BLACK), 180);
+                    game_set_status("ENEMY FELLED! ([R] Reload Lua, [TAB] Swap Weapon)",
+                                    COL_LIGHTGREEN, 180);
                 } else if (is_backstab) {
-                    game_set_status("*** CRITICAL BACKSTAB! *** Struck enemy from behind! Bone-shatter!",
-                                    ATTR(COL_YELLOW, COL_RED), 110);
+                    game_set_status("*** CRITICAL BACKSTAB! *** Shattered enemy from behind!",
+                                    COL_YELLOW, 110);
                 } else if (is_riposte || is_crit) {
                     game_set_status("*** CRITICAL RIPOSTE! *** Devastating strike on stunned enemy!",
-                                    ATTR(COL_YELLOW, COL_RED), 110);
+                                    COL_YELLOW, 110);
                 } else if (player.attack_slot == WATK_SPECIAL) {
                     game_set_status("Heavy Special Attack hits! (Enemy staggered!)",
-                                    ATTR(COL_LIGHTMAGENTA, COL_BLACK), 75);
+                                    COL_LIGHTMAGENTA, 75);
                 } else {
                     game_set_status("Normal Attack hits!",
-                                    ATTR(COL_LIGHTCYAN, COL_BLACK), 60);
+                                    COL_LIGHTCYAN, 60);
                 }
             }
         }
@@ -226,7 +195,7 @@ void combat_resolve_all(void)
     /* 2. Enemy Weapon Hitboxes vs Player */
     for (i = 0; i < MAX_ENEMIES; i++) {
         Character *sk = &enemies[i];
-        if (!sk->active || sk->num_hitbox == 0 || sk->hit_dealt || !player.active) continue;
+        if (!sk->active || !sk->hitbox.active || sk->hit_dealt || !player.active) continue;
         const AttackDef *eatk = character_get_active_attack(sk);
         if (!eatk) continue;
 
@@ -237,7 +206,7 @@ void combat_resolve_all(void)
             if (player.action == ACT_ROLL && player.action_frame <= player_def.roll_iframes) {
                 sk->hit_dealt = true;
                 game_set_status("EVADED! Rolled through enemy attack!",
-                                ATTR(COL_LIGHTGREEN, COL_BLACK), 75);
+                                COL_LIGHTGREEN, 75);
                 continue;
             }
 
@@ -249,38 +218,44 @@ void combat_resolve_all(void)
                 if (player.block_hold_frames <= parry_win) {
                     sk->action = ACT_STAGGER;
                     sk->action_frame = 1;
-                    sk->num_hitbox = 0;
+                    sk->hitbox.active = false;
                     player.stamina += 25;
                     if (player.stamina > player.max_stamina) player.stamina = player.max_stamina;
                     game_set_status("*** PARRY! *** Enemy stunned! Press [K] for Critical Riposte!",
-                                    ATTR(COL_YELLOW, COL_BLUE), 120);
+                                    COL_YELLOW, 120);
                 } else {
                     player.hp -= eatk->chip_damage;
                     player.stamina -= eatk->stamina_damage;
-                    player.stamina_regen_cd = 30;
+                    player.stamina_regen_cd = 35;
+                    for (k = 0; k < 3; k++) {
+                        character_try_move_px(&player, dir_dx[sk->dir], dir_dy[sk->dir]);
+                    }
                     if (player.stamina <= 0) {
                         player.stamina = 0;
                         player.action = ACT_STAGGER;
                         player.action_frame = 1;
-                        game_set_status("GUARD BROKEN! Out of Stamina!", ATTR(COL_WHITE, COL_RED), 90);
+                        game_set_status("GUARD BROKEN! Out of Stamina!", COL_LIGHTRED, 90);
                     } else {
                         game_set_status("BLOCKED with Left Shield! (Hold [J] blocks, Tap [J] parries)",
-                                        ATTR(COL_LIGHTCYAN, COL_BLUE), 75);
+                                        COL_LIGHTCYAN, 75);
                     }
                 }
             } else {
                 bool backstabbed_player = character_is_behind(sk, &player);
                 int dmg = backstabbed_player ? (eatk->damage + eatk->damage / 2) : eatk->damage;
                 player.hp -= dmg;
-                player.hurt_flash = 12;
+                player.hurt_flash = 14;
+                for (k = 0; k < 5; k++) {
+                    character_try_move_px(&player, dir_dx[sk->dir], dir_dy[sk->dir]);
+                }
                 if (backstabbed_player) {
                     player.action = ACT_CRIT_HURT;
                     player.action_frame = 1;
                     game_set_status("CRITICAL HIT FROM BEHIND! Don't turn your back on enemies!",
-                                    ATTR(COL_YELLOW, COL_RED), 100);
+                                    COL_YELLOW, 100);
                 } else {
                     game_set_status("OUCH! Direct hit! Use [J] Shield or [L] Roll!",
-                                    ATTR(COL_WHITE, COL_RED), 90);
+                                    COL_LIGHTRED, 90);
                 }
             }
 
@@ -288,7 +263,7 @@ void combat_resolve_all(void)
                 player.hp = 0;
                 player.active = false;
                 game_set_status("YOU DIED! Press [R] to Reload & Rise Again or [ESC] to Quit",
-                                ATTR(COL_YELLOW, COL_RED), 600);
+                                COL_YELLOW, 600);
             }
         }
     }

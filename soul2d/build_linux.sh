@@ -18,6 +18,7 @@ LUA_SRCS=(
 )
 
 GAME_SRCS=(
+  gfx.c
   weapon.c
   character.c
   combat.c

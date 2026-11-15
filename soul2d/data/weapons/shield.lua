@@ -1,14 +1,8 @@
--- Left-Hand Knight Shield (Weapon Base Class instance of kind "SHIELD")
+-- Left-Hand Knight Shield (Procedural Kite/Tower Shield)
 register_weapon("knight_shield", {
     name                = "Tower Shield",
     kind                = "SHIELD",
-    hand                = "LEFT",
-    block_move_cd       = 5,
-    parry_window_frames = 11,
-
-    idle_pose = {
-        { fwd =  1, right = -2, tile = "SHIELD_EDGE", fg = "LIGHTCYAN", bg = "BLUE" },
-        { fwd =  0, right = -2, tile = "SHIELD_MID",  fg = "YELLOW",    bg = "BLUE" },
-        { fwd = -1, right = -2, tile = "SHIELD_EDGE", fg = "LIGHTCYAN", bg = "BLUE" },
-    },
+    style               = "SHIELD",
+    block_speed_fp      = 8,   -- 0.50 px/frame while blocking (Dark Souls 1 pace)
+    parry_window_frames = 12,
 })

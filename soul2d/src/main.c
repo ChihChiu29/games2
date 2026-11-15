@@ -4,14 +4,14 @@
 #include <string.h>
 
 static char status_msg[76] = "";
-static uint8_t status_attr = ATTR(COL_YELLOW, COL_BLACK);
+static uint8_t status_col = COL_YELLOW;
 static int status_timer = 180;
 
-void game_set_status(const char *msg, uint8_t attr, int frames)
+void game_set_status(const char *msg, uint8_t col, int frames)
 {
     strncpy(status_msg, msg, sizeof(status_msg) - 1);
     status_msg[sizeof(status_msg) - 1] = '\0';
-    status_attr = attr;
+    status_col = col;
     status_timer = frames;
 }
 
@@ -35,7 +35,7 @@ void game_spawn_enemy(const char *type_id, int x, int y, Direction dir)
     for (i = 0; i < MAX_ENEMIES; i++) {
         if (!enemies[i].active) {
             character_init(&enemies[i], false, &edef->base, edef, x, y, dir);
-            enemies[i].ai_think_cd = 15 + (i * 20);
+            enemies[i].ai_think_cd = 20 + (i * 25);
             break;
         }
     }
@@ -48,10 +48,10 @@ static void reload_and_reset(void)
     memset(enemies, 0, sizeof(enemies));
 
     if (data_lua_reload(err_buf, sizeof(err_buf))) {
-        game_set_status("Loaded Lua! [K] Atk/Crit [I] Special [J] Shield/Parry [TAB] Swap Weapon",
-                        ATTR(COL_LIGHTCYAN, COL_BLACK), 240);
+        game_set_status("WASD:MOVE J:SHIELD/PARRY K:ATK/CRIT I:HEAVY L:ROLL TAB:SWAP",
+                        COL_LIGHTCYAN, 300);
     } else {
-        game_set_status(err_buf, ATTR(COL_WHITE, COL_RED), 600);
+        game_set_status(err_buf, COL_LIGHTRED, 600);
     }
 }
 
@@ -67,11 +67,11 @@ static void swap_player_right_weapon(void)
 
     if (character_equip(&player, SLOT_RIGHT_HAND, next_id) && player.right_weapon) {
         char buf[128];
-        snprintf(buf, sizeof(buf), "Equipped Right Hand: %s! ([K] %s, [I] %s)",
+        snprintf(buf, sizeof(buf), "EQUIPPED %s! ([K] %s, [I] %s)",
                  player.right_weapon->name,
                  player.right_weapon->attacks[WATK_NORMAL].name,
                  player.right_weapon->attacks[WATK_SPECIAL].name);
-        game_set_status(buf, ATTR(COL_YELLOW, COL_BLUE), 120);
+        game_set_status(buf, COL_YELLOW, 120);
     }
 }
 
@@ -82,13 +82,11 @@ static void trigger_hand_action(WeaponSlot slot, int atk_slot)
 
     if (w->kind == WEAPON_SHIELD) {
         if (atk_slot == WATK_SPECIAL) {
-            game_set_status("[U] Left-hand special not used on Shield", ATTR(COL_LIGHTGRAY, COL_BLACK), 60);
+            game_set_status("[U] LEFT SPECIAL UNUSED ON SHIELD", COL_LIGHTGRAY, 60);
         }
         return;
     }
 
-    /* Check if a Normal Attack [K] is eligible to upgrade into a Critical Attack
-     * (Riposte on a stunned enemy or Backstab from behind an enemy)! */
     if (atk_slot == WATK_NORMAL && weapon_get_attack(w, WATK_CRIT)) {
         Character *crit_tgt = combat_find_crit_target(&player);
         if (crit_tgt) {
@@ -105,11 +103,11 @@ static void trigger_hand_action(WeaponSlot slot, int atk_slot)
     player.stamina -= atk->stamina_cost;
     if (player.stamina < 0) player.stamina = 0;
 
-    int regen_cd = (atk_slot == WATK_SPECIAL) ? 40 : 25;
+    int regen_cd = (atk_slot == WATK_SPECIAL) ? 45 : 28;
     character_start_attack(&player, slot, atk_slot, regen_cd);
 
     if (atk_slot == WATK_CRIT) {
-        game_set_status("EXECUTING CRITICAL ATTACK!", ATTR(COL_YELLOW, COL_RED), 60);
+        game_set_status("EXECUTING CRITICAL ATTACK!", COL_YELLOW, 60);
     }
 }
 
@@ -133,9 +131,10 @@ static void update_player(void)
 
     if (player.action == ACT_ROLL) {
         player.action_frame++;
-        if (player.action_frame <= player_def.roll_iframes &&
-            (player.action_frame % 2 == 1 || player.action_frame <= 4)) {
-            character_try_move(&player, player.roll_dx, player.roll_dy);
+        if (player.action_frame <= player_def.roll_iframes) {
+            character_move_subpixel(&player,
+                                    player.roll_dx * player_def.roll_speed_fp,
+                                    player.roll_dy * player_def.roll_speed_fp);
         }
         if (player.action_frame > player_def.roll_frames) {
             player.action = ACT_NONE;
@@ -175,13 +174,13 @@ static void update_player(void)
     /* L: Dodge Roll in facing direction */
     if (platform_key_pressed(SC_L) && player.stamina >= player_def.roll_stamina_cost) {
         player.stamina -= player_def.roll_stamina_cost;
-        player.stamina_regen_cd = 28;
+        player.stamina_regen_cd = 32;
         player.action = ACT_ROLL;
         player.action_frame = 1;
         player.block_hold_frames = 0;
         player.roll_dx = dir_dx[player.dir];
         player.roll_dy = dir_dy[player.dir];
-        game_set_status("Dodge Roll! (Invulnerable i-frames)", ATTR(COL_LIGHTGREEN, COL_BLACK), 40);
+        game_set_status("DODGE ROLL! (INVULNERABLE I-FRAMES)", COL_LIGHTGREEN, 40);
         return;
     }
 
@@ -197,7 +196,7 @@ static void update_player(void)
         if (player.action != ACT_NONE) return;
     }
 
-    /* WASD Movement & 4-Direction Facing */
+    /* WASD Movement & 4-Direction Facing (Dark Souls 1 deliberate sub-pixel speed) */
     int move_dx = 0, move_dy = 0;
     Direction new_dir = player.dir;
     bool dir_input = false;
@@ -224,14 +223,11 @@ static void update_player(void)
 
     if (dir_input) {
         player.dir = new_dir;
-        if (player.move_cd == 0) {
-            character_try_move(&player, move_dx, move_dy);
-            int block_cd = (player.left_weapon && player.left_weapon->block_move_cd > 0)
-                ? player.left_weapon->block_move_cd : 5;
-            player.move_cd = (player.action == ACT_BLOCK)
-                ? block_cd
-                : player_def.base.move_cooldown;
+        int spd = player_def.base.move_speed_fp;
+        if (player.action == ACT_BLOCK && player.left_weapon && player.left_weapon->block_speed_fp > 0) {
+            spd = player.left_weapon->block_speed_fp;
         }
+        character_move_subpixel(&player, move_dx * spd, move_dy * spd);
     }
 }
 
@@ -246,13 +242,14 @@ static void update_enemy(Character *e)
     int adx = iabs(dx);
     int ady = iabs(dy);
 
-    /* Enemies only turn to face the player when their move/turn cooldown allows,
-     * giving the player a window to roll behind their back for a Backstab! */
-    if (e->move_cd == 0) {
-        if (adx >= ady) {
-            e->dir = (dx >= 0) ? DIR_RIGHT : DIR_LEFT;
-        } else {
-            e->dir = (dy >= 0) ? DIR_DOWN : DIR_UP;
+    /* Deliberate turning cooldown so the player can roll behind an enemy's back */
+    if (e->turn_cd == 0) {
+        Direction desired = (adx >= ady)
+            ? ((dx >= 0) ? DIR_RIGHT : DIR_LEFT)
+            : ((dy >= 0) ? DIR_DOWN  : DIR_UP);
+        if (desired != e->dir) {
+            e->dir = desired;
+            e->turn_cd = e->def->turn_cooldown;
         }
     }
 
@@ -267,25 +264,23 @@ static void update_enemy(Character *e)
         }
     }
 
-    if (e->move_cd == 0) {
-        int step_x = 0, step_y = 0;
-        if (primary_dist > 6) {
-            if (dx > 0) step_x = 1;
-            else if (dx < 0) step_x = -1;
-            if (dy > 0) step_y = 1;
-            else if (dy < 0) step_y = -1;
-        } else if (off_axis > 1) {
-            if (adx >= ady) {
-                step_y = (dy > 0) ? 1 : -1;
-            } else {
-                step_x = (dx > 0) ? 1 : -1;
-            }
+    int spd = e->def->move_speed_fp;
+    int step_x = 0, step_y = 0;
+    if (primary_dist > 22) {
+        if (dx > 2) step_x = 1;
+        else if (dx < -2) step_x = -1;
+        if (dy > 2) step_y = 1;
+        else if (dy < -2) step_y = -1;
+    } else if (off_axis > 5) {
+        if (adx >= ady) {
+            step_y = (dy > 0) ? 1 : -1;
+        } else {
+            step_x = (dx > 0) ? 1 : -1;
         }
+    }
 
-        if (step_x != 0 || step_y != 0) {
-            character_try_move(e, step_x, step_y);
-            e->move_cd = e->def->move_cooldown;
-        }
+    if (step_x != 0 || step_y != 0) {
+        character_move_subpixel(e, step_x * spd, step_y * spd);
     }
 }
 
@@ -317,7 +312,7 @@ int main(void)
         }
         combat_resolve_all();
 
-        render_scene(status_msg, status_attr);
+        render_scene(status_msg, status_col);
         platform_wait_frame();
     }
 

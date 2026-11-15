@@ -21,14 +21,12 @@ int character_radius(const Character *c)
     if (c && c->def && c->def->radius > 0) {
         return c->def->radius;
     }
-    return 2;
+    return 8;
 }
 
-/* Strict non-overlapping bounding box check:
- * Two radius-2 (5x5) characters need |dx| >= 5 or |dy| >= 5 (min_sep = r1 + r2 + 1). */
 static bool chars_overlap(int cx1, int cy1, int r1, int cx2, int cy2, int r2)
 {
-    int min_sep = r1 + r2 + 1;
+    int min_sep = r1 + r2 + 2;
     return (iabs(cx1 - cx2) < min_sep && iabs(cy1 - cy2) < min_sep);
 }
 
@@ -37,8 +35,8 @@ bool character_can_move_to(const Character *self, int nx, int ny)
     int i;
     int r_self = character_radius(self);
 
-    if (nx - (r_self + 1) <= ARENA_LEFT || nx + (r_self + 1) >= ARENA_RIGHT) return false;
-    if (ny - (r_self + 1) <= ARENA_TOP  || ny + (r_self + 1) >= ARENA_BOTTOM) return false;
+    if (nx - r_self <= ARENA_LEFT + 4 || nx + r_self >= ARENA_RIGHT - 4) return false;
+    if (ny - r_self <= ARENA_TOP  + 6 || ny + r_self >= ARENA_BOTTOM - 4) return false;
 
     if (!self->is_player && player.active) {
         if (chars_overlap(nx, ny, r_self, player.cx, player.cy, character_radius(&player))) {
@@ -54,7 +52,7 @@ bool character_can_move_to(const Character *self, int nx, int ny)
     return true;
 }
 
-bool character_try_move(Character *c, int dx, int dy)
+bool character_try_move_px(Character *c, int dx, int dy)
 {
     if (dx == 0 && dy == 0) return false;
 
@@ -72,6 +70,30 @@ bool character_try_move(Character *c, int dx, int dy)
         return true;
     }
     return false;
+}
+
+void character_move_subpixel(Character *c, int vx_fp, int vy_fp)
+{
+    if (vx_fp == 0 && vy_fp == 0) return;
+
+    /* Normalize diagonal speed (multiply by ~11/16 ≈ 0.707) */
+    if (vx_fp != 0 && vy_fp != 0) {
+        vx_fp = (vx_fp * 11) / 16;
+        vy_fp = (vy_fp * 11) / 16;
+    }
+
+    c->sub_x += vx_fp;
+    c->sub_y += vy_fp;
+
+    int step_x = c->sub_x / 16;
+    int step_y = c->sub_y / 16;
+    c->sub_x -= step_x * 16;
+    c->sub_y -= step_y * 16;
+
+    if (step_x != 0 || step_y != 0) {
+        character_try_move_px(c, step_x, step_y);
+    }
+    c->walk_ticks++;
 }
 
 bool character_equip(Character *c, WeaponSlot slot, const char *weapon_id)
@@ -139,7 +161,7 @@ bool character_tick_common(Character *c)
     if (!c->active || !c->def) return true;
 
     if (c->hurt_flash > 0) c->hurt_flash--;
-    if (c->move_cd > 0) c->move_cd--;
+    if (c->turn_cd > 0) c->turn_cd--;
     if (c->ai_think_cd > 0) c->ai_think_cd--;
 
     if (c->action == ACT_STAGGER) {
@@ -153,12 +175,12 @@ bool character_tick_common(Character *c)
 
     if (c->action == ACT_CRIT_HURT) {
         c->action_frame++;
-        int dur = (c->def->crit_hurt_duration > 0) ? c->def->crit_hurt_duration : 45;
+        int dur = (c->def->crit_hurt_duration > 0) ? c->def->crit_hurt_duration : 48;
         if (c->action_frame > dur) {
             c->action = ACT_NONE;
             c->action_frame = 0;
             if (!c->is_player) {
-                c->ai_think_cd = 20;
+                c->ai_think_cd = 25;
             }
         }
         return true;
@@ -172,7 +194,7 @@ bool character_tick_common(Character *c)
             c->action = ACT_NONE;
             c->action_frame = 0;
             if (!c->is_player) {
-                c->ai_think_cd = 25;
+                c->ai_think_cd = 30;
             }
         }
         return true;
@@ -181,7 +203,6 @@ bool character_tick_common(Character *c)
     return false;
 }
 
-/* Returns true if `attacker` is behind `target`'s back and facing toward `target`. */
 bool character_is_behind(const Character *attacker, const Character *target)
 {
     if (!attacker || !target || !attacker->active || !target->active) return false;
@@ -191,12 +212,10 @@ bool character_is_behind(const Character *attacker, const Character *target)
     int t_fdx = dir_dx[target->dir];
     int t_fdy = dir_dy[target->dir];
 
-    /* Project vector (target -> attacker) onto target's forward axis.
-     * Negative means attacker is behind target's back. */
     int fwd_proj = rx * t_fdx + ry * t_fdy;
     int side_dist = (t_fdx != 0) ? iabs(ry) : iabs(rx);
 
-    if (fwd_proj < 0 && side_dist <= 3 && attacker->dir == target->dir) {
+    if (fwd_proj < -4 && side_dist <= 14 && attacker->dir == target->dir) {
         return true;
     }
     return false;

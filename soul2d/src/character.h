@@ -3,15 +3,20 @@
 
 #include "weapon.h"
 
-/* Playfield bounds (Rows 0..3 are HUD, Rows 4..49 are Arena) */
-#define ARENA_TOP    4
-#define ARENA_BOTTOM 49
-#define ARENA_LEFT   0
-#define ARENA_RIGHT  79
+/* Playfield bounds in 320x200 pixel coordinates (Rows 0..25 are HUD) */
+#define ARENA_TOP    28
+#define ARENA_BOTTOM 195
+#define ARENA_LEFT   6
+#define ARENA_RIGHT  313
 
-#define MAX_SPRITE_CELLS  64
-#define MAX_ENEMY_TYPES    8
-#define MAX_ENEMIES        8
+#define MAX_ENEMY_TYPES 8
+#define MAX_ENEMIES     8
+
+typedef enum {
+    BSTYLE_KNIGHT = 0,
+    BSTYLE_SKELETON,
+    BSTYLE_SKELETON_LORD
+} BodyStyle;
 
 typedef enum {
     ACT_NONE = 0,
@@ -23,32 +28,31 @@ typedef enum {
     ACT_CRIT_HURT    /* Critically struck (backstabbed or riposted; plays special effect) */
 } ActionType;
 
+/* Axis-aligned or directional bounding box in world pixel space */
+typedef struct {
+    bool active;
+    int x1, y1, x2, y2;
+} HitRect;
+
 /* Base Moving Character Class Definition (shared by Player and all Enemy Classes) */
 typedef struct {
     char id[24];
     char name[32];
-    int radius;            /* 2 for 5x5 (-2..+2), 3 for 7x7 (-3..+3) */
+    BodyStyle body_style;
+    int scale_pct;         /* 100 = 1.0x normal, 135 = 1.35x elite/boss */
+    int radius;            /* Collision bounding radius in pixels (default 8) */
     int max_hp;
     int max_stamina;
-    int move_cooldown;
+    int move_speed_fp;     /* Walk speed in 1/16th pixels per frame (Dark Souls 1 pace) */
+    int turn_cooldown;     /* Frames before an enemy can snap-turn to a new direction */
     int stagger_duration;
     int crit_hurt_duration;
 
     char default_left_weapon[24];
     char default_right_weapon[24];
-
-    int num_body_cells;
-    SpriteCell body_cells[MAX_SPRITE_CELLS];
-
-    int num_stagger_cells;
-    SpriteCell stagger_cells[MAX_POSE_CELLS];
-
-    int num_crit_hurt_cells;
-    SpriteCell crit_hurt_cells[MAX_POSE_CELLS];
-    uint8_t crit_flash_attr;
 } CharacterDef;
 
-/* Enemy Class Definition (extends CharacterDef with AI & critical-hit special effect) */
+/* Enemy Class Definition (extends CharacterDef with AI) */
 typedef struct {
     bool used;
     CharacterDef base;
@@ -60,6 +64,7 @@ typedef struct {
     CharacterDef base;
     int roll_frames;
     int roll_iframes;
+    int roll_speed_fp;     /* Roll speed in 1/16th pixels per frame */
     int roll_stamina_cost;
     char alt_right_weapon[24];
 } PlayerDef;
@@ -74,8 +79,11 @@ typedef struct {
     const WeaponDef *left_weapon;
     const WeaponDef *right_weapon;
 
-    int cx, cy;
+    int cx, cy;            /* World pixel coordinates */
+    int sub_x, sub_y;      /* 1/16th pixel sub-pixel accumulators */
     Direction dir;
+    int walk_ticks;        /* Increments when moving to drive procedural walk cycle */
+    int turn_cd;
 
     int hp, max_hp;
     int stamina, max_stamina;
@@ -88,16 +96,12 @@ typedef struct {
     int block_hold_frames;
     bool hit_dealt;
 
-    int move_cd;
     int roll_dx, roll_dy;
     int hurt_flash;
     int ai_think_cd;
 
-    int num_hitbox;
-    WorldCell hitbox[MAX_HITBOX_CELLS];
-
-    int num_shield;
-    WorldCell shield[16];
+    HitRect hitbox;
+    HitRect shield_box;
 } Character;
 
 extern const int dir_dx[4];
@@ -119,7 +123,8 @@ const AttackDef *character_get_active_attack(const Character *c);
 
 int character_radius(const Character *c);
 bool character_can_move_to(const Character *self, int nx, int ny);
-bool character_try_move(Character *c, int dx, int dy);
+bool character_try_move_px(Character *c, int dx, int dy);
+void character_move_subpixel(Character *c, int vx_fp, int vy_fp);
 void character_start_attack(Character *c, WeaponSlot hand, int atk_slot, int regen_cd);
 bool character_tick_common(Character *c);
 bool character_is_behind(const Character *attacker, const Character *target);

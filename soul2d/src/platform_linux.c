@@ -9,8 +9,6 @@
 #include <signal.h>
 #include <time.h>
 
-Cell screen_buf[SCREEN_H][SCREEN_W];
-
 static struct termios orig_termios;
 static bool term_initialized = false;
 
@@ -18,51 +16,11 @@ static int key_hold_timer[128];
 static uint8_t curr_key_down[128];
 static uint8_t curr_key_pressed[128];
 
-/* Map DOS VGA color index (0..15) to ANSI SGR foreground & background codes */
-static const int vga_to_ansi_fg[16] = {
-    30, /* 0x00 COL_BLACK        */
-    34, /* 0x01 COL_BLUE         */
-    32, /* 0x02 COL_GREEN        */
-    36, /* 0x03 COL_CYAN         */
-    31, /* 0x04 COL_RED          */
-    35, /* 0x05 COL_MAGENTA      */
-    33, /* 0x06 COL_BROWN        */
-    37, /* 0x07 COL_LIGHTGRAY    */
-    90, /* 0x08 COL_DARKGRAY     */
-    94, /* 0x09 COL_LIGHTBLUE    */
-    92, /* 0x0A COL_LIGHTGREEN   */
-    96, /* 0x0B COL_LIGHTCYAN    */
-    91, /* 0x0C COL_LIGHTRED     */
-    95, /* 0x0D COL_LIGHTMAGENTA */
-    93, /* 0x0E COL_YELLOW       */
-    97  /* 0x0F COL_WHITE        */
-};
-
-static const int vga_to_ansi_bg[16] = {
-    40,  /* 0x00 COL_BLACK        */
-    44,  /* 0x01 COL_BLUE         */
-    42,  /* 0x02 COL_GREEN        */
-    46,  /* 0x03 COL_CYAN         */
-    41,  /* 0x04 COL_RED          */
-    45,  /* 0x05 COL_MAGENTA      */
-    43,  /* 0x06 COL_BROWN        */
-    47,  /* 0x07 COL_LIGHTGRAY    */
-    100, /* 0x08 COL_DARKGRAY     */
-    104, /* 0x09 COL_LIGHTBLUE    */
-    102, /* 0x0A COL_LIGHTGREEN   */
-    106, /* 0x0B COL_LIGHTCYAN    */
-    101, /* 0x0C COL_LIGHTRED     */
-    105, /* 0x0D COL_LIGHTMAGENTA */
-    103, /* 0x0E COL_YELLOW       */
-    107  /* 0x0F COL_WHITE        */
-};
-
 void platform_shutdown(void)
 {
     if (term_initialized) {
         const char *restore_seq = "\033[0m\033[?25h\033[?1049l";
         if (write(STDOUT_FILENO, restore_seq, strlen(restore_seq)) < 0) {
-            /* ignore write error on shutdown */
         }
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
         term_initialized = false;
@@ -78,6 +36,8 @@ static void handle_sig(int sig)
 
 void platform_init(void)
 {
+    platform_init_palette_data();
+
     if (tcgetattr(STDIN_FILENO, &orig_termios) == 0) {
         struct termios raw = orig_termios;
         raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
@@ -103,10 +63,8 @@ void platform_init(void)
     memset(curr_key_down, 0, sizeof(curr_key_down));
     memset(curr_key_pressed, 0, sizeof(curr_key_pressed));
 
-    /* Enter alternate buffer, hide cursor, clear screen, request 80x50 size */
     const char *init_seq = "\033[?1049h\033[8;50;80t\033[?25l\033[2J";
     if (write(STDOUT_FILENO, init_seq, strlen(init_seq)) < 0) {
-        /* ignore */
     }
 }
 
@@ -114,7 +72,6 @@ static void trigger_key(int sc, int hold_frames)
 {
     if (sc < 0 || sc >= 128) return;
 
-    /* Clear opposing movement keys immediately when changing direction */
     if (sc == SC_W || sc == SC_UP) {
         key_hold_timer[SC_S] = 0;
         key_hold_timer[SC_DOWN] = 0;
@@ -153,13 +110,12 @@ void platform_poll_input(void)
         for (i = 0; i < (int)n; i++) {
             uint8_t c = buf[i];
             if (c == 27) {
-                /* Check for arrow key escape sequence \033[A..D */
                 if (i + 2 < (int)n && buf[i + 1] == '[') {
                     uint8_t seq = buf[i + 2];
-                    if (seq == 'A') trigger_key(SC_UP, 6);
-                    else if (seq == 'B') trigger_key(SC_DOWN, 6);
-                    else if (seq == 'C') trigger_key(SC_RIGHT, 6);
-                    else if (seq == 'D') trigger_key(SC_LEFT, 6);
+                    if (seq == 'A') trigger_key(SC_UP, 8);
+                    else if (seq == 'B') trigger_key(SC_DOWN, 8);
+                    else if (seq == 'C') trigger_key(SC_RIGHT, 8);
+                    else if (seq == 'D') trigger_key(SC_LEFT, 8);
                     i += 2;
                 } else {
                     trigger_key(SC_ESC, 2);
@@ -168,10 +124,10 @@ void platform_poll_input(void)
             }
 
             switch (c) {
-            case 'w': case 'W': trigger_key(SC_W, 6); break;
-            case 's': case 'S': trigger_key(SC_S, 6); break;
-            case 'a': case 'A': trigger_key(SC_A, 6); break;
-            case 'd': case 'D': trigger_key(SC_D, 6); break;
+            case 'w': case 'W': trigger_key(SC_W, 8); break;
+            case 's': case 'S': trigger_key(SC_S, 8); break;
+            case 'a': case 'A': trigger_key(SC_A, 8); break;
+            case 'd': case 'D': trigger_key(SC_D, 8); break;
             case 'j': case 'J': trigger_key(SC_J, 22); break;
             case 'k': case 'K':
                 curr_key_pressed[SC_K] = 1;
@@ -225,113 +181,62 @@ bool platform_key_pressed(int scancode)
     return curr_key_pressed[scancode] != 0;
 }
 
-void platform_clear(uint8_t attr)
+/* Downsample 320x200 256-color framebuffer into 80x50 terminal cells using
+ * UTF-8 upper-half blocks (▀) and 24-bit TrueColor ANSI escape sequences! */
+static uint8_t sample_block(int bx, int by)
 {
-    int y, x;
-    for (y = 0; y < SCREEN_H; y++) {
-        for (x = 0; x < SCREEN_W; x++) {
-            screen_buf[y][x].ch = ' ';
-            screen_buf[y][x].attr = attr;
+    int dy, dx;
+    uint8_t best = framebuffer[by][bx];
+    /* Prefer non-background pixels so thin weapon blades & outlines stay visible */
+    for (dy = 0; dy < 2; dy++) {
+        for (dx = 0; dx < 4; dx++) {
+            uint8_t c = framebuffer[by + dy][bx + dx];
+            if (c != PAL_FLOOR_DARK && c != PAL_FLOOR_MID && c != COL_BLACK) {
+                return c;
+            }
         }
     }
-}
-
-void platform_put_cell(int x, int y, uint8_t ch, uint8_t attr)
-{
-    if (x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H) return;
-    screen_buf[y][x].ch = ch;
-    screen_buf[y][x].attr = attr;
-}
-
-void platform_put_str(int x, int y, const char *s, uint8_t attr)
-{
-    if (y < 0 || y >= SCREEN_H || !s) return;
-    while (*s && x < SCREEN_W) {
-        if (x >= 0) {
-            screen_buf[y][x].ch = (uint8_t)*s;
-            screen_buf[y][x].attr = attr;
-        }
-        x++;
-        s++;
-    }
-}
-
-/* UTF-8 / ASCII fallback for custom DOS 8x8 tiles (0x80..0x9A) */
-static const char *linux_tile_fallback(uint8_t ch)
-{
-    switch (ch) {
-    case TILE_WALL:         return "#";
-    case TILE_FLOOR_DOT:    return ".";
-    case TILE_BLOCK_FULL:   return "\xE2\x96\x88"; /* █ */
-    case TILE_BLOCK_TOP:    return "\xE2\x96\x80"; /* ▀ */
-    case TILE_BLOCK_BOT:    return "\xE2\x96\x84"; /* ▄ */
-    case TILE_KNIGHT_HELM:  return "@";
-    case TILE_KNIGHT_ARMOR: return "#";
-    case TILE_KNIGHT_BOOT:  return "m";
-    case TILE_SHIELD_MID:   return "[";
-    case TILE_SHIELD_EDGE:  return "|";
-    case TILE_SPEAR_TIP_U:  return "^";
-    case TILE_SPEAR_TIP_R:  return ">";
-    case TILE_SPEAR_TIP_D:  return "v";
-    case TILE_SPEAR_TIP_L:  return "<";
-    case TILE_SHAFT_V:      return "|";
-    case TILE_SHAFT_H:      return "-";
-    case TILE_SKEL_SKULL:   return "O";
-    case TILE_SKEL_RIBS:    return "X";
-    case TILE_SKEL_PELVIS:  return "=";
-    case TILE_SKEL_LIMB:    return "|";
-    case TILE_SWORD_TIP_U:  return "^";
-    case TILE_SWORD_TIP_R:  return ">";
-    case TILE_SWORD_TIP_D:  return "v";
-    case TILE_SWORD_TIP_L:  return "<";
-    case TILE_SWORD_HILT:   return "+";
-    case TILE_SLASH_ARC:    return "*";
-    case TILE_PARRY_STAR:   return "*";
-    case TILE_CRIT_SPARK:   return "X";
-    case TILE_BONE_SHARD:   return "~";
-    default:                return " ";
-    }
+    return best;
 }
 
 void platform_present(void)
 {
-    static char out_buf[SCREEN_H * SCREEN_W * 16 + 1024];
+    static char out_buf[80 * 50 * 44 + 1024];
     int pos = 0;
-    int y, x;
-    int last_attr = -1;
+    int row, col;
+    int last_top = -1, last_bot = -1;
 
     pos += snprintf(out_buf + pos, sizeof(out_buf) - pos, "\033[H");
 
-    for (y = 0; y < SCREEN_H; y++) {
-        if (y > 0) {
+    for (row = 0; row < 50; row++) {
+        if (row > 0) {
             out_buf[pos++] = '\r';
             out_buf[pos++] = '\n';
         }
-        for (x = 0; x < SCREEN_W; x++) {
-            uint8_t attr = screen_buf[y][x].attr;
-            uint8_t ch = screen_buf[y][x].ch;
-            if ((int)attr != last_attr) {
-                int fg = vga_to_ansi_fg[attr & 0x0F];
-                int bg = vga_to_ansi_bg[(attr >> 4) & 0x0F];
-                pos += snprintf(out_buf + pos, sizeof(out_buf) - pos, "\033[%d;%dm", fg, bg);
-                last_attr = (int)attr;
+        int py_top = row * 4;
+        int py_bot = row * 4 + 2;
+        for (col = 0; col < 80; col++) {
+            int px = col * 4;
+            uint8_t c_top = sample_block(px, py_top);
+            uint8_t c_bot = sample_block(px, py_bot);
+
+            if ((int)c_top != last_top || (int)c_bot != last_bot) {
+                pos += snprintf(out_buf + pos, sizeof(out_buf) - pos,
+                    "\033[38;2;%d;%d;%d;48;2;%d;%d;%dm",
+                    palette_rgb[c_top][0], palette_rgb[c_top][1], palette_rgb[c_top][2],
+                    palette_rgb[c_bot][0], palette_rgb[c_bot][1], palette_rgb[c_bot][2]);
+                last_top = (int)c_top;
+                last_bot = (int)c_bot;
             }
-            if (ch >= TILE_BASE && ch < TILE_BASE + TILE_COUNT) {
-                const char *u = linux_tile_fallback(ch);
-                while (*u) {
-                    out_buf[pos++] = *u++;
-                }
-            } else if (ch < 32 || ch > 126) {
-                out_buf[pos++] = ' ';
-            } else {
-                out_buf[pos++] = (char)ch;
-            }
+            /* UTF-8 Upper Half Block '▀' (\xE2\x96\x80) */
+            out_buf[pos++] = '\xE2';
+            out_buf[pos++] = '\x96';
+            out_buf[pos++] = '\x80';
         }
     }
     pos += snprintf(out_buf + pos, sizeof(out_buf) - pos, "\033[0m");
 
     if (write(STDOUT_FILENO, out_buf, (size_t)pos) < 0) {
-        /* ignore */
     }
 }
 
@@ -339,6 +244,6 @@ void platform_wait_frame(void)
 {
     struct timespec ts;
     ts.tv_sec = 0;
-    ts.tv_nsec = 16666667L; /* ~60 FPS (16.67 ms) */
+    ts.tv_nsec = 16666667L;
     nanosleep(&ts, NULL);
 }

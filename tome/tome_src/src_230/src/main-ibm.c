@@ -585,19 +585,21 @@ typedef struct dock_btn_type
 	char cmd;
 } dock_btn_type;
 
-/* 14-button Command Dock spanning all 80 columns of Row 24 (y = 24) */
-#define DOCK_BTN_COUNT 14
+/* 15-button Command Dock spanning all 80 columns of Row 24 (y = 24) */
+#define DOCK_CMD_CAST '\x01'
+#define DOCK_BTN_COUNT 15
 static const dock_btn_type dock_buttons[DOCK_BTN_COUNT] =
 {
 	{  0,  4, " inv ",   'i' },
 	{  5,  9, " eqp ",   'e' },
-	{ 10, 15, " wear ",  'w' },
-	{ 16, 20, " get ",   'g' },
-	{ 21, 26, " drop ",  'd' },
-	{ 27, 33, " magic ", 'm' },
-	{ 34, 40, " quaff ", 'q' },
-	{ 41, 46, " read ",  'r' },
-	{ 47, 52, " fire ",  'f' },
+	{ 10, 14, " wear",   'w' },
+	{ 15, 19, " get ",   'g' },
+	{ 20, 24, " drop",   'd' },
+	{ 25, 30, " cast ",  DOCK_CMD_CAST },
+	{ 31, 36, " magic",  'm' },
+	{ 37, 42, " quaff",  'q' },
+	{ 43, 47, " read",   'r' },
+	{ 48, 52, " fire",   'f' },
 	{ 53, 57, " zap ",   'z' },
 	{ 58, 62, " aim ",   'a' },
 	{ 63, 67, " use ",   'u' },
@@ -702,7 +704,8 @@ static void ibm_draw_dock(void)
 		{
 			int idx = x - dock_buttons[b].x0;
 			char ch = (idx < len) ? s[idx] : ' ';
-			bool is_keycap = (idx == 1 && dock_buttons[b].cmd != '+');
+			bool is_keycap = (idx == 1 && dock_buttons[b].cmd != '+' &&
+			                  dock_buttons[b].cmd != DOCK_CMD_CAST);
 			byte cell_bg = bg;
 			byte fg;
 
@@ -926,6 +929,13 @@ static void ibm_cast_or_skill(void)
 	Term_keypress('m');
 }
 
+/* Direct school-spell cast shortcut (MKEY_SCHOOL = 17 via "017m") */
+static void ibm_direct_cast(void)
+{
+	mouse_cmd_raw = TRUE;
+	ibm_send_keys("017m");
+}
+
 /* Context menu action IDs */
 #define CTX_NONE          0
 #define CTX_RAW_CMD       1
@@ -938,6 +948,7 @@ static void ibm_cast_or_skill(void)
 #define CTX_TARGET_LOC    8
 #define CTX_MON_LORE      9
 #define CTX_EXAMINE_TILE 10
+#define CTX_DIRECT_CAST  11
 
 typedef struct ibm_ctx_item
 {
@@ -1087,6 +1098,7 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 		ibm_add_ctx(items, &cnt, 'R', "Rest until healed", CTX_REST_HEAL, 'R', 0);
 		ibm_add_ctx(items, &cnt, 's', "search surroundings", CTX_RAW_CMD, 's', 0);
 		ibm_add_ctx(items, &cnt, 'l', "look around", CTX_RAW_CMD, 'l', 0);
+		ibm_add_ctx(items, &cnt, 'c', "cast spell", CTX_DIRECT_CAST, 0, 0);
 		ibm_add_ctx(items, &cnt, 'm', "magic / use skill", CTX_CAST_SPELL, 'm', 0);
 		ibm_add_ctx(items, &cnt, 'U', "Use racial / class power", CTX_RAW_CMD, 'U', 0);
 		ibm_add_ctx(items, &cnt, 'w', "wear / wield equipment", CTX_RAW_CMD, 'w', 0);
@@ -1130,6 +1142,7 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 				ibm_add_ctx(items, &cnt, '.', "[.] Approach character (to talk)", CTX_BFS_TRAVEL, '.', 0);
 			ibm_add_ctx(items, &cnt, ';', "[;] Step toward character", CTX_DIR_CMD, ';', dir);
 		}
+		ibm_add_ctx(items, &cnt, 'c', "cast spell at target", CTX_AIM_CMD, DOCK_CMD_CAST, 5);
 		ibm_add_ctx(items, &cnt, 'm', "magic / use skill", CTX_AIM_CMD, 'm', 5);
 		ibm_add_ctx(items, &cnt, 'f', "fire ranged weapon", CTX_AIM_CMD, 'f', 5);
 		ibm_add_ctx(items, &cnt, 'z', "zap rod at target", CTX_AIM_CMD, 'z', 5);
@@ -1209,6 +1222,7 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 				ibm_add_ctx(items, &cnt, '.', "[.] Travel here (shortest path)", CTX_BFS_TRAVEL, '.', 0);
 			ibm_add_ctx(items, &cnt, 'R', "[R] Run in this direction", CTX_DIR_CMD, '.', dir);
 			ibm_add_ctx(items, &cnt, ';', "[;] Step in this direction", CTX_DIR_CMD, ';', dir);
+			ibm_add_ctx(items, &cnt, 'c', "cast spell at tile", CTX_AIM_CMD, DOCK_CMD_CAST, 5);
 			ibm_add_ctx(items, &cnt, 'm', "magic / use skill at tile", CTX_AIM_CMD, 'm', 5);
 			ibm_add_ctx(items, &cnt, 'f', "fire ranged weapon at tile", CTX_AIM_CMD, 'f', 5);
 			ibm_add_ctx(items, &cnt, '*', "[*] Target this location", CTX_TARGET_LOC, 0, 0);
@@ -1412,7 +1426,11 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 			target_col = gx;
 		}
 		command_dir = 5;
-		if (items[chosen].cmd == 'm')
+		if (items[chosen].cmd == DOCK_CMD_CAST)
+		{
+			ibm_direct_cast();
+		}
+		else if (items[chosen].cmd == 'm')
 		{
 			ibm_cast_or_skill();
 		}
@@ -1445,6 +1463,10 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 
 	case CTX_CAST_SPELL:
 		ibm_cast_or_skill();
+		return (TRUE);
+
+	case CTX_DIRECT_CAST:
+		ibm_direct_cast();
 		return (TRUE);
 
 	case CTX_TARGET_MON:
@@ -1988,6 +2010,11 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 				{
 					mouse_cmd_raw = TRUE;
 					ibm_send_keys("R*\r");
+					return (TRUE);
+				}
+				else if (dock_buttons[b].cmd == DOCK_CMD_CAST)
+				{
+					ibm_direct_cast();
 					return (TRUE);
 				}
 				else if (dock_buttons[b].cmd == 'm')

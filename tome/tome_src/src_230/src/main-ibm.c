@@ -585,22 +585,24 @@ typedef struct dock_btn_type
 	char cmd;
 } dock_btn_type;
 
-/* 12-button Command Dock spanning all 80 columns of Row 24 (y = 24) */
-#define DOCK_BTN_COUNT 12
+/* 14-button Command Dock spanning all 80 columns of Row 24 (y = 24) */
+#define DOCK_BTN_COUNT 14
 static const dock_btn_type dock_buttons[DOCK_BTN_COUNT] =
 {
-	{  0,  5, "[i]Inv",  'i' },
-	{  6, 11, "[e]Eqp",  'e' },
-	{ 12, 17, "[g]Get",  'g' },
-	{ 18, 24, "[m]Cast", 'm' },
-	{ 25, 30, "[z]Rod",  'z' },
-	{ 31, 37, "[a]Wand", 'a' },
-	{ 38, 44, "[u]Staf", 'u' },
-	{ 45, 51, "[q]Quaf", 'q' },
-	{ 52, 58, "[r]Read", 'r' },
-	{ 59, 65, "[f]Fire", 'f' },
-	{ 66, 72, "[G]Skil", 'G' },
-	{ 73, 79, "[+]More", '+' }
+	{  0,  4, " inv ",   'i' },
+	{  5,  9, " eqp ",   'e' },
+	{ 10, 15, " wear ",  'w' },
+	{ 16, 20, " get ",   'g' },
+	{ 21, 26, " drop ",  'd' },
+	{ 27, 33, " magic ", 'm' },
+	{ 34, 40, " quaff ", 'q' },
+	{ 41, 46, " read ",  'r' },
+	{ 47, 52, " fire ",  'f' },
+	{ 53, 57, " zap ",   'z' },
+	{ 58, 62, " aim ",   'a' },
+	{ 63, 67, " use ",   'u' },
+	{ 68, 73, " Rest ",  'R' },
+	{ 74, 79, " More ",  '+' }
 };
 
 /* Flush one row from VirtualScreen to physical screen, overlaying software mouse cursor */
@@ -700,24 +702,33 @@ static void ibm_draw_dock(void)
 		{
 			int idx = x - dock_buttons[b].x0;
 			char ch = (idx < len) ? s[idx] : ' ';
+			bool is_keycap = (idx == 1 && dock_buttons[b].cmd != '+');
+			byte cell_bg = bg;
 			byte fg;
 
 			if (use_color_complex)
 			{
-				if (hov)
+				if (is_keycap)
+				{
+					cell_bg = hov ? TERM_GREEN : TERM_BLUE;
 					fg = TERM_YELLOW;
-				else if (idx <= 2)
+				}
+				else if (hov || dock_buttons[b].cmd == '+')
+				{
 					fg = TERM_YELLOW;
+				}
 				else
+				{
 					fg = TERM_WHITE;
+				}
 				dest[x << 1] = (byte)ch;
-				dest[(x << 1) + 1] = (byte)((bg << 4) | fg);
+				dest[(x << 1) + 1] = (byte)((cell_bg << 4) | fg);
 			}
 			else
 			{
-				fg = (idx <= 2) ? (VID_YELLOW | VID_BRIGHT) : VID_WHITE;
+				fg = (is_keycap || dock_buttons[b].cmd == '+') ? (VID_YELLOW | VID_BRIGHT) : VID_WHITE;
 				dest[x << 1] = (byte)ch;
-				dest[(x << 1) + 1] = (byte)(bg | fg);
+				dest[(x << 1) + 1] = (byte)(cell_bg | fg);
 			}
 		}
 	}
@@ -908,13 +919,9 @@ static void ibm_send_keys(cptr s)
 	}
 }
 
-/* Trigger school spellcasting directly if the player has learned school spells */
+/* Activate skill / magic menu ('m') */
 static void ibm_cast_or_skill(void)
 {
-	if (exec_lua("return fill_learned_spells(-1)") > 0)
-	{
-		command_arg = MKEY_SCHOOL;
-	}
 	mouse_cmd_raw = TRUE;
 	Term_keypress('m');
 }
@@ -934,15 +941,17 @@ static void ibm_cast_or_skill(void)
 
 typedef struct ibm_ctx_item
 {
+	char key;
 	char label[44];
 	int action;
 	char cmd;
 	int dir;
 } ibm_ctx_item;
 
-static void ibm_add_ctx(ibm_ctx_item *items, int *cnt, cptr label, int action, char cmd, int dir)
+static void ibm_add_ctx(ibm_ctx_item *items, int *cnt, char key, cptr label, int action, char cmd, int dir)
 {
 	if (*cnt >= 20) return;
+	items[*cnt].key = key;
 	strncpy(items[*cnt].label, label, 43);
 	items[*cnt].label[43] = '\0';
 	items[*cnt].action = action;
@@ -961,6 +970,57 @@ static void ibm_vscr_putstr(int x, int y, cptr s, byte attr)
 		if (x + i < 0) continue;
 		VirtualScreen[((y * cols + x + i) << 1)] = (byte)s[i];
 		VirtualScreen[((y * cols + x + i) << 1) + 1] = attr;
+	}
+}
+
+/*
+ * Draw a menu item label at (x, y):
+ * - If s[0] != '[', s[0] is the shortcut key and is drawn with keycap_at,
+ *   followed immediately by s + 1 in row_at (e.g. "search surroundings").
+ * - If s[0] == '[', the "[...]" badge is drawn with bracket_at / keycap_at,
+ *   followed by the rest of the string in row_at (e.g. "[Y] Chat / Talk").
+ */
+static void ibm_vscr_put_menuitem(int x, int y, cptr s, byte row_at, byte keycap_at, byte bracket_at)
+{
+	if (!VirtualScreen || !s || !s[0] || y < 0 || y >= rows) return;
+
+	if (s[0] == '[')
+	{
+		int i = 0;
+		while (s[i] && (x + i) < cols)
+		{
+			byte at = row_at;
+			if (s[i] == '[' || s[i] == ']')
+			{
+				at = bracket_at;
+				VirtualScreen[((y * cols + x + i) << 1)] = (byte)s[i];
+				VirtualScreen[((y * cols + x + i) << 1) + 1] = at;
+				if (s[i] == ']')
+				{
+					i++;
+					break;
+				}
+			}
+			else
+			{
+				VirtualScreen[((y * cols + x + i) << 1)] = (byte)s[i];
+				VirtualScreen[((y * cols + x + i) << 1) + 1] = keycap_at;
+			}
+			i++;
+		}
+		if (s[i])
+		{
+			ibm_vscr_putstr(x + i, y, s + i, row_at);
+		}
+	}
+	else
+	{
+		if (x >= 0 && x < cols)
+		{
+			VirtualScreen[((y * cols + x) << 1)] = (byte)s[0];
+			VirtualScreen[((y * cols + x) << 1) + 1] = keycap_at;
+		}
+		ibm_vscr_putstr(x + 1, y, s + 1, row_at);
 	}
 }
 
@@ -1005,59 +1065,82 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 		strcpy(title, "Player Actions (@)");
 		if (p_ptr->wild_mode)
 		{
-			ibm_add_ctx(items, &cnt, "Enter local area (>)", CTX_RAW_CMD, '>', 0);
+			ibm_add_ctx(items, &cnt, '>', "[>] Enter local area", CTX_RAW_CMD, '>', 0);
 		}
 		else
 		{
 			if (c_ptr->o_idx)
-				ibm_add_ctx(items, &cnt, "Pick up item (g)", CTX_RAW_CMD, 'g', 0);
+				ibm_add_ctx(items, &cnt, 'g', "get / pick up item", CTX_RAW_CMD, 'g', 0);
 			if (c_ptr->feat == FEAT_LESS || c_ptr->feat == FEAT_WAY_LESS ||
 			    c_ptr->feat == FEAT_SHAFT_UP || c_ptr->feat == FEAT_QUEST_UP || dun_level == 0)
-				ibm_add_ctx(items, &cnt, (dun_level == 0) ? "World wilderness map (<)" : "Ascend stairs (<)", CTX_RAW_CMD, '<', 0);
+				ibm_add_ctx(items, &cnt, '<', (dun_level == 0) ? "[<] World wilderness map" : "[<] Ascend stairs", CTX_RAW_CMD, '<', 0);
 			if (c_ptr->feat == FEAT_MORE || c_ptr->feat == FEAT_WAY_MORE ||
 			    c_ptr->feat == FEAT_SHAFT_DOWN || c_ptr->feat == FEAT_QUEST_DOWN ||
 			    c_ptr->feat == FEAT_QUEST_ENTER || c_ptr->feat == FEAT_QUEST_EXIT)
-				ibm_add_ctx(items, &cnt, "Descend / Enter (>)", CTX_RAW_CMD, '>', 0);
+				ibm_add_ctx(items, &cnt, '>', "[>] Descend / enter", CTX_RAW_CMD, '>', 0);
 			if (c_ptr->feat == FEAT_FOUNTAIN)
-				ibm_add_ctx(items, &cnt, "Drink from fountain (H)", CTX_RAW_CMD, 'H', 0);
+				ibm_add_ctx(items, &cnt, 'H', "[H] Drink from fountain", CTX_RAW_CMD, 'H', 0);
 			if (c_ptr->feat >= FEAT_ALTAR_HEAD && c_ptr->feat <= FEAT_ALTAR_TAIL)
-				ibm_add_ctx(items, &cnt, "Pray / Sacrifice (O)", CTX_RAW_CMD, 'O', 0);
+				ibm_add_ctx(items, &cnt, 'O', "Offer / sacrifice at altar", CTX_RAW_CMD, 'O', 0);
 		}
-		ibm_add_ctx(items, &cnt, "Wait 1 turn (,)", CTX_RAW_CMD, ',', 0);
-		ibm_add_ctx(items, &cnt, "Rest until healed (R)", CTX_REST_HEAL, 'R', 0);
-		ibm_add_ctx(items, &cnt, "Search surroundings (s)", CTX_RAW_CMD, 's', 0);
-		ibm_add_ctx(items, &cnt, "Look around (l)", CTX_RAW_CMD, 'l', 0);
-		ibm_add_ctx(items, &cnt, "Wear / Wield equipment (w)", CTX_RAW_CMD, 'w', 0);
-		ibm_add_ctx(items, &cnt, "Take off equipment (t)", CTX_RAW_CMD, 't', 0);
-		ibm_add_ctx(items, &cnt, "Drop item (d)", CTX_RAW_CMD, 'd', 0);
-		ibm_add_ctx(items, &cnt, "Eat food (E)", CTX_RAW_CMD, 'E', 0);
-		ibm_add_ctx(items, &cnt, "Activate artifact (A)", CTX_RAW_CMD, 'A', 0);
-		ibm_add_ctx(items, &cnt, "Racial / Class power (U)", CTX_RAW_CMD, 'U', 0);
-		ibm_add_ctx(items, &cnt, "Character sheet (C)", CTX_RAW_CMD, 'C', 0);
-		ibm_add_ctx(items, &cnt, "Game options (=)", CTX_RAW_CMD, '=', 0);
-		ibm_add_ctx(items, &cnt, "Save game (Ctrl-S)", CTX_RAW_CMD, KTRL('S'), 0);
+		ibm_add_ctx(items, &cnt, ',', "[,] Wait 1 turn", CTX_RAW_CMD, ',', 0);
+		ibm_add_ctx(items, &cnt, 'R', "Rest until healed", CTX_REST_HEAL, 'R', 0);
+		ibm_add_ctx(items, &cnt, 's', "search surroundings", CTX_RAW_CMD, 's', 0);
+		ibm_add_ctx(items, &cnt, 'l', "look around", CTX_RAW_CMD, 'l', 0);
+		ibm_add_ctx(items, &cnt, 'm', "magic / use skill", CTX_CAST_SPELL, 'm', 0);
+		ibm_add_ctx(items, &cnt, 'U', "Use racial / class power", CTX_RAW_CMD, 'U', 0);
+		ibm_add_ctx(items, &cnt, 'w', "wear / wield equipment", CTX_RAW_CMD, 'w', 0);
+		ibm_add_ctx(items, &cnt, 't', "take off equipment", CTX_RAW_CMD, 't', 0);
+		ibm_add_ctx(items, &cnt, 'd', "drop item", CTX_RAW_CMD, 'd', 0);
+		ibm_add_ctx(items, &cnt, 'E', "Eat food", CTX_RAW_CMD, 'E', 0);
+		ibm_add_ctx(items, &cnt, 'A', "Activate artifact", CTX_RAW_CMD, 'A', 0);
+		ibm_add_ctx(items, &cnt, 'G', "Gain / study skills", CTX_RAW_CMD, 'G', 0);
+		ibm_add_ctx(items, &cnt, 'C', "Character sheet", CTX_RAW_CMD, 'C', 0);
+		ibm_add_ctx(items, &cnt, '=', "[=] Game options", CTX_RAW_CMD, '=', 0);
 	}
 	else if (has_mon)
 	{
 		char m_name[48];
+		bool friendly = (is_friend(m_ptr) >= 0);
 		monster_desc(m_name, m_ptr, 0x08);
 		m_name[0] = toupper((unsigned char)m_name[0]);
 		strncpy(title, m_name, 42);
 		title[42] = '\0';
 
 		if (dist == 1)
-			ibm_add_ctx(items, &cnt, "Attack / Interact", CTX_DIR_CMD, ';', dir);
-		ibm_add_ctx(items, &cnt, "Cast spell at monster", CTX_AIM_CMD, 'm', 5);
-		ibm_add_ctx(items, &cnt, "Fire ranged weapon (f)", CTX_AIM_CMD, 'f', 5);
-		ibm_add_ctx(items, &cnt, "Zap rod at monster (z)", CTX_AIM_CMD, 'z', 5);
-		ibm_add_ctx(items, &cnt, "Aim wand at monster (a)", CTX_AIM_CMD, 'a', 5);
-		ibm_add_ctx(items, &cnt, "Throw item at monster (v)", CTX_AIM_CMD, 'v', 5);
-		if (dist == 1)
-			ibm_add_ctx(items, &cnt, "Steal from monster (Z)", CTX_DIR_CMD, 'Z', dir);
-		ibm_add_ctx(items, &cnt, "Target monster (*)", CTX_TARGET_MON, 0, 0);
-		ibm_add_ctx(items, &cnt, "Monster lore & stats", CTX_MON_LORE, 0, 0);
-		if (dist > 1)
-			ibm_add_ctx(items, &cnt, "Walk toward monster", CTX_DIR_CMD, ';', dir);
+		{
+			if (friendly)
+			{
+				ibm_add_ctx(items, &cnt, 'Y', "[Y] Chat / talk to character", CTX_DIR_CMD, 'Y', dir);
+				ibm_add_ctx(items, &cnt, 'y', "[y] Give item to character", CTX_DIR_CMD, 'y', dir);
+				ibm_add_ctx(items, &cnt, ';', "[;] Push past / step here", CTX_DIR_CMD, ';', dir);
+				if (is_friend(m_ptr) > 0)
+					ibm_add_ctx(items, &cnt, 'P', "Pet commands", CTX_RAW_CMD, 'P', 0);
+			}
+			else
+			{
+				ibm_add_ctx(items, &cnt, ';', "[;] Attack monster", CTX_DIR_CMD, ';', dir);
+				ibm_add_ctx(items, &cnt, 'Y', "[Y] Chat / talk to monster", CTX_DIR_CMD, 'Y', dir);
+				ibm_add_ctx(items, &cnt, 'y', "[y] Give item to monster", CTX_DIR_CMD, 'y', dir);
+			}
+		}
+		else if (friendly)
+		{
+			if (mouse_find_step(gy, gx) > 0)
+				ibm_add_ctx(items, &cnt, '.', "[.] Approach character (to talk)", CTX_BFS_TRAVEL, '.', 0);
+			ibm_add_ctx(items, &cnt, ';', "[;] Step toward character", CTX_DIR_CMD, ';', dir);
+		}
+		ibm_add_ctx(items, &cnt, 'm', "magic / use skill", CTX_AIM_CMD, 'm', 5);
+		ibm_add_ctx(items, &cnt, 'f', "fire ranged weapon", CTX_AIM_CMD, 'f', 5);
+		ibm_add_ctx(items, &cnt, 'z', "zap rod at target", CTX_AIM_CMD, 'z', 5);
+		ibm_add_ctx(items, &cnt, 'a', "aim wand at target", CTX_AIM_CMD, 'a', 5);
+		ibm_add_ctx(items, &cnt, 'v', "[v] Throw item at target", CTX_AIM_CMD, 'v', 5);
+		if (dist == 1 && !friendly)
+			ibm_add_ctx(items, &cnt, 'Z', "[Z] Steal from monster", CTX_DIR_CMD, 'Z', dir);
+		ibm_add_ctx(items, &cnt, '*', "[*] Target character", CTX_TARGET_MON, 0, 0);
+		ibm_add_ctx(items, &cnt, '/', "[/] Recall lore & stats", CTX_MON_LORE, 0, 0);
+		if (dist > 1 && !friendly)
+			ibm_add_ctx(items, &cnt, ';', "[;] Walk toward monster", CTX_DIR_CMD, ';', dir);
 	}
 	else if (!p_ptr->wild_mode && dist == 1)
 	{
@@ -1077,33 +1160,33 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 		}
 
 		if ((c_ptr->feat >= FEAT_DOOR_HEAD && c_ptr->feat <= FEAT_DOOR_TAIL) || ibm_has_chest(gy, gx))
-			ibm_add_ctx(items, &cnt, "Open door / chest (o)", CTX_DIR_CMD, 'o', dir);
+			ibm_add_ctx(items, &cnt, 'o', "open door / chest", CTX_DIR_CMD, 'o', dir);
 		if (c_ptr->feat >= FEAT_DOOR_HEAD && c_ptr->feat <= FEAT_DOOR_TAIL)
 		{
-			ibm_add_ctx(items, &cnt, "Bash door (B)", CTX_DIR_CMD, 'B', dir);
-			ibm_add_ctx(items, &cnt, "Spike door (j)", CTX_DIR_CMD, 'j', dir);
+			ibm_add_ctx(items, &cnt, 'B', "Bash door", CTX_DIR_CMD, 'B', dir);
+			ibm_add_ctx(items, &cnt, 'j', "jam / spike door", CTX_DIR_CMD, 'j', dir);
 		}
 		if (c_ptr->feat == FEAT_OPEN || c_ptr->feat == FEAT_BROKEN)
-			ibm_add_ctx(items, &cnt, "Close door (c)", CTX_DIR_CMD, 'c', dir);
+			ibm_add_ctx(items, &cnt, 'c', "close door", CTX_DIR_CMD, 'c', dir);
 		if ((c_ptr->info & CAVE_TRDT) && c_ptr->t_idx != 0)
-			ibm_add_ctx(items, &cnt, "Disarm trap (D)", CTX_DIR_CMD, 'D', dir);
+			ibm_add_ctx(items, &cnt, 'D', "Disarm trap", CTX_DIR_CMD, 'D', dir);
 		if (cave_floor_bold(gy, gx) || c_ptr->feat == FEAT_TREES || c_ptr->feat == FEAT_SHOP)
 		{
-			ibm_add_ctx(items, &cnt, "Step here (;)", CTX_DIR_CMD, ';', dir);
-			ibm_add_ctx(items, &cnt, "Run this way (.)", CTX_DIR_CMD, '.', dir);
+			ibm_add_ctx(items, &cnt, ';', "[;] Step here", CTX_DIR_CMD, ';', dir);
+			ibm_add_ctx(items, &cnt, '.', "[.] Run this way", CTX_DIR_CMD, '.', dir);
 		}
 		if (f_info[c_ptr->feat].flags1 & FF1_TUNNELABLE)
-			ibm_add_ctx(items, &cnt, "Tunnel / Dig (T)", CTX_DIR_CMD, 'T', dir);
-		ibm_add_ctx(items, &cnt, "Alter / Attack tile (+)", CTX_DIR_CMD, '+', dir);
-		ibm_add_ctx(items, &cnt, "Examine tile", CTX_EXAMINE_TILE, 0, 0);
+			ibm_add_ctx(items, &cnt, 'T', "Tunnel / dig", CTX_DIR_CMD, 'T', dir);
+		ibm_add_ctx(items, &cnt, '+', "[+] Alter / attack tile", CTX_DIR_CMD, '+', dir);
+		ibm_add_ctx(items, &cnt, 'l', "look at tile", CTX_EXAMINE_TILE, 0, 0);
 	}
 	else
 	{
 		if (p_ptr->wild_mode)
 		{
 			strcpy(title, "Wilderness Tile");
-			ibm_add_ctx(items, &cnt, "Walk toward here", CTX_DIR_CMD, ';', dir);
-			ibm_add_ctx(items, &cnt, "Enter local area (>)", CTX_RAW_CMD, '>', 0);
+			ibm_add_ctx(items, &cnt, ';', "[;] Walk toward here", CTX_DIR_CMD, ';', dir);
+			ibm_add_ctx(items, &cnt, '>', "[>] Enter local area", CTX_RAW_CMD, '>', 0);
 		}
 		else
 		{
@@ -1123,14 +1206,14 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 			}
 
 			if (mouse_find_step(gy, gx) > 0)
-				ibm_add_ctx(items, &cnt, "Travel here (Shortest path)", CTX_BFS_TRAVEL, '.', 0);
-			ibm_add_ctx(items, &cnt, "Run in this direction (.)", CTX_DIR_CMD, '.', dir);
-			ibm_add_ctx(items, &cnt, "Step in this direction (;)", CTX_DIR_CMD, ';', dir);
-			ibm_add_ctx(items, &cnt, "Cast spell at tile (m)", CTX_AIM_CMD, 'm', 5);
-			ibm_add_ctx(items, &cnt, "Fire / Shoot at tile (f)", CTX_AIM_CMD, 'f', 5);
-			ibm_add_ctx(items, &cnt, "Target this location (*)", CTX_TARGET_LOC, 0, 0);
-			ibm_add_ctx(items, &cnt, "View dungeon map (M)", CTX_RAW_CMD, 'M', 0);
-			ibm_add_ctx(items, &cnt, "Examine tile", CTX_EXAMINE_TILE, 0, 0);
+				ibm_add_ctx(items, &cnt, '.', "[.] Travel here (shortest path)", CTX_BFS_TRAVEL, '.', 0);
+			ibm_add_ctx(items, &cnt, 'R', "[R] Run in this direction", CTX_DIR_CMD, '.', dir);
+			ibm_add_ctx(items, &cnt, ';', "[;] Step in this direction", CTX_DIR_CMD, ';', dir);
+			ibm_add_ctx(items, &cnt, 'm', "magic / use skill at tile", CTX_AIM_CMD, 'm', 5);
+			ibm_add_ctx(items, &cnt, 'f', "fire ranged weapon at tile", CTX_AIM_CMD, 'f', 5);
+			ibm_add_ctx(items, &cnt, '*', "[*] Target this location", CTX_TARGET_LOC, 0, 0);
+			ibm_add_ctx(items, &cnt, 'M', "Map of dungeon", CTX_RAW_CMD, 'M', 0);
+			ibm_add_ctx(items, &cnt, 'l', "look at tile", CTX_EXAMINE_TILE, 0, 0);
 		}
 	}
 
@@ -1140,7 +1223,7 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 	box_w = strlen(title) + 6;
 	for (i = 0; i < cnt; i++)
 	{
-		int w = strlen(items[i].label) + 7;
+		int w = strlen(items[i].label) + 4;
 		if (w > box_w) box_w = w;
 	}
 	if (box_w > 48) box_w = 48;
@@ -1166,6 +1249,8 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 		byte title_attr  = use_color_complex ? (byte)((TERM_BLUE << 4) | TERM_YELLOW) : 0x1E;
 		byte body_attr   = use_color_complex ? (byte)((TERM_SLATE << 4) | TERM_WHITE) : 0x70;
 		byte key_attr    = use_color_complex ? (byte)((TERM_SLATE << 4) | TERM_YELLOW) : 0x7E;
+		byte keycap_attr = use_color_complex ? (byte)((TERM_BLUE << 4) | TERM_YELLOW) : 0x1E;
+		byte hov_cap_at  = use_color_complex ? (byte)((TERM_GREEN << 4) | TERM_YELLOW) : 0x2E;
 		byte sel_attr    = use_color_complex ? (byte)((TERM_BLUE << 4) | TERM_YELLOW) : 0x1F;
 		byte shadow_attr = use_color_complex ? (byte)((TERM_DARK << 4) | TERM_SLATE) : 0x08;
 
@@ -1228,8 +1313,8 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 			int sy = box_y + 2 + i;
 			bool is_hov = (i == hovered);
 			byte row_at = is_hov ? sel_attr : body_attr;
-			byte badge_at = is_hov ? sel_attr : key_attr;
-			char badge[6];
+			byte cap_at = is_hov ? hov_cap_at : keycap_attr;
+			byte brk_at = is_hov ? sel_attr : key_attr;
 
 			for (c = 1; c < box_w - 1; c++)
 			{
@@ -1237,9 +1322,7 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 				VirtualScreen[((sy * cols + box_x + c) << 1) + 1] = row_at;
 			}
 
-			sprintf(badge, "[%c] ", 'a' + i);
-			ibm_vscr_putstr(box_x + 2, sy, badge, badge_at);
-			ibm_vscr_putstr(box_x + 6, sy, items[i].label, row_at);
+			ibm_vscr_put_menuitem(box_x + 2, sy, items[i].label, row_at, cap_at, brk_at);
 		}
 
 		for (r = box_y; r <= box_y + box_h && r < 24; r++)
@@ -1256,17 +1339,16 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 				chosen = -1;
 				break;
 			}
-			else if (k >= 'a' && k < 'a' + cnt)
+			for (i = 0; i < cnt; i++)
 			{
-				chosen = k - 'a';
-				break;
+				if (k == items[i].key)
+				{
+					chosen = i;
+					break;
+				}
 			}
-			else if (k >= 'A' && k < 'A' + cnt)
-			{
-				chosen = k - 'A';
-				break;
-			}
-			else if (k >= '1' && k <= '9' && (k - '1') < cnt)
+			if (chosen >= 0) break;
+			if (k >= '1' && k <= '9' && (k - '1') < cnt)
 			{
 				chosen = k - '1';
 				break;
@@ -1433,55 +1515,56 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 	return (FALSE);
 }
 
-/* Display and run the comprehensive 2-column [+]More Commands menu (excludes dock shortcuts) */
+/* Display and run the comprehensive 2-column More Commands menu (excludes dock shortcuts) */
 static bool ibm_show_more_menu(void)
 {
 	typedef struct
 	{
-		char key;
 		cptr label;
 		char cmd;
 		bool is_rest;
 	} more_item_type;
 
-	static const more_item_type more_items[30] =
+	static const more_item_type more_items[32] =
 	{
-		/* Left column (15 items) */
-		{ 'a', "Rest until healed (R)",    'R',     TRUE  },
-		{ 'b', "Wait 1 turn (,)",          ',',     FALSE },
-		{ 'c', "Search surroundings (s)",  's',     FALSE },
-		{ 'd', "Toggle search mode (S)",   'S',     FALSE },
-		{ 'e', "Look around (l)",          'l',     FALSE },
-		{ 'f', "Full dungeon map (M)",     'M',     FALSE },
-		{ '?', "Help / Tutorial (?)",      '?',     FALSE },
-		{ 'h', "Wear / Wield item (w)",    'w',     FALSE },
-		{ 'i', "Take off item (t)",        't',     FALSE },
-		{ 'j', "Drop item (d)",            'd',     FALSE },
-		{ 'k', "Destroy item (k)",         'k',     FALSE },
-		{ 'l', "Eat food (E)",             'E',     FALSE },
-		{ 'm', "Fuel light source (F)",    'F',     FALSE },
-		{ 'n', "Throw item (v)",           'v',     FALSE },
-		{ 'o', "Inspect item (I)",         'I',     FALSE },
-		/* Right column (15 items) */
-		{ 'p', "Use skill / power (m)",    'm',     FALSE },
-		{ 'q', "Racial / Class power (U)", 'U',     FALSE },
-		{ 'r', "Activate artifact (A)",    'A',     FALSE },
-		{ 's', "Special abilities (N)",    'N',     FALSE },
-		{ 't', "Browse spellbooks (b)",    'b',     FALSE },
-		{ 'u', "Pray to god (p)",          'p',     FALSE },
-		{ 'v', "Pet commands (P)",         'P',     FALSE },
-		{ 'w', "Chat / Interact (Y)",      'Y',     FALSE },
-		{ 'x', "Character sheet (C)",      'C',     FALSE },
-		{ 'y', "Quest status (^Q)",        KTRL('Q'), FALSE },
-		{ 'z', "Knowledge / Lore (~)",     '~',     FALSE },
-		{ '1', "Message log (^P)",         KTRL('P'), FALSE },
-		{ '2', "Game options (=)",         '=',     FALSE },
-		{ '3', "Save game (^S)",           KTRL('S'), FALSE },
-		{ '4', "Save & Quit (^X)",         KTRL('X'), FALSE }
+		/* Left column (16 items: Exploration & Items) */
+		{ "search surroundings",        's',       FALSE },
+		{ "Search mode (toggle)",       'S',       FALSE },
+		{ "look around",                'l',       FALSE },
+		{ "Map of dungeon",             'M',       FALSE },
+		{ "Locate player on map",       'L',       FALSE },
+		{ "[,] Wait 1 turn",            ',',       FALSE },
+		{ "[<] Ascend / world map",     '<',       FALSE },
+		{ "[>] Descend / enter area",   '>',       FALSE },
+		{ "take off equipment",         't',       FALSE },
+		{ "kill / destroy item",        'k',       FALSE },
+		{ "Inspect item",               'I',       FALSE },
+		{ "Eat food",                   'E',       FALSE },
+		{ "Fuel light source",          'F',       FALSE },
+		{ "[v] Throw item",             'v',       FALSE },
+		{ "Activate artifact",          'A',       FALSE },
+		{ "[{] Inscribe item",          '{',       FALSE },
+		/* Right column (16 items: Skills, NPCs & System) */
+		{ "Gain / study skills",        'G',       FALSE },
+		{ "[N] Mindcraft / abilities",  'N',       FALSE },
+		{ "Use racial / class power",   'U',       FALSE },
+		{ "browse spellbooks",          'b',       FALSE },
+		{ "pray to god",                'p',       FALSE },
+		{ "Pet commands",               'P',       FALSE },
+		{ "[Y] Chat with character",    'Y',       FALSE },
+		{ "[y] Give item to character", 'y',       FALSE },
+		{ "Character sheet",            'C',       FALSE },
+		{ "[~] Knowledge & lore",       '~',       FALSE },
+		{ "[^Q] Quest status",          KTRL('Q'), FALSE },
+		{ "[^P] Message history",       KTRL('P'), FALSE },
+		{ "[=] Game options",           '=',       FALSE },
+		{ "[?] Help & tutorial",        '?',       FALSE },
+		{ "[^S] Save game",             KTRL('S'), FALSE },
+		{ "[^X] Save & Quit",           KTRL('X'), FALSE }
 	};
 
-	const int rows_per_col = 15;
-	const int box_x = 4, box_y = 4, box_w = 72, box_h = 18;
+	const int rows_per_col = 16;
+	const int box_x = 4, box_y = 3, box_w = 72, box_h = 19;
 	const int col_w = 34;
 	byte *saved_vscr;
 	int r, c, i;
@@ -1498,6 +1581,8 @@ static bool ibm_show_more_menu(void)
 		byte title_attr  = use_color_complex ? (byte)((TERM_BLUE << 4) | TERM_YELLOW) : 0x1E;
 		byte body_attr   = use_color_complex ? (byte)((TERM_SLATE << 4) | TERM_WHITE) : 0x70;
 		byte key_attr    = use_color_complex ? (byte)((TERM_SLATE << 4) | TERM_YELLOW) : 0x7E;
+		byte keycap_attr = use_color_complex ? (byte)((TERM_BLUE << 4) | TERM_YELLOW) : 0x1E;
+		byte hov_cap_at  = use_color_complex ? (byte)((TERM_GREEN << 4) | TERM_YELLOW) : 0x2E;
 		byte sel_attr    = use_color_complex ? (byte)((TERM_BLUE << 4) | TERM_YELLOW) : 0x1F;
 		byte shadow_attr = use_color_complex ? (byte)((TERM_DARK << 4) | TERM_SLATE) : 0x08;
 
@@ -1545,9 +1630,9 @@ static bool ibm_show_more_menu(void)
 				VirtualScreen[(((box_y + box_h) * cols + box_x + c) << 1) + 1] = shadow_attr;
 		}
 
-		ibm_vscr_putstr(box_x + 2, box_y + 1, "More Commands (not on bottom dock)  -  [a-z, 1-4, ESC=cancel]", title_attr);
+		ibm_vscr_putstr(box_x + 2, box_y + 1, "More Commands (not on bottom dock) - [Click or press key, ESC=cancel]", title_attr);
 
-		for (i = 0; i < 30; i++)
+		for (i = 0; i < 32; i++)
 		{
 			int col_idx = i / rows_per_col;
 			int row_idx = i % rows_per_col;
@@ -1555,17 +1640,15 @@ static bool ibm_show_more_menu(void)
 			int sy = box_y + 2 + row_idx;
 			bool is_hov = (i == hovered);
 			byte row_at = is_hov ? sel_attr : body_attr;
-			byte badge_at = is_hov ? sel_attr : key_attr;
-			char badge[6];
+			byte cap_at = is_hov ? hov_cap_at : keycap_attr;
+			byte brk_at = is_hov ? sel_attr : key_attr;
 
 			for (c = 0; c < col_w; c++)
 			{
 				VirtualScreen[((sy * cols + sx + c) << 1)] = ' ';
 				VirtualScreen[((sy * cols + sx + c) << 1) + 1] = row_at;
 			}
-			sprintf(badge, "[%c] ", more_items[i].key);
-			ibm_vscr_putstr(sx, sy, badge, badge_at);
-			ibm_vscr_putstr(sx + 4, sy, more_items[i].label, row_at);
+			ibm_vscr_put_menuitem(sx + 1, sy, more_items[i].label, row_at, cap_at, brk_at);
 		}
 
 		for (r = box_y; r <= box_y + box_h && r < 24; r++)
@@ -1579,9 +1662,9 @@ static bool ibm_show_more_menu(void)
 				chosen = -1;
 				break;
 			}
-			for (i = 0; i < 30; i++)
+			for (i = 0; i < 32; i++)
 			{
-				if (tolower(k) == more_items[i].key)
+				if (k == (unsigned char)more_items[i].cmd)
 				{
 					chosen = i;
 					break;
@@ -1616,7 +1699,7 @@ static bool ibm_show_more_menu(void)
 	for (r = 0; r < 24; r++) ibm_flush_row(r);
 	ibm_draw_dock();
 
-	if (chosen < 0 || chosen >= 30) return (FALSE);
+	if (chosen < 0 || chosen >= 32) return (FALSE);
 
 	mouse_cmd_raw = TRUE;
 	if (more_items[chosen].is_rest)
@@ -1878,6 +1961,12 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 				{
 					return (ibm_show_more_menu());
 				}
+				else if (dock_buttons[b].cmd == 'R')
+				{
+					mouse_cmd_raw = TRUE;
+					ibm_send_keys("R*\r");
+					return (TRUE);
+				}
 				else if (dock_buttons[b].cmd == 'm')
 				{
 					ibm_cast_or_skill();
@@ -2059,18 +2148,22 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 			}
 			if (my == ibm_numeric_bar_y)
 			{
-				if (mx >= 2 && mx <= 6)        { ibm_numeric_action = 1; Term_keypress('\x1f'); }
-				else if (mx >= 8 && mx <= 12)  { ibm_numeric_action = 2; Term_keypress('\x1f'); }
-				else if (mx >= 14 && mx <= 17) { ibm_numeric_action = 3; Term_keypress('\x1f'); }
-				else if (mx >= 19 && mx <= 22) { ibm_numeric_action = 4; Term_keypress('\x1f'); }
-				else if (mx >= 24 && mx <= 28) { ibm_numeric_action = 5; Term_keypress('\x1f'); }
-				else if (mx >= 30 && mx <= 34) { ibm_numeric_action = 6; Term_keypress('\x1f'); }
-				else if (mx >= 36 && mx <= 39) { Term_keypress('\r'); }
-				else if (mx >= 41 && mx <= 45) { Term_keypress(ESCAPE); }
+				if (mx >= 2 && mx <= 7)        { ibm_numeric_action = 1; Term_keypress('\x01'); }
+				else if (mx >= 8 && mx <= 13)  { ibm_numeric_action = 2; Term_keypress('\x01'); }
+				else if (mx >= 14 && mx <= 18) { ibm_numeric_action = 3; Term_keypress('\x01'); }
+				else if (mx >= 19 && mx <= 23) { ibm_numeric_action = 4; Term_keypress('\x01'); }
+				else if (mx >= 24 && mx <= 29) { ibm_numeric_action = 5; Term_keypress('\x01'); }
+				else if (mx >= 30 && mx <= 35) { ibm_numeric_action = 6; Term_keypress('\x01'); }
+				else if (mx >= 36 && mx <= 40) { Term_keypress('\r'); }
+				else if (mx >= 41 && mx <= 46) { Term_keypress(ESCAPE); }
 				return (TRUE);
 			}
-			Term_keypress('\r');
-			return (TRUE);
+			if (my == ibm_numeric_bar_y - 1 || my == ibm_numeric_bar_y + 1)
+			{
+				Term_keypress('\r');
+				return (TRUE);
+			}
+			return (FALSE);
 		}
 		if (strstr(line23, "Enter the name of") ||
 		    strstr(line23, "Enter your player's name") ||
@@ -2351,9 +2444,13 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 		/* Left-click on an Adjacent Tile (dist == 1) */
 		if (dist == 1)
 		{
-			/* Monster: attack/interact */
+			/* Monster: if friendly/neutral NPC, open interaction menu (Chat / Give / Push past); if hostile, attack */
 			if (c_ptr->m_idx > 0 && m_list[c_ptr->m_idx].ml)
 			{
+				if (is_friend(&m_list[c_ptr->m_idx]) >= 0)
+				{
+					return (ibm_show_context_menu(gy, gx, mx, my));
+				}
 				command_dir = dir;
 				mouse_cmd_raw = TRUE;
 				Term_keypress(';');

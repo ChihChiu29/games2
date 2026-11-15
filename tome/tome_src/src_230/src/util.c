@@ -3431,7 +3431,7 @@ bool askfor_aux(char *buf, int len)
 			strncpy(complete_buf, buf, k);
 			break;
 
-		case '\x1f':
+		case '\x01':
 			if (ibm_numeric_input && ibm_numeric_action != 0)
 			{
 				s32b cur = atol(buf);

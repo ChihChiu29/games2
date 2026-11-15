@@ -792,6 +792,7 @@ static void print_skill_batch(int *p, cptr *p_desc, int start, int max, bool mod
 	prt(format("Select a skill (a-%c), @ to select by name, +/- to scroll:", I2A(j - 1)), 0, 0);
 }
 
+extern bool mouse_cmd_raw;
 int ibm_skill_mode = 0;
 int ibm_skill_click_y = -1;
 int ibm_skill_click_x = -1;
@@ -867,7 +868,17 @@ int do_cmd_activate_skill_aux()
 	if (!max)
 	{
 		msg_print("You don't have any activable skills or abilities.");
+		C_FREE(p, max_s_idx + max_ab_idx, int);
+		C_FREE(p_desc, max_s_idx + max_ab_idx, cptr);
 		return -1;
+	}
+
+	if (max == 1 && mouse_cmd_raw)
+	{
+		ret = p[0];
+		C_FREE(p, max_s_idx + max_ab_idx, int);
+		C_FREE(p_desc, max_s_idx + max_ab_idx, cptr);
+		return ret;
 	}
 
 	character_icky = TRUE;

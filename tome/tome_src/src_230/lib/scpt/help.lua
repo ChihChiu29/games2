@@ -105,16 +105,6 @@ ingame_help
 
 ingame_help
 {
-	["hook"] =      HOOK_END_TURN,
-	["event"] =     function(y, x) return TRUE end,
-	["desc"] =
-	{
-		"Welcome to ToME! Use the [+]More menu (or press ?) for tutorial & help.",
-	}
-}
-
-ingame_help
-{
 	["no_test"] =   TRUE,
 	["callback"] =  "select_context",
 	["fct"] =       function(typ, name)

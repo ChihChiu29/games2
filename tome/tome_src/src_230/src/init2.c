@@ -519,10 +519,6 @@ static errr init_f_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'f_info.raw' file.");
-		msg_print(NULL);
 	}
 
 
@@ -802,10 +798,6 @@ static errr init_k_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'k_info.raw' file.");
-		msg_print(NULL);
 	}
 
 
@@ -1241,10 +1233,6 @@ static errr init_set_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'set_info.raw' file.");
-		msg_print(NULL);
 	}
 
 
@@ -1465,10 +1453,6 @@ static errr init_a_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'a_info.raw' file.");
-		msg_print(NULL);
 	}
 
 
@@ -1691,10 +1675,6 @@ static errr init_s_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 's_info.raw' file.");
-		msg_print(NULL);
 	}
 
 	/*** Make the fake arrays ***/
@@ -1913,10 +1893,6 @@ static errr init_ab_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'ab_info.raw' file.");
-		msg_print(NULL);
 	}
 
 	/*** Make the fake arrays ***/
@@ -2195,10 +2171,6 @@ static errr init_e_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'e_info.raw' file.");
-		msg_print(NULL);
 	}
 
 
@@ -2461,10 +2433,6 @@ static errr init_ra_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'ra_info.raw' file.");
-		msg_print(NULL);
 	}
 
 
@@ -3164,10 +3132,6 @@ static errr init_r_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'r_info.raw' file.");
-		msg_print(NULL);
 	}
 
 
@@ -3388,10 +3352,6 @@ static errr init_re_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 're_info.raw' file.");
-		msg_print(NULL);
 	}
 
 
@@ -3605,10 +3565,6 @@ static errr init_d_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'd_info.raw' file.");
-		msg_print(NULL);
 	}
 
 
@@ -3869,10 +3825,6 @@ static errr init_player_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'p_info.raw' file.");
-		msg_print(NULL);
 	}
 
 
@@ -4185,10 +4137,6 @@ static errr init_st_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'st_info.raw' file.");
-		msg_print(NULL);
 	}
 
 
@@ -4402,10 +4350,6 @@ static errr init_ow_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'ow_info.raw' file.");
-		msg_print(NULL);
 	}
 
 
@@ -4619,10 +4563,6 @@ static errr init_ba_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'ba_info.raw' file.");
-		msg_print(NULL);
 	}
 
 
@@ -4836,10 +4776,6 @@ static errr init_wf_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'wf_info.raw' file.");
-		msg_print(NULL);
 	}
 
 
@@ -5117,10 +5053,6 @@ static errr init_t_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'tr_info.raw' file.");
-		msg_print(NULL);
 	}
 
 	/*** Make the fake arrays ***/
@@ -5392,10 +5324,6 @@ fd = -1;
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'v_info.raw' file.");
-		msg_print(NULL);
 	}
 
 	fake_text_size = FAKE_TEXT_SIZE;
@@ -5688,10 +5616,6 @@ errr init_v_info(void)
 
 		/* Success */
 		if (!err) return (0);
-
-		/* Information */
-		msg_print("Ignoring obsolete/defective 'v_info.raw' file.");
-		msg_print(NULL);
 	}
 
 

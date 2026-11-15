@@ -595,7 +595,7 @@ static const dock_btn_type dock_buttons[DOCK_BTN_COUNT] =
 	{ 10, 14, " wear",   'w' },
 	{ 15, 19, " get ",   'g' },
 	{ 20, 24, " drop",   'd' },
-	{ 25, 30, " cast ",  DOCK_CMD_CAST },
+	{ 25, 30, " Cast ",  DOCK_CMD_CAST },
 	{ 31, 36, " magic",  'm' },
 	{ 37, 42, " quaff",  'q' },
 	{ 43, 47, " read",   'r' },
@@ -716,7 +716,8 @@ static void ibm_draw_dock(void)
 					cell_bg = hov ? TERM_GREEN : TERM_BLUE;
 					fg = TERM_YELLOW;
 				}
-				else if (hov || dock_buttons[b].cmd == '+')
+				else if (hov || dock_buttons[b].cmd == '+' ||
+				         dock_buttons[b].cmd == DOCK_CMD_CAST)
 				{
 					fg = TERM_YELLOW;
 				}
@@ -729,7 +730,8 @@ static void ibm_draw_dock(void)
 			}
 			else
 			{
-				fg = (is_keycap || dock_buttons[b].cmd == '+') ? (VID_YELLOW | VID_BRIGHT) : VID_WHITE;
+				fg = (is_keycap || dock_buttons[b].cmd == '+' ||
+				      dock_buttons[b].cmd == DOCK_CMD_CAST) ? (VID_YELLOW | VID_BRIGHT) : VID_WHITE;
 				dest[x << 1] = (byte)ch;
 				dest[(x << 1) + 1] = (byte)(cell_bg | fg);
 			}
@@ -929,11 +931,50 @@ static void ibm_cast_or_skill(void)
 	Term_keypress('m');
 }
 
-/* Direct school-spell cast shortcut (MKEY_SCHOOL = 17 via "017m") */
+/* Check if the player has an active skill or ability matching action_mkey */
+static bool ibm_has_mkey(int mkey)
+{
+	int i;
+	for (i = 1; i < max_s_idx; i++)
+	{
+		if (s_info[i].value && s_info[i].action_mkey == mkey) return (TRUE);
+	}
+	for (i = 0; i < max_ab_idx; i++)
+	{
+		if (ab_info[i].acquired && ab_info[i].action_mkey == mkey) return (TRUE);
+	}
+	return (FALSE);
+}
+
+/* Direct spellcast shortcut: bypass the 'm' skill list and open spell selection directly */
 static void ibm_direct_cast(void)
 {
+	static const int cast_mkeys[] =
+	{
+		MKEY_SCHOOL,
+		MKEY_POWER_MAGE,
+		MKEY_RUNE,
+		MKEY_NECRO,
+		MKEY_MINDCRAFT,
+		MKEY_SUMMON,
+		MKEY_SYMBIOTIC,
+		MKEY_ALCHEMY,
+		MKEY_MIMIC
+	};
+	int i;
+
+	command_arg = 0;
+	for (i = 0; i < (int)(sizeof(cast_mkeys) / sizeof(cast_mkeys[0])); i++)
+	{
+		if (ibm_has_mkey(cast_mkeys[i]))
+		{
+			command_arg = cast_mkeys[i];
+			break;
+		}
+	}
+
 	mouse_cmd_raw = TRUE;
-	ibm_send_keys("017m");
+	Term_keypress('m');
 }
 
 /* Context menu action IDs */
@@ -995,6 +1036,11 @@ static void ibm_vscr_put_menuitem(int x, int y, cptr s, byte row_at, byte keycap
 {
 	if (!VirtualScreen || !s || !s[0] || y < 0 || y >= rows) return;
 
+	if (s[0] == '*')
+	{
+		ibm_vscr_putstr(x, y, s + 1, bracket_at);
+		return;
+	}
 	if (s[0] == '[')
 	{
 		int i = 0;
@@ -1098,7 +1144,7 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 		ibm_add_ctx(items, &cnt, 'R', "Rest until healed", CTX_REST_HEAL, 'R', 0);
 		ibm_add_ctx(items, &cnt, 's', "search surroundings", CTX_RAW_CMD, 's', 0);
 		ibm_add_ctx(items, &cnt, 'l', "look around", CTX_RAW_CMD, 'l', 0);
-		ibm_add_ctx(items, &cnt, 'c', "cast spell", CTX_DIRECT_CAST, 0, 0);
+		ibm_add_ctx(items, &cnt, 0, "*Cast spell", CTX_DIRECT_CAST, 0, 0);
 		ibm_add_ctx(items, &cnt, 'm', "magic / use skill", CTX_CAST_SPELL, 'm', 0);
 		ibm_add_ctx(items, &cnt, 'U', "Use racial / class power", CTX_RAW_CMD, 'U', 0);
 		ibm_add_ctx(items, &cnt, 'w', "wear / wield equipment", CTX_RAW_CMD, 'w', 0);
@@ -1142,7 +1188,7 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 				ibm_add_ctx(items, &cnt, '.', "[.] Approach character (to talk)", CTX_BFS_TRAVEL, '.', 0);
 			ibm_add_ctx(items, &cnt, ';', "[;] Step toward character", CTX_DIR_CMD, ';', dir);
 		}
-		ibm_add_ctx(items, &cnt, 'c', "cast spell at target", CTX_AIM_CMD, DOCK_CMD_CAST, 5);
+		ibm_add_ctx(items, &cnt, 0, "*Cast spell at target", CTX_AIM_CMD, DOCK_CMD_CAST, 5);
 		ibm_add_ctx(items, &cnt, 'm', "magic / use skill", CTX_AIM_CMD, 'm', 5);
 		ibm_add_ctx(items, &cnt, 'f', "fire ranged weapon", CTX_AIM_CMD, 'f', 5);
 		ibm_add_ctx(items, &cnt, 'z', "zap rod at target", CTX_AIM_CMD, 'z', 5);
@@ -1222,7 +1268,7 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 				ibm_add_ctx(items, &cnt, '.', "[.] Travel here (shortest path)", CTX_BFS_TRAVEL, '.', 0);
 			ibm_add_ctx(items, &cnt, 'R', "[R] Run in this direction", CTX_DIR_CMD, '.', dir);
 			ibm_add_ctx(items, &cnt, ';', "[;] Step in this direction", CTX_DIR_CMD, ';', dir);
-			ibm_add_ctx(items, &cnt, 'c', "cast spell at tile", CTX_AIM_CMD, DOCK_CMD_CAST, 5);
+			ibm_add_ctx(items, &cnt, 0, "*Cast spell at tile", CTX_AIM_CMD, DOCK_CMD_CAST, 5);
 			ibm_add_ctx(items, &cnt, 'm', "magic / use skill at tile", CTX_AIM_CMD, 'm', 5);
 			ibm_add_ctx(items, &cnt, 'f', "fire ranged weapon at tile", CTX_AIM_CMD, 'f', 5);
 			ibm_add_ctx(items, &cnt, '*', "[*] Target this location", CTX_TARGET_LOC, 0, 0);

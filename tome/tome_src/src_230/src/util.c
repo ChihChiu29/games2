@@ -3768,11 +3768,14 @@ void request_command(int shopping)
 	/* No command yet */
 	command_cmd = 0;
 
-	/* No "argument" yet */
-	command_arg = 0;
+	if (!mouse_cmd_raw)
+	{
+		/* No "argument" yet */
+		command_arg = 0;
 
-	/* No "direction" yet */
-	command_dir = 0;
+		/* No "direction" yet */
+		command_dir = 0;
+	}
 
 
 	/* Get command */

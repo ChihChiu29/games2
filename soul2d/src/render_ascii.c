@@ -113,8 +113,11 @@ static void render_character_ascii(const Character *c)
     } else if (c->hurt_flash > 0) {
         bg = COL_RED;
     } else if (c->is_player && c->action == ACT_ROLL) {
-        fg = COL_LIGHTGREEN;
+        static const char spin_ch[4] = { '/', '-', '\\', '|' };
+        body_ch = spin_ch[(c->action_frame / 2) & 3];
+        fg = (c->action_frame <= player_def.roll_iframes) ? COL_LIGHTGREEN : COL_LIGHTCYAN;
         bg = COL_BLUE;
+        term_put_cell(tx - c->roll_dx, ty - c->roll_dy, '.', COL_DARKGRAY, COL_BLACK);
     }
 
     term_put_cell(tx, ty, body_ch, fg, bg);

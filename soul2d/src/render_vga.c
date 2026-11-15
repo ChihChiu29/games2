@@ -500,6 +500,62 @@ static void draw_crit_shatter_particles(const Character *c)
     }
 }
 
+/* Draws a 4-phase tucked Knight somersault with trailing speed-dust (no block!) */
+static void draw_knight_roll_rig(const Character *c)
+{
+    int phase = (c->action_frame / 3) & 3;
+    bool iframe = (c->action_frame <= player_def.roll_iframes);
+    uint8_t armor_c = iframe ? PAL_STEEL_SHINE : PAL_STEEL_MID;
+    uint8_t cape_c  = iframe ? PAL_EMERALD_LIGHT : PAL_BLUE_MID;
+    uint8_t trim_c  = iframe ? PAL_EMERALD_HOT : PAL_GOLD_LIGHT;
+
+    /* Trailing wind/dust streaks behind the roll direction */
+    int i;
+    for (i = 1; i <= 3; i++) {
+        int tx = c->cx - c->roll_dx * (5 + i * 3);
+        int ty = c->cy - c->roll_dy * (5 + i * 3) + (i & 1 ? -2 : 2);
+        vga_draw_line(tx, ty, tx - c->roll_dx * 4, ty - c->roll_dy * 4,
+                      iframe ? PAL_EMERALD_MID : PAL_FLOOR_LIGHT);
+    }
+
+    canv_clear();
+
+    /* Rounded tucked torso silhouette (chamfered circle, never a square) */
+    canv_rect(-4, -5, 9, 10, armor_c);
+    canv_rect(-5, -4, 11, 8, cape_c);
+    canv_rect(-3, -6, 7, 12, PAL_STEEL_LIGHT);
+    canv_rect(-6, -2, 13, 5, cape_c);
+
+    /* Rotating helmet visor, crimson plume, and armored boots by somersault phase */
+    if (phase == 0) {
+        /* Tucking forward: helmet down-front, boots trailing back */
+        canv_rect(-2, -5, 5, 4, PAL_STEEL_SHINE);
+        canv_rect(-1, -6, 3, 1, PAL_CRIMSON_LIGHT);
+        canv_rect(-2, -3, 4, 1, PAL_OUTLINE);
+        canv_rect(-3,  2, 6, 3, trim_c);
+    } else if (phase == 1) {
+        /* Mid-roll 90 deg: curled tight with spinning plume & gold belt */
+        canv_rect( 1, -3, 4, 5, PAL_STEEL_SHINE);
+        canv_rect( 3, -2, 2, 3, PAL_CRIMSON_LIGHT);
+        canv_rect(-4, -2, 3, 5, PAL_STEEL_DARK);
+        canv_line(-1, -5, -1, 5, trim_c);
+    } else if (phase == 2) {
+        /* Inverted apex: boots on top, helmet tucked underneath */
+        canv_rect(-3, -5, 6, 3, PAL_STEEL_DARK);
+        canv_rect(-2,  1, 5, 4, PAL_STEEL_SHINE);
+        canv_rect(-1,  5, 3, 1, PAL_CRIMSON_LIGHT);
+        canv_line(-4, 0, 4, 0, trim_c);
+    } else {
+        /* Uncurling into landing */
+        canv_rect(-4, -3, 4, 5, PAL_STEEL_SHINE);
+        canv_rect(-5, -2, 2, 3, PAL_CRIMSON_LIGHT);
+        canv_rect( 1,  1, 4, 4, PAL_STEEL_DARK);
+        canv_line( 0, -5, 0, 5, trim_c);
+    }
+
+    canv_blit_outlined(c->cx, c->cy, 100, 0);
+}
+
 static void render_character_vga(const Character *c)
 {
     if (!c || !c->active || !c->def) return;
@@ -510,10 +566,7 @@ static void render_character_vga(const Character *c)
     draw_floor_shadow(c->cx, c->cy + (8 * scale) / 100, rad, rad / 2 + 1);
 
     if (c->is_player && c->action == ACT_ROLL) {
-        canv_clear();
-        uint8_t roll_c = (c->action_frame <= player_def.roll_iframes) ? PAL_EMERALD_LIGHT : PAL_BLUE_LIGHT;
-        canv_shaded_box(-5, -5, 10, 10, PAL_BLUE_DARK, roll_c, PAL_STEEL_SHINE);
-        canv_blit_outlined(c->cx, c->cy, scale, 0);
+        draw_knight_roll_rig(c);
         return;
     }
 

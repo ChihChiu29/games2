@@ -65,8 +65,7 @@ function drop_text_right(c, str, y, o)
 end
 
 function tome_intro()
-	msg_print("Welcome to ToME! Use the [+]More menu for tutorial & help.")
-	msg_print(nil)
+	return
 end
 
 add_hook_script(HOOK_INIT, "tome_intro", "lua_intro_init")

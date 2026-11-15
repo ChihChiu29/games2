@@ -27,8 +27,44 @@
 
 #define ATTR(fg, bg) ((uint8_t)(((bg) << 4) | ((fg) & 0x0F)))
 
+/* Custom 8x8 Tile IDs (0x80..0x9A):
+ * - DOS renders custom 8x8 VGA bitmap glyphs loaded into font RAM.
+ * - Linux terminal renders clean UTF-8 / ASCII equivalents. */
+#define TILE_BASE         0x80
+#define TILE_WALL         0x80
+#define TILE_FLOOR_DOT    0x81
+#define TILE_BLOCK_FULL   0x82
+#define TILE_BLOCK_TOP    0x83
+#define TILE_BLOCK_BOT    0x84
+#define TILE_KNIGHT_HELM  0x85
+#define TILE_KNIGHT_ARMOR 0x86
+#define TILE_KNIGHT_BOOT  0x87
+#define TILE_SHIELD_MID   0x88
+#define TILE_SHIELD_EDGE  0x89
+#define TILE_SPEAR_TIP_U  0x8A
+#define TILE_SPEAR_TIP_R  0x8B
+#define TILE_SPEAR_TIP_D  0x8C
+#define TILE_SPEAR_TIP_L  0x8D
+#define TILE_SHAFT_V      0x8E
+#define TILE_SHAFT_H      0x8F
+#define TILE_SKEL_SKULL   0x90
+#define TILE_SKEL_RIBS    0x91
+#define TILE_SKEL_PELVIS  0x92
+#define TILE_SKEL_LIMB    0x93
+#define TILE_SWORD_TIP_U  0x94
+#define TILE_SWORD_TIP_R  0x95
+#define TILE_SWORD_TIP_D  0x96
+#define TILE_SWORD_TIP_L  0x97
+#define TILE_SWORD_HILT   0x98
+#define TILE_SLASH_ARC    0x99
+#define TILE_PARRY_STAR   0x9A
+#define TILE_CRIT_SPARK   0x9B
+#define TILE_BONE_SHARD   0x9C
+#define TILE_COUNT        29
+
 /* PC XT Set-1 Scancodes */
 #define SC_ESC   0x01
+#define SC_TAB   0x0F
 #define SC_W     0x11
 #define SC_A     0x1E
 #define SC_S     0x1F
@@ -46,7 +82,7 @@
 #define SC_DOWN  0x50
 
 typedef struct {
-    char ch;
+    uint8_t ch;
     uint8_t attr;
 } Cell;
 
@@ -58,7 +94,7 @@ void platform_poll_input(void);
 bool platform_key_down(int scancode);
 bool platform_key_pressed(int scancode);
 void platform_clear(uint8_t attr);
-void platform_put_cell(int x, int y, char ch, uint8_t attr);
+void platform_put_cell(int x, int y, uint8_t ch, uint8_t attr);
 void platform_put_str(int x, int y, const char *s, uint8_t attr);
 void platform_present(void);
 void platform_wait_frame(void);

@@ -27,9 +27,12 @@ LUA_SRCS=(
 )
 
 GAME_SRCS=(
-  main.c
-  sprites.c
+  weapon.c
+  character.c
+  combat.c
+  render.c
   data_lua.c
+  main.c
   platform_dos.c
 )
 

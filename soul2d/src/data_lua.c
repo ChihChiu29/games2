@@ -9,7 +9,7 @@
 static lua_State *L = NULL;
 static char last_lua_error[128] = "";
 
-static int lua_alert_handler(lua_State * state)
+static int lua_alert_handler(lua_State *state)
 {
     const char *msg = lua_tostring(state, 1);
     if (msg) {
@@ -52,6 +52,41 @@ static uint8_t parse_color_name(const char *s, uint8_t def_col)
     return def_col;
 }
 
+static uint8_t parse_tile_name(const char *s, uint8_t def_tile)
+{
+    if (!s || !s[0]) return def_tile;
+    if (strcmp(s, "WALL") == 0)         return TILE_WALL;
+    if (strcmp(s, "FLOOR_DOT") == 0)    return TILE_FLOOR_DOT;
+    if (strcmp(s, "BLOCK_FULL") == 0)   return TILE_BLOCK_FULL;
+    if (strcmp(s, "BLOCK_TOP") == 0)    return TILE_BLOCK_TOP;
+    if (strcmp(s, "BLOCK_BOT") == 0)    return TILE_BLOCK_BOT;
+    if (strcmp(s, "KNIGHT_HELM") == 0)  return TILE_KNIGHT_HELM;
+    if (strcmp(s, "KNIGHT_ARMOR") == 0) return TILE_KNIGHT_ARMOR;
+    if (strcmp(s, "KNIGHT_BOOT") == 0)  return TILE_KNIGHT_BOOT;
+    if (strcmp(s, "SHIELD_MID") == 0)   return TILE_SHIELD_MID;
+    if (strcmp(s, "SHIELD_EDGE") == 0)  return TILE_SHIELD_EDGE;
+    if (strcmp(s, "SPEAR_TIP_U") == 0)  return TILE_SPEAR_TIP_U;
+    if (strcmp(s, "SPEAR_TIP_R") == 0)  return TILE_SPEAR_TIP_R;
+    if (strcmp(s, "SPEAR_TIP_D") == 0)  return TILE_SPEAR_TIP_D;
+    if (strcmp(s, "SPEAR_TIP_L") == 0)  return TILE_SPEAR_TIP_L;
+    if (strcmp(s, "SHAFT_V") == 0)      return TILE_SHAFT_V;
+    if (strcmp(s, "SHAFT_H") == 0)      return TILE_SHAFT_H;
+    if (strcmp(s, "SKEL_SKULL") == 0)   return TILE_SKEL_SKULL;
+    if (strcmp(s, "SKEL_RIBS") == 0)    return TILE_SKEL_RIBS;
+    if (strcmp(s, "SKEL_PELVIS") == 0)  return TILE_SKEL_PELVIS;
+    if (strcmp(s, "SKEL_LIMB") == 0)    return TILE_SKEL_LIMB;
+    if (strcmp(s, "SWORD_TIP_U") == 0)  return TILE_SWORD_TIP_U;
+    if (strcmp(s, "SWORD_TIP_R") == 0)  return TILE_SWORD_TIP_R;
+    if (strcmp(s, "SWORD_TIP_D") == 0)  return TILE_SWORD_TIP_D;
+    if (strcmp(s, "SWORD_TIP_L") == 0)  return TILE_SWORD_TIP_L;
+    if (strcmp(s, "SWORD_HILT") == 0)   return TILE_SWORD_HILT;
+    if (strcmp(s, "SLASH_ARC") == 0)    return TILE_SLASH_ARC;
+    if (strcmp(s, "PARRY_STAR") == 0)   return TILE_PARRY_STAR;
+    if (strcmp(s, "CRIT_SPARK") == 0)   return TILE_CRIT_SPARK;
+    if (strcmp(s, "BONE_SHARD") == 0)   return TILE_BONE_SHARD;
+    return def_tile;
+}
+
 static Direction parse_dir_name(const char *s)
 {
     if (!s) return DIR_RIGHT;
@@ -90,6 +125,20 @@ static void get_str_field(lua_State *state, int tbl_idx, const char *key, char *
     lua_pop(state, 1);
 }
 
+static uint8_t parse_glyph_fields(lua_State *state, int tbl_idx, const char *tile_key, const char *ch_key, uint8_t def_ch)
+{
+    char tile_str[32], ch_str[8];
+    get_str_field(state, tbl_idx, tile_key, tile_str, sizeof(tile_str), "");
+    if (tile_str[0]) {
+        return parse_tile_name(tile_str, def_ch);
+    }
+    get_str_field(state, tbl_idx, ch_key, ch_str, sizeof(ch_str), "");
+    if (ch_str[0]) {
+        return (uint8_t)ch_str[0];
+    }
+    return def_ch;
+}
+
 static int parse_cell_list(lua_State *state, int tbl_idx, const char *key, SpriteCell *out_cells, int max_cells)
 {
     int count = 0;
@@ -103,16 +152,16 @@ static int parse_cell_list(lua_State *state, int tbl_idx, const char *key, Sprit
             lua_rawgeti(state, list_idx, i);
             if (lua_istable(state, -1)) {
                 int c_idx = lua_gettop(state);
-                char ch_str[8], fg_str[24], bg_str[24];
+                char fg_str[24], bg_str[24];
                 int fwd = get_int_field(state, c_idx, "fwd", 0);
                 int right = get_int_field(state, c_idx, "right", 0);
-                get_str_field(state, c_idx, "ch", ch_str, sizeof(ch_str), "*");
+                uint8_t glyph = parse_glyph_fields(state, c_idx, "tile", "ch", '*');
                 get_str_field(state, c_idx, "fg", fg_str, sizeof(fg_str), "WHITE");
                 get_str_field(state, c_idx, "bg", bg_str, sizeof(bg_str), "BLACK");
 
                 out_cells[count].fwd = (int8_t)fwd;
                 out_cells[count].right = (int8_t)right;
-                out_cells[count].ch = ch_str[0] ? ch_str[0] : ' ';
+                out_cells[count].ch = glyph;
                 out_cells[count].attr = ATTR(
                     parse_color_name(fg_str, COL_WHITE),
                     parse_color_name(bg_str, COL_BLACK)
@@ -126,15 +175,16 @@ static int parse_cell_list(lua_State *state, int tbl_idx, const char *key, Sprit
     return count;
 }
 
-static void parse_attack_def(lua_State *state, int atk_idx, AttackDef *atk)
+static void parse_attack_def(lua_State *state, int atk_idx, AttackDef *atk, bool is_crit)
 {
     int i, f, r;
     memset(atk, 0, sizeof(*atk));
-    get_str_field(state, atk_idx, "name", atk->name, sizeof(atk->name), "attack");
+    atk->valid           = true;
+    atk->is_critical     = is_crit;
+    get_str_field(state, atk_idx, "name", atk->name, sizeof(atk->name), is_crit ? "CRITICAL" : "ATTACK");
     atk->windup_frames   = get_int_field(state, atk_idx, "windup_frames", 12);
     atk->recovery_frames = get_int_field(state, atk_idx, "recovery_frames", 12);
     atk->damage          = get_int_field(state, atk_idx, "damage", 15);
-    atk->riposte_damage  = get_int_field(state, atk_idx, "riposte_damage", atk->damage * 2);
     atk->chip_damage     = get_int_field(state, atk_idx, "chip_damage", 3);
     atk->stamina_cost    = get_int_field(state, atk_idx, "stamina_cost", 18);
     atk->stamina_damage  = get_int_field(state, atk_idx, "stamina_damage", 24);
@@ -159,7 +209,7 @@ static void parse_attack_def(lua_State *state, int atk_idx, AttackDef *atk)
                 ph->duration_frames = get_int_field(state, p_idx, "frames", 6);
                 ph->num_cells = parse_cell_list(state, p_idx, "cells", ph->cells, MAX_HITBOX_CELLS);
 
-                /* Also support concise rectangular hitbox regions ("rect") */
+                /* Concise rectangular hitbox regions ("rect") */
                 lua_pushstring(state, "rect");
                 lua_gettable(state, p_idx);
                 if (lua_istable(state, -1)) {
@@ -168,9 +218,9 @@ static void parse_attack_def(lua_State *state, int atk_idx, AttackDef *atk)
                     int f2 = get_int_field(state, r_idx, "fwd2", 4);
                     int r1 = get_int_field(state, r_idx, "right1", -1);
                     int r2 = get_int_field(state, r_idx, "right2", 1);
-                    char ch_s[8], tip_s[8], fg_s[24], bg_s[24], tip_fg_s[24], tip_bg_s[24];
-                    get_str_field(state, r_idx, "ch", ch_s, sizeof(ch_s), "*");
-                    get_str_field(state, r_idx, "tip_ch", tip_s, sizeof(tip_s), ch_s);
+                    uint8_t base_ch = parse_glyph_fields(state, r_idx, "tile", "ch", '*');
+                    uint8_t tip_ch  = parse_glyph_fields(state, r_idx, "tip_tile", "tip_ch", base_ch);
+                    char fg_s[24], bg_s[24], tip_fg_s[24], tip_bg_s[24];
                     get_str_field(state, r_idx, "fg", fg_s, sizeof(fg_s), "YELLOW");
                     get_str_field(state, r_idx, "bg", bg_s, sizeof(bg_s), "RED");
                     get_str_field(state, r_idx, "tip_fg", tip_fg_s, sizeof(tip_fg_s), "YELLOW");
@@ -185,7 +235,7 @@ static void parse_attack_def(lua_State *state, int atk_idx, AttackDef *atk)
                                 bool is_tip = (f == f2);
                                 ph->cells[ph->num_cells].fwd = (int8_t)f;
                                 ph->cells[ph->num_cells].right = (int8_t)r;
-                                ph->cells[ph->num_cells].ch = is_tip ? tip_s[0] : ch_s[0];
+                                ph->cells[ph->num_cells].ch = is_tip ? tip_ch : base_ch;
                                 ph->cells[ph->num_cells].attr = is_tip ? tip_at : base_at;
                                 ph->num_cells++;
                             }
@@ -203,39 +253,91 @@ static void parse_attack_def(lua_State *state, int atk_idx, AttackDef *atk)
     lua_pop(state, 1);
 }
 
+/* Lua: register_weapon("spear", { ... }) */
+static int l_register_weapon(lua_State *state)
+{
+    const char *id = luaL_check_string(state, 1);
+    if (!lua_istable(state, 2)) return 0;
+    int t = 2;
+
+    WeaponDef *w = weapon_register(id);
+    if (!w) return 0;
+
+    char kind_s[24], hand_s[16];
+    get_str_field(state, t, "name", w->name, sizeof(w->name), id);
+    get_str_field(state, t, "kind", kind_s, sizeof(kind_s), "MELEE");
+    get_str_field(state, t, "hand", hand_s, sizeof(hand_s), "RIGHT");
+
+    w->kind = (strcmp(kind_s, "SHIELD") == 0) ? WEAPON_SHIELD : WEAPON_MELEE;
+    w->authored_left = (strcmp(hand_s, "LEFT") == 0);
+    w->block_move_cd = get_int_field(state, t, "block_move_cd", 5);
+    w->parry_window_frames = get_int_field(state, t, "parry_window_frames", 11);
+
+    w->num_idle_cells = parse_cell_list(state, t, "idle_pose", w->idle_cells, MAX_POSE_CELLS);
+
+    lua_pushstring(state, "normal_attack");
+    lua_gettable(state, t);
+    if (lua_istable(state, -1)) {
+        parse_attack_def(state, lua_gettop(state), &w->attacks[WATK_NORMAL], false);
+    }
+    lua_pop(state, 1);
+
+    lua_pushstring(state, "special_attack");
+    lua_gettable(state, t);
+    if (lua_istable(state, -1)) {
+        parse_attack_def(state, lua_gettop(state), &w->attacks[WATK_SPECIAL], false);
+    }
+    lua_pop(state, 1);
+
+    lua_pushstring(state, "crit_attack");
+    lua_gettable(state, t);
+    if (lua_istable(state, -1)) {
+        parse_attack_def(state, lua_gettop(state), &w->attacks[WATK_CRIT], true);
+    }
+    lua_pop(state, 1);
+
+    return 0;
+}
+
+static void parse_character_def_common(lua_State *state, int t, CharacterDef *def, const char *id, const char *def_name)
+{
+    char crit_fg[24], crit_bg[24];
+    strncpy(def->id, id, sizeof(def->id) - 1);
+    def->id[sizeof(def->id) - 1] = '\0';
+    get_str_field(state, t, "name", def->name, sizeof(def->name), def_name);
+    def->radius             = get_int_field(state, t, "radius", 2);
+    def->max_hp             = get_int_field(state, t, "max_hp", 100);
+    def->max_stamina        = get_int_field(state, t, "max_stamina", 100);
+    def->move_cooldown      = get_int_field(state, t, "move_cooldown", 5);
+    def->stagger_duration   = get_int_field(state, t, "stagger_duration", 32);
+    def->crit_hurt_duration = get_int_field(state, t, "crit_hurt_duration", 45);
+
+    get_str_field(state, t, "left_weapon",  def->default_left_weapon,  sizeof(def->default_left_weapon),  "");
+    get_str_field(state, t, "right_weapon", def->default_right_weapon, sizeof(def->default_right_weapon), "");
+
+    get_str_field(state, t, "crit_flash_fg", crit_fg, sizeof(crit_fg), "YELLOW");
+    get_str_field(state, t, "crit_flash_bg", crit_bg, sizeof(crit_bg), "RED");
+    def->crit_flash_attr = ATTR(parse_color_name(crit_fg, COL_YELLOW), parse_color_name(crit_bg, COL_RED));
+
+    def->num_body_cells      = parse_cell_list(state, t, "body", def->body_cells, MAX_SPRITE_CELLS);
+    def->num_stagger_cells   = parse_cell_list(state, t, "stagger_pose", def->stagger_cells, MAX_POSE_CELLS);
+    def->num_crit_hurt_cells = parse_cell_list(state, t, "crit_hurt_pose", def->crit_hurt_cells, MAX_POSE_CELLS);
+}
+
 /* Lua: configure_player({ ... }) */
 static int l_configure_player(lua_State *state)
 {
     if (!lua_istable(state, 1)) return 0;
     int t = 1;
 
-    player_cfg.radius              = get_int_field(state, t, "radius", 2);
-    player_cfg.max_hp              = get_int_field(state, t, "max_hp", 100);
-    player_cfg.max_stamina         = get_int_field(state, t, "max_stamina", 100);
-    player_cfg.move_cd_normal      = get_int_field(state, t, "move_cd_normal", 3);
-    player_cfg.move_cd_block       = get_int_field(state, t, "move_cd_block", 5);
-    player_cfg.parry_window_frames = get_int_field(state, t, "parry_window_frames", 11);
-    player_cfg.roll_frames         = get_int_field(state, t, "roll_frames", 14);
-    player_cfg.roll_iframes        = get_int_field(state, t, "roll_iframes", 10);
-    player_cfg.roll_stamina_cost   = get_int_field(state, t, "roll_stamina_cost", 22);
+    memset(&player_def, 0, sizeof(player_def));
+    parse_character_def_common(state, t, &player_def.base, "player", "Knight");
 
-    player_cfg.num_body_cells  = parse_cell_list(state, t, "body", player_cfg.body_cells, MAX_SPRITE_CELLS);
-    player_cfg.num_idle_shield = parse_cell_list(state, t, "idle_shield", player_cfg.idle_shield, MAX_POSE_CELLS);
-    player_cfg.num_idle_weapon = parse_cell_list(state, t, "idle_weapon", player_cfg.idle_weapon, MAX_POSE_CELLS);
-
-    lua_pushstring(state, "light_attack");
-    lua_gettable(state, t);
-    if (lua_istable(state, -1)) {
-        parse_attack_def(state, lua_gettop(state), &player_cfg.light_atk);
-    }
-    lua_pop(state, 1);
-
-    lua_pushstring(state, "heavy_attack");
-    lua_gettable(state, t);
-    if (lua_istable(state, -1)) {
-        parse_attack_def(state, lua_gettop(state), &player_cfg.heavy_atk);
-    }
-    lua_pop(state, 1);
+    player_def.base.move_cooldown = get_int_field(state, t, "move_cd_normal", player_def.base.move_cooldown);
+    player_def.roll_frames        = get_int_field(state, t, "roll_frames", 14);
+    player_def.roll_iframes       = get_int_field(state, t, "roll_iframes", 10);
+    player_def.roll_stamina_cost  = get_int_field(state, t, "roll_stamina_cost", 22);
+    get_str_field(state, t, "alt_right_weapon", player_def.alt_right_weapon, sizeof(player_def.alt_right_weapon), "");
 
     return 0;
 }
@@ -243,42 +345,16 @@ static int l_configure_player(lua_State *state)
 /* Lua: register_enemy("skeleton", { ... }) */
 static int l_register_enemy(lua_State *state)
 {
-    int i;
     const char *id = luaL_check_string(state, 1);
-    if (!lua_istable(state, 2) || num_enemy_types >= MAX_ENEMY_TYPES) return 0;
+    if (!lua_istable(state, 2) || num_enemy_defs >= MAX_ENEMY_TYPES) return 0;
 
     int t = 2;
-    EnemyType *et = &enemy_types[num_enemy_types++];
-    memset(et, 0, sizeof(*et));
-    et->used = true;
-    strncpy(et->id, id, sizeof(et->id) - 1);
+    EnemyDef *ed = &enemy_defs[num_enemy_defs++];
+    memset(ed, 0, sizeof(*ed));
+    ed->used = true;
 
-    get_str_field(state, t, "name", et->name, sizeof(et->name), id);
-    et->radius           = get_int_field(state, t, "radius", 2);
-    et->max_hp           = get_int_field(state, t, "max_hp", 90);
-    et->move_cooldown    = get_int_field(state, t, "move_cooldown", 8);
-    et->stagger_duration = get_int_field(state, t, "stagger_duration", 95);
-    get_str_field(state, t, "ai_func", et->ai_func, sizeof(et->ai_func), "");
-
-    et->num_body_cells    = parse_cell_list(state, t, "body", et->body_cells, MAX_SPRITE_CELLS);
-    et->num_idle_weapon   = parse_cell_list(state, t, "idle_weapon", et->idle_weapon, MAX_POSE_CELLS);
-    et->num_stagger_cells = parse_cell_list(state, t, "stagger_pose", et->stagger_cells, MAX_POSE_CELLS);
-
-    lua_pushstring(state, "attacks");
-    lua_gettable(state, t);
-    if (lua_istable(state, -1)) {
-        int alist = lua_gettop(state);
-        int n = lua_getn(state, alist);
-        for (i = 1; i <= n && et->num_attacks < MAX_ATTACK_DEFS; i++) {
-            lua_rawgeti(state, alist, i);
-            if (lua_istable(state, -1)) {
-                parse_attack_def(state, lua_gettop(state), &et->attacks[et->num_attacks]);
-                et->num_attacks++;
-            }
-            lua_pop(state, 1);
-        }
-    }
-    lua_pop(state, 1);
+    parse_character_def_common(state, t, &ed->base, id, id);
+    get_str_field(state, t, "ai_func", ed->ai_func, sizeof(ed->ai_func), "");
 
     return 0;
 }
@@ -314,6 +390,7 @@ void data_lua_init(void)
 
     lua_register(L, "_ALERT", lua_alert_handler);
     lua_register(L, "irand", l_irand);
+    lua_register(L, "register_weapon", l_register_weapon);
     lua_register(L, "configure_player", l_configure_player);
     lua_register(L, "register_enemy", l_register_enemy);
     lua_register(L, "spawn_player", l_spawn_player);
@@ -331,9 +408,10 @@ void data_lua_shutdown(void)
 bool data_lua_reload(char *err_buf, int err_buf_len)
 {
     last_lua_error[0] = '\0';
-    num_enemy_types = 0;
-    memset(enemy_types, 0, sizeof(enemy_types));
-    memset(&player_cfg, 0, sizeof(player_cfg));
+    weapon_registry_clear();
+    num_enemy_defs = 0;
+    memset(enemy_defs, 0, sizeof(enemy_defs));
+    memset(&player_def, 0, sizeof(player_def));
 
     if (!L) data_lua_init();
 
@@ -348,21 +426,21 @@ bool data_lua_reload(char *err_buf, int err_buf_len)
     return true;
 }
 
-const char *data_lua_call_ai(const EnemyType *et, const Entity *e, int primary_dist, int off_axis)
+const char *data_lua_call_ai(const EnemyDef *edef, const Character *c, int primary_dist, int off_axis)
 {
     static char decision[32];
     decision[0] = '\0';
 
-    if (!L || !et || !et->ai_func[0]) return "approach";
+    if (!L || !edef || !edef->ai_func[0]) return "approach";
 
-    lua_getglobal(L, et->ai_func);
+    lua_getglobal(L, edef->ai_func);
     if (!lua_isfunction(L, -1)) {
         lua_pop(L, 1);
         return "approach";
     }
 
-    lua_pushnumber(L, e->hp);
-    lua_pushnumber(L, e->max_hp);
+    lua_pushnumber(L, c->hp);
+    lua_pushnumber(L, c->max_hp);
     lua_pushnumber(L, primary_dist);
     lua_pushnumber(L, off_axis);
 

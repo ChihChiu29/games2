@@ -1,4 +1,6 @@
 #include "character.h"
+#include "vga.h"
+#include <stdlib.h>
 #include <string.h>
 
 const int dir_dx[4] = {  0,  1,  0, -1 };
@@ -114,6 +116,67 @@ const WeaponDef *character_get_weapon(const Character *c, WeaponSlot slot)
     return (slot == SLOT_LEFT_HAND) ? c->left_weapon : c->right_weapon;
 }
 
+void character_generate_appearance(BipedAppearance *a, BodyStyle style)
+{
+    static const uint8_t armor_ramps[4] = {
+        PAL_STEEL_DARK, PAL_GOLD_DARK, PAL_WALL_DARK, PAL_BLUE_DARK
+    };
+    static const uint8_t cloth_ramps[5] = {
+        PAL_BLUE_DARK, PAL_CRIMSON_DARK, PAL_ARCANE_DARK, PAL_EMERALD_DARK, PAL_WOOD_DARK
+    };
+    static const uint8_t eye_colors[4] = {
+        PAL_CRIMSON_HOT, PAL_ARCANE_HOT, PAL_EMERALD_HOT, PAL_GOLD_SHINE
+    };
+
+    memset(a, 0, sizeof(*a));
+
+    if (style == BSTYLE_KNIGHT) {
+        int h_pick = rand() % 3;
+        a->head         = (h_pick == 0) ? HEAD_GREATHELM : (h_pick == 1 ? HEAD_SALLET : HEAD_HORNED_HELM);
+        a->crest        = (CrestStyle)(rand() % 4);
+        a->torso        = (rand() % 2 == 0) ? TORSO_SURCOAT : TORSO_PLATE;
+        a->pauldron     = (rand() % 3 == 0) ? PAULDRON_SPIKED : PAULDRON_ROUND;
+        a->cape         = (rand() % 4 == 0) ? CAPE_NONE : CAPE_FLOWING;
+        a->primary_ramp = armor_ramps[rand() % 3];
+        a->cloth_ramp   = cloth_ramps[rand() % 4];
+        a->trim_col     = (a->primary_ramp == PAL_GOLD_DARK) ? PAL_STEEL_SHINE : PAL_GOLD_LIGHT;
+        a->eye_col      = (rand() % 3 == 0) ? eye_colors[rand() % 4] : 0;
+        a->crest_col    = (a->crest == CREST_HORNS) ? PAL_BONE_LIGHT : (uint8_t)(a->cloth_ramp + 2);
+        a->shoulder_half_w = (int8_t)(3 + (rand() % 2));
+        a->torso_h      = (int8_t)(6 + (rand() % 2));
+        a->leg_len      = (int8_t)(4 + (rand() % 2));
+    } else if (style == BSTYLE_SKELETON_LORD) {
+        a->head         = (rand() % 2 == 0) ? HEAD_CROWNED_SKULL : HEAD_HORNED_HELM;
+        a->crest        = (rand() % 2 == 0) ? CREST_HORNS : CREST_SPIKES;
+        a->torso        = (rand() % 2 == 0) ? TORSO_RIBCAGE : TORSO_PLATE;
+        a->pauldron     = PAULDRON_SPIKED;
+        a->cape         = CAPE_TATTERED;
+        a->primary_ramp = (rand() % 2 == 0) ? PAL_BONE_DARK : PAL_WALL_DARK;
+        a->cloth_ramp   = (rand() % 2 == 0) ? PAL_CRIMSON_DARK : PAL_ARCANE_DARK;
+        a->trim_col     = PAL_GOLD_LIGHT;
+        a->eye_col      = eye_colors[rand() % 3];
+        a->crest_col    = PAL_GOLD_SHINE;
+        a->shoulder_half_w = (int8_t)(4 + (rand() % 2));
+        a->torso_h      = 7;
+        a->leg_len      = 5;
+    } else {
+        int h_pick = rand() % 3;
+        a->head         = (h_pick == 0) ? HEAD_SKULL : (h_pick == 1 ? HEAD_HOOD : HEAD_HORNED_HELM);
+        a->crest        = (rand() % 3 == 0) ? CREST_HORNS : CREST_NONE;
+        a->torso        = (rand() % 3 == 0) ? TORSO_ROBE : TORSO_RIBCAGE;
+        a->pauldron     = (rand() % 2 == 0) ? PAULDRON_NONE : PAULDRON_SPIKED;
+        a->cape         = (rand() % 2 == 0) ? CAPE_NONE : CAPE_TATTERED;
+        a->primary_ramp = (rand() % 4 == 0) ? PAL_WOOD_DARK : PAL_BONE_DARK;
+        a->cloth_ramp   = cloth_ramps[rand() % 5];
+        a->trim_col     = PAL_STEEL_MID;
+        a->eye_col      = eye_colors[rand() % 4];
+        a->crest_col    = PAL_BONE_MID;
+        a->shoulder_half_w = (int8_t)(3 + (rand() % 2));
+        a->torso_h      = 6;
+        a->leg_len      = (int8_t)(4 + (rand() % 2));
+    }
+}
+
 void character_init(Character *c, bool is_player, const CharacterDef *def,
                     const EnemyDef *edef, int x, int y, Direction dir)
 {
@@ -133,6 +196,13 @@ void character_init(Character *c, bool is_player, const CharacterDef *def,
     if (def) {
         character_equip(c, SLOT_LEFT_HAND, def->default_left_weapon);
         character_equip(c, SLOT_RIGHT_HAND, def->default_right_weapon);
+        if (def->has_fixed_appearance) {
+            c->appearance = def->fixed_appearance;
+        } else {
+            character_generate_appearance(&c->appearance, def->body_style);
+        }
+    } else {
+        character_generate_appearance(&c->appearance, BSTYLE_SKELETON);
     }
 }
 
@@ -163,6 +233,7 @@ bool character_tick_common(Character *c)
     if (c->hurt_flash > 0) c->hurt_flash--;
     if (c->turn_cd > 0) c->turn_cd--;
     if (c->ai_think_cd > 0) c->ai_think_cd--;
+    if (c->skill_cd > 0) c->skill_cd--;
 
     if (c->action == ACT_STAGGER) {
         c->action_frame++;

@@ -121,6 +121,14 @@ static bool check_hitbox_vs_shield(const Character *atk, const Character *tgt)
     return false;
 }
 
+static int apply_armor_mitigation(int raw_dmg, const Character *tgt, bool is_crit)
+{
+    /* Critical hits pierce armor; normal hits are reduced by target armor (min 4 dmg) */
+    int armor = (tgt && tgt->def && !is_crit) ? tgt->def->armor : 0;
+    int dmg = raw_dmg - armor;
+    return (dmg < 4) ? 4 : dmg;
+}
+
 void combat_resolve_all(void)
 {
     int i, k;
@@ -144,11 +152,12 @@ void combat_resolve_all(void)
                 bool is_riposte  = (sk->action == ACT_STAGGER);
                 bool is_crit     = (player.action == ACT_CRIT_ATTACK) || is_backstab || is_riposte;
 
-                int dmg = patk->damage;
+                int dmg = weapon_compute_damage(pwep, patk);
                 if (is_crit) {
                     const AttackDef *catk = weapon_get_attack(pwep, WATK_CRIT);
-                    dmg = catk ? catk->damage : (patk->damage * 2);
+                    dmg = catk ? weapon_compute_damage(pwep, catk) : (dmg * 2);
                 }
+                dmg = apply_armor_mitigation(dmg, sk, is_crit);
 
                 sk->hp -= dmg;
                 sk->hurt_flash = 14;
@@ -242,7 +251,9 @@ void combat_resolve_all(void)
                 }
             } else {
                 bool backstabbed_player = character_is_behind(sk, &player);
-                int dmg = backstabbed_player ? (eatk->damage + eatk->damage / 2) : eatk->damage;
+                int base_dmg = weapon_compute_damage(character_get_weapon(sk, sk->active_hand), eatk);
+                int raw_dmg = backstabbed_player ? (base_dmg + base_dmg / 2) : base_dmg;
+                int dmg = apply_armor_mitigation(raw_dmg, &player, backstabbed_player);
                 player.hp -= dmg;
                 player.hurt_flash = 14;
                 for (k = 0; k < 5; k++) {

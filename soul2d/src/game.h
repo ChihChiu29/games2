@@ -6,6 +6,7 @@
 #include "character.h"
 #include "combat.h"
 #include "render.h"
+#include "world.h"
 
 /* Lua Data & AI interface (src/data_lua.c) */
 void data_lua_init(void);

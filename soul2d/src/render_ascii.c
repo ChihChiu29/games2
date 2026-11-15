@@ -155,11 +155,11 @@ void render_scene(const char *status_msg, uint8_t status_col)
              player.hp, player.max_hp, player.stamina, player.max_stamina, wep);
     term_put_str(1, 0, buf, COL_LIGHTGREEN, COL_BLACK);
 
-    const char *e0 = enemies[0].active ? enemies[0].def->name : "SLAIN";
-    const char *e1 = enemies[1].active ? enemies[1].def->name : "SLAIN";
-    snprintf(buf, sizeof(buf), "%s:%d/%d   %s:%d/%d   [R]Reload [Q]Quit",
-             e0, enemies[0].hp, enemies[0].max_hp,
-             e1, enemies[1].hp, enemies[1].max_hp);
+    const char *e0 = (enemies[0].active && enemies[0].def) ? enemies[0].def->name : "SLAIN";
+    const char *e1 = (enemies[1].active && enemies[1].def) ? enemies[1].def->name : "SLAIN";
+    const char *e2 = (enemies[2].active && enemies[2].def) ? enemies[2].def->name : "SLAIN";
+    snprintf(buf, sizeof(buf), "%s:%d  %s:%d  %s:%d  [B]World [R]Reset",
+             e0, enemies[0].hp, e1, enemies[1].hp, e2, enemies[2].hp);
     term_put_str(1, 1, buf, COL_LIGHTGRAY, COL_BLACK);
 
     term_put_str(1, 2, status_msg, status_col, COL_BLACK);

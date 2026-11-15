@@ -167,6 +167,10 @@ void platform_poll_input(void)
                 curr_key_pressed[SC_TAB] = 1;
                 key_hold_timer[SC_TAB] = 2;
                 break;
+            case 'b': case 'B':
+                curr_key_pressed[SC_B] = 1;
+                key_hold_timer[SC_B] = 2;
+                break;
             case 'r': case 'R':
                 curr_key_pressed[SC_R] = 1;
                 key_hold_timer[SC_R] = 2;

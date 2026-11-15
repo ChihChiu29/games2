@@ -3,8 +3,17 @@ register_weapon("spear", {
     name           = "Spear",
     kind           = "MELEE",
     style          = "SPEAR",
+    level          = 1,
     length_px      = 22,
     blade_width_px = 2,
+
+    skill = {
+        name            = "PIERCE CHARGE",
+        stamina_cost    = 28,
+        cooldown_frames = 90,
+        atk_slot        = 1,
+        bonus_damage    = 10,
+    },
 
     -- [K] Normal Attack: Fast Spear Thrust
     normal_attack = {

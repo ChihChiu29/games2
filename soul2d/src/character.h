@@ -34,6 +34,60 @@ typedef struct {
     int x1, y1, x2, y2;
 } HitRect;
 
+typedef enum {
+    HEAD_GREATHELM = 0,
+    HEAD_SALLET,
+    HEAD_HORNED_HELM,
+    HEAD_SKULL,
+    HEAD_CROWNED_SKULL,
+    HEAD_HOOD
+} HeadStyle;
+
+typedef enum {
+    CREST_NONE = 0,
+    CREST_PLUME,
+    CREST_HORNS,
+    CREST_SPIKES
+} CrestStyle;
+
+typedef enum {
+    TORSO_PLATE = 0,
+    TORSO_SURCOAT,
+    TORSO_RIBCAGE,
+    TORSO_ROBE
+} TorsoStyle;
+
+typedef enum {
+    PAULDRON_NONE = 0,
+    PAULDRON_ROUND,
+    PAULDRON_SPIKED
+} PauldronStyle;
+
+typedef enum {
+    CAPE_NONE = 0,
+    CAPE_FLOWING,
+    CAPE_TATTERED
+} CapeStyle;
+
+/* Procedurally generated visual traits for any Biped character */
+typedef struct {
+    HeadStyle head;
+    CrestStyle crest;
+    TorsoStyle torso;
+    PauldronStyle pauldron;
+    CapeStyle cape;
+
+    uint8_t primary_ramp;  /* Base palette index of 4-shade ramp (dark, mid, light, shine) */
+    uint8_t cloth_ramp;    /* Base palette index of 4-shade cloth/cape ramp */
+    uint8_t trim_col;      /* Belt / crown / buckle highlight */
+    uint8_t eye_col;       /* Eye / visor glow (0 = dark visor) */
+    uint8_t crest_col;     /* Plume / horn color */
+
+    int8_t shoulder_half_w;/* 3..6 */
+    int8_t torso_h;        /* 6..8 */
+    int8_t leg_len;        /* 4..6 */
+} BipedAppearance;
+
 /* Base Moving Character Class Definition (shared by Player and all Enemy Classes) */
 typedef struct {
     char id[24];
@@ -43,6 +97,7 @@ typedef struct {
     int radius;            /* Collision bounding radius in pixels (default 8) */
     int max_hp;
     int max_stamina;
+    int armor;             /* Flat damage mitigation (0..12) */
     int move_speed_fp;     /* Walk speed in 1/16th pixels per frame (Dark Souls 1 pace) */
     int turn_cooldown;     /* Frames before an enemy can snap-turn to a new direction */
     int stagger_duration;
@@ -50,12 +105,19 @@ typedef struct {
 
     char default_left_weapon[24];
     char default_right_weapon[24];
+
+    bool has_fixed_appearance;
+    BipedAppearance fixed_appearance;
 } CharacterDef;
 
-/* Enemy Class Definition (extends CharacterDef with AI) */
+/* Enemy Class Definition (extends CharacterDef with AI & Difficulty parameters) */
 typedef struct {
     bool used;
     CharacterDef base;
+    int difficulty;        /* 1, 2, ... */
+    int ai_aggression;     /* 1..100: attack cadence */
+    int ai_special_pct;    /* 0..100: probability of special/heavy attack */
+    int attack_range_bonus;/* Extra engagement reach in pixels */
     char ai_func[32];
 } EnemyDef;
 
@@ -78,6 +140,7 @@ typedef struct {
 
     const WeaponDef *left_weapon;
     const WeaponDef *right_weapon;
+    BipedAppearance appearance;
 
     int cx, cy;            /* World pixel coordinates */
     int sub_x, sub_y;      /* 1/16th pixel sub-pixel accumulators */
@@ -88,6 +151,7 @@ typedef struct {
     int hp, max_hp;
     int stamina, max_stamina;
     int stamina_regen_cd;
+    int skill_cd;          /* Weapon skill cooldown ([U]) */
 
     ActionType action;
     WeaponSlot active_hand;
@@ -115,6 +179,7 @@ extern Character player;
 extern Character enemies[MAX_ENEMIES];
 
 int iabs(int v);
+void character_generate_appearance(BipedAppearance *a, BodyStyle style);
 void character_init(Character *c, bool is_player, const CharacterDef *def,
                     const EnemyDef *edef, int x, int y, Direction dir);
 bool character_equip(Character *c, WeaponSlot slot, const char *weapon_id);

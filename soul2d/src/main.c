@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static char status_msg[76] = "";
 static uint8_t status_col = COL_YELLOW;
@@ -41,18 +42,22 @@ void game_spawn_enemy(const char *type_id, int x, int y, Direction dir)
     }
 }
 
-static void reload_and_reset(void)
+static void build_new_world(void)
 {
     char err_buf[76];
-    memset(&player, 0, sizeof(player));
-    memset(enemies, 0, sizeof(enemies));
-
-    if (data_lua_reload(err_buf, sizeof(err_buf))) {
-        game_set_status("WASD:MOVE J:SHIELD/PARRY K:ATK/CRIT I:HEAVY L:ROLL TAB:SWAP",
+    if (world_build(err_buf, sizeof(err_buf))) {
+        game_set_status("BUILT WORLD! [B]NewWorld [R]Respawn [U]Skill [TAB]Swap [K/I]Atk [J]Parry",
                         COL_LIGHTCYAN, 300);
     } else {
         game_set_status(err_buf, COL_LIGHTRED, 600);
     }
+}
+
+static void respawn_current_world(void)
+{
+    world_respawn();
+    game_set_status("WORLD RESPAWNED! (Same Player & 3 Enemy Types) [B] Build New World",
+                    COL_LIGHTGREEN, 200);
 }
 
 static void swap_player_right_weapon(void)
@@ -73,6 +78,36 @@ static void swap_player_right_weapon(void)
                  player.right_weapon->attacks[WATK_SPECIAL].name);
         game_set_status(buf, COL_YELLOW, 120);
     }
+}
+
+static void trigger_weapon_skill(void)
+{
+    WeaponSlot slot = SLOT_LEFT_HAND;
+    const WeaponDef *w = character_get_weapon(&player, SLOT_LEFT_HAND);
+    if (!w || !w->skill.valid) {
+        slot = SLOT_RIGHT_HAND;
+        w = character_get_weapon(&player, SLOT_RIGHT_HAND);
+    }
+    if (!w || !w->skill.valid) {
+        game_set_status("[U] No Weapon Skill on equipped gear", COL_LIGHTGRAY, 60);
+        return;
+    }
+    if (player.skill_cd > 0) {
+        game_set_status("[U] Weapon Skill recharging...", COL_LIGHTGRAY, 45);
+        return;
+    }
+    if (player.stamina < w->skill.stamina_cost) {
+        game_set_status("Not enough Stamina for Weapon Skill!", COL_LIGHTRED, 50);
+        return;
+    }
+
+    player.stamina -= w->skill.stamina_cost;
+    player.skill_cd = w->skill.cooldown_frames;
+    character_start_attack(&player, slot, w->skill.atk_slot, 45);
+
+    char msg[76];
+    snprintf(msg, sizeof(msg), "WEAPON SKILL: %s!", w->skill.name);
+    game_set_status(msg, COL_YELLOW, 90);
 }
 
 static void trigger_hand_action(WeaponSlot slot, int atk_slot)
@@ -165,9 +200,9 @@ static void update_player(void)
         if (player.action != ACT_NONE) return;
     }
 
-    /* U: Left-Hand Special Use */
+    /* U: Left-Hand Special Skill (or Right-Hand Skill if Left has none) */
     if (platform_key_pressed(SC_U)) {
-        trigger_hand_action(SLOT_LEFT_HAND, WATK_SPECIAL);
+        trigger_weapon_skill();
         if (player.action != ACT_NONE && player.action != ACT_BLOCK) return;
     }
 
@@ -257,10 +292,25 @@ static void update_enemy(Character *e)
     int off_axis     = (adx >= ady) ? ady : adx;
 
     if (e->ai_think_cd == 0 && e->right_weapon) {
-        const char *decision = data_lua_call_ai(e->enemy_def, e, primary_dist, off_axis);
-        if (weapon_find_attack_by_name(e->right_weapon, decision, &atk_slot)) {
-            character_start_attack(e, SLOT_RIGHT_HAND, atk_slot, 0);
-            return;
+        if (e->enemy_def->ai_func[0]) {
+            const char *decision = data_lua_call_ai(e->enemy_def, e, primary_dist, off_axis);
+            if (weapon_find_attack_by_name(e->right_weapon, decision, &atk_slot)) {
+                character_start_attack(e, SLOT_RIGHT_HAND, atk_slot, 0);
+                return;
+            }
+        } else {
+            int engage_dist = 28 + e->enemy_def->attack_range_bonus;
+            if (primary_dist <= engage_dist && off_axis <= 14) {
+                if ((rand() % 100) < e->enemy_def->ai_aggression) {
+                    int slot = ((rand() % 100) < e->enemy_def->ai_special_pct)
+                        ? WATK_SPECIAL : WATK_NORMAL;
+                    if (weapon_get_attack(e->right_weapon, slot)) {
+                        character_start_attack(e, SLOT_RIGHT_HAND, slot, 0);
+                        return;
+                    }
+                }
+                e->ai_think_cd = 12;
+            }
         }
     }
 
@@ -287,10 +337,10 @@ static void update_enemy(Character *e)
 int main(void)
 {
     int i;
-    srand(42);
+    srand((unsigned int)time(NULL));
     platform_init();
     data_lua_init();
-    reload_and_reset();
+    build_new_world();
 
     while (true) {
         platform_poll_input();
@@ -298,8 +348,11 @@ int main(void)
         if (platform_key_pressed(SC_ESC)) {
             break;
         }
+        if (platform_key_pressed(SC_B)) {
+            build_new_world();
+        }
         if (platform_key_pressed(SC_R)) {
-            reload_and_reset();
+            respawn_current_world();
         }
 
         if (status_timer > 0) {

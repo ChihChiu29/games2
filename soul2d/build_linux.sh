@@ -22,6 +22,7 @@ GAME_SRCS=(
   character.c
   combat.c
   render_ascii.c
+  world.c
   data_lua.c
   main.c
   platform_linux.c

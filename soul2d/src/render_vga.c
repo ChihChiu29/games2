@@ -142,152 +142,239 @@ static void draw_floor_shadow(int cx, int cy, int rx, int ry)
 }
 
 /* =========================================================================
- * Procedural Articulated Character Rig (Knight, Skeleton, Skeleton Lord)
+ * Unified Procedural Biped Character Generator (driven by BipedAppearance)
  * ========================================================================= */
 
-static void generate_knight_rig(const Character *c, int stride, int bob)
+static void draw_biped_cape(const BipedAppearance *a, Direction dir, int bob, bool front_layer)
 {
-    Direction dir = c->dir;
+    if (a->cape == CAPE_NONE) return;
+    uint8_t c_dark  = a->cloth_ramp;
+    uint8_t c_mid   = (uint8_t)(a->cloth_ramp + 1);
+    uint8_t c_light = (uint8_t)(a->cloth_ramp + 2);
 
-    if (dir == DIR_DOWN) {
-        canv_shaded_box(-5, -2 + bob, 10, 9, PAL_BLUE_DARK, PAL_BLUE_MID, PAL_BLUE_LIGHT);
-    } else if (dir == DIR_RIGHT) {
-        canv_shaded_box(-6, -2 + bob, 5, 9, PAL_BLUE_DARK, PAL_BLUE_MID, PAL_BLUE_LIGHT);
-    } else if (dir == DIR_LEFT) {
-        canv_shaded_box(1, -2 + bob, 5, 9, PAL_BLUE_DARK, PAL_BLUE_MID, PAL_BLUE_LIGHT);
-    }
-
-    if (dir == DIR_DOWN || dir == DIR_UP) {
-        canv_shaded_box(-4, 4 + stride, 3, 5, PAL_STEEL_DARK, PAL_STEEL_MID, PAL_STEEL_LIGHT);
-        canv_shaded_box( 1, 4 - stride, 3, 5, PAL_STEEL_DARK, PAL_STEEL_MID, PAL_STEEL_LIGHT);
-    } else {
-        canv_shaded_box(-2 + stride, 4, 3, 5, PAL_STEEL_DARK, PAL_STEEL_MID, PAL_STEEL_LIGHT);
-        canv_shaded_box(-1 - stride, 4, 3, 5, PAL_STEEL_DARK, PAL_STEEL_MID, PAL_STEEL_LIGHT);
-    }
+    /* Back-layer cape is visible behind DOWN, LEFT, RIGHT; front-layer covers UP */
+    if (!front_layer && dir == DIR_UP) return;
+    if (front_layer && dir != DIR_UP) return;
 
     if (dir == DIR_DOWN || dir == DIR_UP) {
-        canv_shaded_box(-4, -3 + bob, 8, 7, PAL_STEEL_DARK, PAL_STEEL_MID, PAL_STEEL_LIGHT);
-        canv_rect(-3, 1 + bob, 6, 3, PAL_BLUE_MID);
-        canv_rect(-3, 1 + bob, 6, 1, PAL_GOLD_MID);
-        canv_shaded_box(-7, -3 + bob, 3, 4, PAL_STEEL_DARK, PAL_STEEL_LIGHT, PAL_STEEL_SHINE);
-        canv_shaded_box( 4, -3 + bob, 3, 4, PAL_STEEL_DARK, PAL_STEEL_MID,   PAL_STEEL_LIGHT);
-        canv_put(-6, -3 + bob, PAL_GOLD_LIGHT);
-        canv_put( 5, -3 + bob, PAL_GOLD_LIGHT);
-        if (dir == DIR_UP) {
-            canv_shaded_box(-4, -2 + bob, 8, 8, PAL_BLUE_DARK, PAL_BLUE_MID, PAL_BLUE_LIGHT);
-            canv_rect(-3, -2 + bob, 6, 1, PAL_GOLD_MID);
+        int w = a->shoulder_half_w * 2 + 2;
+        int h = (a->cape == CAPE_FLOWING) ? 9 : 7;
+        canv_shaded_box(-w / 2, -2 + bob, w, h, c_dark, c_mid, c_light);
+        if (a->cape == CAPE_TATTERED) {
+            /* Jagged tattered hem */
+            canv_put(-w / 2 + 1, -2 + bob + h - 1, 0);
+            canv_put( w / 2 - 2, -2 + bob + h - 1, 0);
+        } else if (dir == DIR_UP) {
+            canv_rect(-w / 2 + 1, -2 + bob, w - 2, 1, a->trim_col);
         }
-    } else {
-        canv_shaded_box(-3, -3 + bob, 6, 7, PAL_STEEL_DARK, PAL_STEEL_MID, PAL_STEEL_LIGHT);
-        canv_rect(-3, 1 + bob, 6, 2, PAL_BLUE_MID);
-        canv_shaded_box(-2, -2 + bob, 4, 4, PAL_STEEL_MID, PAL_STEEL_LIGHT, PAL_STEEL_SHINE);
-        canv_put(0, -2 + bob, PAL_GOLD_LIGHT);
-    }
-
-    int hy = -9 + bob;
-    if (dir == DIR_DOWN || dir == DIR_UP) {
-        canv_rect(-1, hy - 3, 3, 3, PAL_CRIMSON_LIGHT);
-        canv_put(0, hy - 4, PAL_CRIMSON_HOT);
     } else if (dir == DIR_RIGHT) {
-        canv_rect(-4, hy - 2, 4, 2, PAL_CRIMSON_LIGHT);
-        canv_rect(-5, hy - 1, 2, 3, PAL_CRIMSON_MID);
+        canv_shaded_box(-6, -2 + bob, 5, 8, c_dark, c_mid, c_light);
     } else {
-        canv_rect(1, hy - 2, 4, 2, PAL_CRIMSON_LIGHT);
-        canv_rect(4, hy - 1, 2, 3, PAL_CRIMSON_MID);
-    }
-
-    canv_shaded_box(-3, hy, 7, 6, PAL_STEEL_DARK, PAL_STEEL_LIGHT, PAL_STEEL_SHINE);
-    if (dir == DIR_DOWN) {
-        canv_rect(-2, hy + 2, 5, 1, PAL_GOLD_LIGHT);
-        canv_rect(-2, hy + 3, 5, 1, PAL_OUTLINE);
-        canv_rect( 0, hy + 3, 1, 3, PAL_OUTLINE);
-    } else if (dir == DIR_RIGHT) {
-        canv_rect( 1, hy + 2, 3, 1, PAL_GOLD_LIGHT);
-        canv_rect( 1, hy + 3, 3, 1, PAL_OUTLINE);
-        canv_rect( 2, hy + 3, 1, 2, PAL_OUTLINE);
-    } else if (dir == DIR_LEFT) {
-        canv_rect(-3, hy + 2, 3, 1, PAL_GOLD_LIGHT);
-        canv_rect(-3, hy + 3, 3, 1, PAL_OUTLINE);
-        canv_rect(-2, hy + 3, 1, 2, PAL_OUTLINE);
-    } else {
-        canv_rect(-2, hy + 4, 5, 1, PAL_GOLD_MID);
+        canv_shaded_box( 1, -2 + bob, 5, 8, c_dark, c_mid, c_light);
     }
 }
 
-static void generate_skeleton_rig(const Character *c, int stride, int bob, bool is_lord)
+static void draw_biped_legs(const BipedAppearance *a, Direction dir, int stride)
 {
-    Direction dir = c->dir;
-    int recoil = (c->action == ACT_STAGGER || c->action == ACT_CRIT_HURT) ? 2 : 0;
+    uint8_t p_dark  = a->primary_ramp;
+    uint8_t p_mid   = (uint8_t)(a->primary_ramp + 1);
+    uint8_t p_light = (uint8_t)(a->primary_ramp + 2);
+    int len = a->leg_len;
 
-    if (is_lord) {
-        canv_shaded_box(-5, -3 + bob, 11, 8, PAL_CRIMSON_DARK, PAL_CRIMSON_MID, PAL_CRIMSON_LIGHT);
-    }
-
-    if (dir == DIR_DOWN || dir == DIR_UP) {
-        canv_line(-3, 4, -3, 8 + stride, PAL_BONE_MID);
-        canv_put(-3, 6 + stride / 2, PAL_BONE_SHINE);
-        canv_line( 3, 4,  3, 8 - stride, PAL_BONE_MID);
-        canv_put( 3, 6 - stride / 2, PAL_BONE_SHINE);
-    } else {
-        canv_line(-1 + stride, 4, -2 + stride, 8, PAL_BONE_MID);
-        canv_line( 1 - stride, 4,  2 - stride, 8, PAL_BONE_LIGHT);
-    }
-
-    canv_rect(-3, 3 + bob, 7, 2, PAL_BONE_MID);
-    canv_line(0, -3 + bob, 0, 3 + bob, PAL_BONE_DARK);
-
-    if (dir == DIR_DOWN || dir == DIR_UP) {
-        canv_rect(-4, -3 + bob, 9, 1, PAL_BONE_SHINE);
-        canv_rect(-4, -1 + bob, 9, 1, PAL_BONE_LIGHT);
-        canv_rect(-3,  1 + bob, 7, 1, PAL_BONE_MID);
-        if (dir == DIR_DOWN) {
-            canv_put(0, -2 + bob, PAL_BONE_MID);
-            canv_put(0,  0 + bob, PAL_BONE_MID);
+    if (a->torso == TORSO_RIBCAGE) {
+        if (dir == DIR_DOWN || dir == DIR_UP) {
+            canv_line(-3, 4, -3, 4 + len + stride, p_mid);
+            canv_put(-3, 4 + len / 2 + stride / 2, p_light);
+            canv_line( 3, 4,  3, 4 + len - stride, p_mid);
+            canv_put( 3, 4 + len / 2 - stride / 2, p_light);
         } else {
-            canv_line(0, -4 + bob, 0, 3 + bob, PAL_BONE_SHINE);
+            canv_line(-1 + stride, 4, -2 + stride, 4 + len, p_mid);
+            canv_line( 1 - stride, 4,  2 - stride, 4 + len, p_light);
         }
-        canv_line(-5, -3 + bob, -6 - recoil, 2 + bob - recoil, PAL_BONE_LIGHT);
-        canv_line( 5, -3 + bob,  6 + recoil, 2 + bob - recoil, PAL_BONE_LIGHT);
     } else {
-        canv_rect(-2, -3 + bob, 5, 1, PAL_BONE_SHINE);
-        canv_rect(-2, -1 + bob, 5, 1, PAL_BONE_LIGHT);
-        canv_rect(-2,  1 + bob, 4, 1, PAL_BONE_MID);
-        canv_line(0, -2 + bob, (dir == DIR_RIGHT ? 3 : -3), 2 + bob, PAL_BONE_SHINE);
+        if (dir == DIR_DOWN || dir == DIR_UP) {
+            canv_shaded_box(-4, 4 + stride, 3, len, p_dark, p_mid, p_light);
+            canv_shaded_box( 1, 4 - stride, 3, len, p_dark, p_mid, p_light);
+        } else {
+            canv_shaded_box(-2 + stride, 4, 3, len, p_dark, p_mid, p_light);
+            canv_shaded_box(-1 - stride, 4, 3, len, p_dark, p_mid, p_light);
+        }
+    }
+}
+
+static void draw_biped_torso(const BipedAppearance *a, Direction dir, int bob, int recoil)
+{
+    uint8_t p_dark  = a->primary_ramp;
+    uint8_t p_mid   = (uint8_t)(a->primary_ramp + 1);
+    uint8_t p_light = (uint8_t)(a->primary_ramp + 2);
+    uint8_t p_shine = (uint8_t)(a->primary_ramp + 3);
+    uint8_t c_dark  = a->cloth_ramp;
+    uint8_t c_mid   = (uint8_t)(a->cloth_ramp + 1);
+    uint8_t c_light = (uint8_t)(a->cloth_ramp + 2);
+
+    int sw = a->shoulder_half_w;
+    int th = a->torso_h;
+    int ty = -3 + bob;
+
+    if (a->torso == TORSO_RIBCAGE) {
+        canv_rect(-3, ty + th - 1, 7, 2, p_mid);
+        canv_line(0, ty, 0, ty + th, p_dark);
+        if (dir == DIR_DOWN || dir == DIR_UP) {
+            canv_rect(-sw, ty,     sw * 2 + 1, 1, p_shine);
+            canv_rect(-sw, ty + 2, sw * 2 + 1, 1, p_light);
+            canv_rect(-sw + 1, ty + 4, sw * 2 - 1, 1, p_mid);
+            if (dir == DIR_UP) canv_line(0, ty - 1, 0, ty + th, p_shine);
+            canv_line(-sw - 1, ty, -sw - 2 - recoil, ty + 5 - recoil, p_light);
+            canv_line( sw + 1, ty,  sw + 2 + recoil, ty + 5 - recoil, p_light);
+        } else {
+            canv_rect(-2, ty,     5, 1, p_shine);
+            canv_rect(-2, ty + 2, 5, 1, p_light);
+            canv_rect(-2, ty + 4, 4, 1, p_mid);
+        }
+    } else if (a->torso == TORSO_ROBE) {
+        int w = (dir == DIR_DOWN || dir == DIR_UP) ? sw * 2 + 1 : 6;
+        canv_shaded_box(-w / 2, ty, w, th + 3, c_dark, c_mid, c_light);
+        canv_rect(-w / 2, ty + 4, w, 1, a->trim_col);
+    } else {
+        int w = (dir == DIR_DOWN || dir == DIR_UP) ? sw * 2 + 1 : 6;
+        canv_shaded_box(-w / 2, ty, w, th, p_dark, p_mid, p_light);
+        if (a->torso == TORSO_SURCOAT) {
+            canv_rect(-w / 2 + 1, ty + 3, w - 2, th - 3, c_mid);
+            canv_rect(-w / 2 + 1, ty + 3, w - 2, 1, a->trim_col);
+        } else {
+            canv_rect(-w / 2 + 1, ty + th - 2, w - 2, 1, a->trim_col);
+        }
     }
 
-    if (is_lord) {
-        canv_shaded_box(-7, -4 + bob, 3, 3, PAL_STEEL_DARK, PAL_STEEL_MID, PAL_GOLD_LIGHT);
-        canv_shaded_box( 5, -4 + bob, 3, 3, PAL_STEEL_DARK, PAL_STEEL_MID, PAL_GOLD_LIGHT);
+    /* Pauldrons */
+    if (a->pauldron != PAULDRON_NONE) {
+        if (dir == DIR_DOWN || dir == DIR_UP) {
+            canv_shaded_box(-sw - 3, ty, 3, 4, p_dark, p_light, p_shine);
+            canv_shaded_box( sw + 1, ty, 3, 4, p_dark, p_mid,   p_light);
+            canv_put(-sw - 2, ty, a->trim_col);
+            canv_put( sw + 2, ty, a->trim_col);
+            if (a->pauldron == PAULDRON_SPIKED) {
+                canv_put(-sw - 3, ty - 1, p_shine);
+                canv_put( sw + 3, ty - 1, p_shine);
+            }
+        } else {
+            canv_shaded_box(-2, ty + 1, 4, 4, p_mid, p_light, p_shine);
+            if (a->pauldron == PAULDRON_SPIKED) canv_put(0, ty, a->trim_col);
+        }
     }
+}
+
+static void draw_biped_head(const BipedAppearance *a, Direction dir, int bob, int recoil)
+{
+    uint8_t p_dark  = a->primary_ramp;
+    uint8_t p_mid   = (uint8_t)(a->primary_ramp + 1);
+    uint8_t p_light = (uint8_t)(a->primary_ramp + 2);
+    uint8_t p_shine = (uint8_t)(a->primary_ramp + 3);
+    uint8_t c_dark  = a->cloth_ramp;
+    uint8_t c_mid   = (uint8_t)(a->cloth_ramp + 1);
+    uint8_t c_light = (uint8_t)(a->cloth_ramp + 2);
+    uint8_t eye_c   = a->eye_col ? a->eye_col : PAL_OUTLINE;
 
     int hy = -9 + bob - recoil;
-    canv_shaded_box(-3, hy, 7, 5, PAL_BONE_MID, PAL_BONE_LIGHT, PAL_BONE_SHINE);
-    canv_rect(-2, hy + 5, 5, 2, PAL_BONE_MID);
 
-    if (dir == DIR_DOWN) {
-        canv_rect(-2, hy + 2, 2, 2, PAL_OUTLINE);
-        canv_rect( 1, hy + 2, 2, 2, PAL_OUTLINE);
-        canv_put(-2, hy + 2, PAL_CRIMSON_HOT);
-        canv_put( 1, hy + 2, PAL_CRIMSON_HOT);
-        canv_put(0, hy + 4, PAL_OUTLINE);
-        canv_put(-1, hy + 6, PAL_OUTLINE);
-        canv_put( 1, hy + 6, PAL_OUTLINE);
-    } else if (dir == DIR_RIGHT) {
-        canv_rect(1, hy + 2, 2, 2, PAL_OUTLINE);
-        canv_put(2, hy + 2, PAL_CRIMSON_HOT);
-        canv_put(1, hy + 6, PAL_OUTLINE);
-    } else if (dir == DIR_LEFT) {
-        canv_rect(-2, hy + 2, 2, 2, PAL_OUTLINE);
-        canv_put(-2, hy + 2, PAL_CRIMSON_HOT);
-        canv_put(-1, hy + 6, PAL_OUTLINE);
+    /* Crest / Plume / Horns */
+    if (a->crest == CREST_PLUME) {
+        if (dir == DIR_DOWN || dir == DIR_UP) {
+            canv_rect(-1, hy - 3, 3, 3, a->crest_col);
+        } else if (dir == DIR_RIGHT) {
+            canv_rect(-4, hy - 2, 4, 2, a->crest_col);
+            canv_rect(-5, hy - 1, 2, 3, a->crest_col);
+        } else {
+            canv_rect( 1, hy - 2, 4, 2, a->crest_col);
+            canv_rect( 4, hy - 1, 2, 3, a->crest_col);
+        }
+    } else if (a->crest == CREST_HORNS) {
+        canv_line(-3, hy + 1, -5, hy - 3, a->crest_col);
+        canv_line( 3, hy + 1,  5, hy - 3, a->crest_col);
+        canv_put(-5, hy - 4, PAL_STEEL_SHINE);
+        canv_put( 5, hy - 4, PAL_STEEL_SHINE);
+    } else if (a->crest == CREST_SPIKES) {
+        canv_put(-2, hy - 2, a->crest_col);
+        canv_put( 0, hy - 3, a->crest_col);
+        canv_put( 2, hy - 2, a->crest_col);
     }
 
-    if (is_lord) {
-        canv_rect(-3, hy - 1, 7, 1, PAL_GOLD_MID);
-        canv_put(-3, hy - 2, PAL_GOLD_SHINE);
-        canv_put( 0, hy - 3, PAL_GOLD_SHINE);
-        canv_put( 3, hy - 2, PAL_GOLD_SHINE);
+    if (a->head == HEAD_HOOD) {
+        canv_shaded_box(-3, hy - 1, 7, 7, c_dark, c_mid, c_light);
+        if (dir != DIR_UP) {
+            int fx = (dir == DIR_RIGHT) ? 1 : (dir == DIR_LEFT ? -3 : -2);
+            int fw = (dir == DIR_DOWN) ? 5 : 3;
+            canv_rect(fx, hy + 2, fw, 3, PAL_OUTLINE);
+            if (dir == DIR_DOWN) {
+                canv_put(-1, hy + 3, eye_c);
+                canv_put( 1, hy + 3, eye_c);
+            } else {
+                canv_put(fx + (dir == DIR_RIGHT ? 2 : 0), hy + 3, eye_c);
+            }
+        }
+    } else if (a->head == HEAD_SKULL || a->head == HEAD_CROWNED_SKULL) {
+        canv_shaded_box(-3, hy, 7, 5, p_mid, p_light, p_shine);
+        canv_rect(-2, hy + 5, 5, 2, p_mid);
+        if (dir == DIR_DOWN) {
+            canv_rect(-2, hy + 2, 2, 2, PAL_OUTLINE);
+            canv_rect( 1, hy + 2, 2, 2, PAL_OUTLINE);
+            canv_put(-2, hy + 2, eye_c);
+            canv_put( 1, hy + 2, eye_c);
+            canv_put( 0, hy + 4, PAL_OUTLINE);
+            canv_put(-1, hy + 6, PAL_OUTLINE);
+            canv_put( 1, hy + 6, PAL_OUTLINE);
+        } else if (dir == DIR_RIGHT) {
+            canv_rect(1, hy + 2, 2, 2, PAL_OUTLINE);
+            canv_put(2, hy + 2, eye_c);
+        } else if (dir == DIR_LEFT) {
+            canv_rect(-2, hy + 2, 2, 2, PAL_OUTLINE);
+            canv_put(-2, hy + 2, eye_c);
+        }
+        if (a->head == HEAD_CROWNED_SKULL) {
+            canv_rect(-3, hy - 1, 7, 1, a->trim_col);
+            canv_put(-3, hy - 2, PAL_GOLD_SHINE);
+            canv_put( 0, hy - 3, PAL_GOLD_SHINE);
+            canv_put( 3, hy - 2, PAL_GOLD_SHINE);
+        }
+    } else {
+        /* Armored Helmet (GREATHELM, SALLET, or HORNED_HELM) */
+        canv_shaded_box(-3, hy, 7, 6, p_dark, p_light, p_shine);
+        if (a->head == HEAD_SALLET) {
+            canv_put(-3, hy, 0);
+            canv_put( 3, hy, 0);
+        }
+        if (dir == DIR_DOWN) {
+            canv_rect(-2, hy + 2, 5, 1, a->trim_col);
+            canv_rect(-2, hy + 3, 5, 1, PAL_OUTLINE);
+            canv_rect( 0, hy + 3, 1, 3, PAL_OUTLINE);
+            if (a->eye_col) {
+                canv_put(-1, hy + 3, a->eye_col);
+                canv_put( 1, hy + 3, a->eye_col);
+            }
+        } else if (dir == DIR_RIGHT) {
+            canv_rect(1, hy + 2, 3, 1, a->trim_col);
+            canv_rect(1, hy + 3, 3, 1, PAL_OUTLINE);
+            if (a->eye_col) canv_put(2, hy + 3, a->eye_col);
+        } else if (dir == DIR_LEFT) {
+            canv_rect(-3, hy + 2, 3, 1, a->trim_col);
+            canv_rect(-3, hy + 3, 3, 1, PAL_OUTLINE);
+            if (a->eye_col) canv_put(-2, hy + 3, a->eye_col);
+        } else {
+            canv_rect(-2, hy + 4, 5, 1, a->trim_col);
+        }
     }
+}
+
+static void generate_biped_rig(const Character *c, int stride, int bob)
+{
+    const BipedAppearance *a = &c->appearance;
+    int recoil = (c->action == ACT_STAGGER || c->action == ACT_CRIT_HURT) ? 2 : 0;
+
+    draw_biped_cape(a, c->dir, bob, false);
+    draw_biped_legs(a, c->dir, stride);
+    draw_biped_torso(a, c->dir, bob, recoil);
+    draw_biped_cape(a, c->dir, bob, true);
+    draw_biped_head(a, c->dir, bob, recoil);
 }
 
 /* =========================================================================
@@ -321,8 +408,8 @@ static void draw_procedural_shield(const Character *c)
 
     canv_clear();
     uint8_t rim  = is_parry ? PAL_GOLD_SHINE : PAL_STEEL_LIGHT;
-    uint8_t face = is_parry ? PAL_GOLD_LIGHT : PAL_BLUE_MID;
-    uint8_t boss = is_parry ? COL_WHITE      : PAL_GOLD_LIGHT;
+    uint8_t face = is_parry ? PAL_GOLD_LIGHT : (uint8_t)(c->appearance.cloth_ramp + 1);
+    uint8_t boss = is_parry ? COL_WHITE      : c->appearance.trim_col;
 
     if (blocking) {
         /* Large raised Kite Shield (11px tall, tapered point at bottom) */
@@ -576,13 +663,7 @@ static void render_character_vga(const Character *c)
     int bob    = (stride != 0) ? -1 : 0;
 
     canv_clear();
-    if (c->def->body_style == BSTYLE_KNIGHT) {
-        generate_knight_rig(c, stride, bob);
-    } else if (c->def->body_style == BSTYLE_SKELETON_LORD) {
-        generate_skeleton_rig(c, stride, bob, true);
-    } else {
-        generate_skeleton_rig(c, stride, bob, false);
-    }
+    generate_biped_rig(c, stride, bob);
 
     uint8_t tint = 0;
     if (c->action == ACT_CRIT_HURT && (c->action_frame & 2)) {
@@ -718,8 +799,8 @@ void render_scene(const char *status_msg, uint8_t status_col)
     snprintf(buf, sizeof(buf), "STATE:%s", stance);
     vga_draw_str(88, 10, buf, stance_col, -1);
 
-    for (i = 0; i < 2; i++) {
-        int y = (i == 0) ? 2 : 10;
+    for (i = 0; i < 3; i++) {
+        int y = (i * 6) + 1;
         const char *ename = enemies[i].def ? enemies[i].def->name : "ENEMY";
         if (!enemies[i].active) {
             snprintf(buf, sizeof(buf), "%s:SLAIN", ename);
@@ -739,7 +820,7 @@ void render_scene(const char *status_msg, uint8_t status_col)
                 est = wind ? "WIND!" : "ATK!";
                 ecol = wind ? PAL_GOLD_LIGHT : COL_LIGHTRED;
             }
-            snprintf(buf, sizeof(buf), "%s:%d/%d %s", ename, enemies[i].hp, enemies[i].max_hp, est);
+            snprintf(buf, sizeof(buf), "%-8s:%3d %s", ename, enemies[i].hp, est);
             vga_draw_str(196, y, buf, ecol, -1);
         }
     }

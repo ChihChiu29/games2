@@ -134,11 +134,25 @@ static int l_register_weapon(lua_State *state)
 
     w->kind = (strcmp(kind_s, "SHIELD") == 0) ? WEAPON_SHIELD : WEAPON_MELEE;
     w->style = parse_weapon_style(style_s);
+    w->level = get_int_field(state, t, "level", 1);
     w->length_px = get_int_field(state, t, "length_px", 18);
     w->blade_width_px = get_int_field(state, t, "blade_width_px", 3);
 
     w->block_speed_fp = get_int_field(state, t, "block_speed_fp", 8);
     w->parry_window_frames = get_int_field(state, t, "parry_window_frames", 12);
+
+    lua_pushstring(state, "skill");
+    lua_gettable(state, t);
+    if (lua_istable(state, -1)) {
+        int s_idx = lua_gettop(state);
+        w->skill.valid = true;
+        get_str_field(state, s_idx, "name", w->skill.name, sizeof(w->skill.name), "SKILL");
+        w->skill.stamina_cost    = get_int_field(state, s_idx, "stamina_cost", 28);
+        w->skill.cooldown_frames = get_int_field(state, s_idx, "cooldown_frames", 90);
+        w->skill.atk_slot        = get_int_field(state, s_idx, "atk_slot", WATK_SPECIAL);
+        w->skill.bonus_damage    = get_int_field(state, s_idx, "bonus_damage", 8);
+    }
+    lua_pop(state, 1);
 
     lua_pushstring(state, "normal_attack");
     lua_gettable(state, t);
@@ -176,6 +190,7 @@ static void parse_character_def_common(lua_State *state, int t, CharacterDef *de
     def->radius             = get_int_field(state, t, "radius", (8 * def->scale_pct) / 100);
     def->max_hp             = get_int_field(state, t, "max_hp", 100);
     def->max_stamina        = get_int_field(state, t, "max_stamina", 100);
+    def->armor              = get_int_field(state, t, "armor", 0);
     def->move_speed_fp      = get_int_field(state, t, "move_speed_fp", 12);
     def->turn_cooldown      = get_int_field(state, t, "turn_cooldown", 20);
     def->stagger_duration   = get_int_field(state, t, "stagger_duration", 45);

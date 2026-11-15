@@ -65,11 +65,22 @@ typedef struct {
     bool is_critical;
 } AttackDef;
 
+/* Weapon Special Skill Definition (triggered via [U] when equipped) */
+typedef struct {
+    bool valid;
+    char name[24];
+    int stamina_cost;
+    int cooldown_frames;
+    int atk_slot;          /* Maps to WATK_SPECIAL or a dedicated skill attack */
+    int bonus_damage;
+} WeaponSkillDef;
+
 /* Base Weapon / Equipment Class Definition (registered in data/weapons/) */
 typedef struct {
     bool used;
     char id[24];
     char name[32];
+    int level;             /* Weapon upgrade level (1+), scales attack damage */
     WeaponKind kind;
     WeaponStyle style;
 
@@ -82,6 +93,9 @@ typedef struct {
 
     /* Melee attack animations: Normal, Special, and Critical (Riposte/Backstab) */
     AttackDef attacks[WATK_COUNT];
+
+    /* Optional Weapon Skill (invoked by [U]) */
+    WeaponSkillDef skill;
 } WeaponDef;
 
 void weapon_registry_clear(void);
@@ -89,5 +103,6 @@ WeaponDef *weapon_register(const char *id);
 const WeaponDef *weapon_find(const char *id);
 const AttackDef *weapon_get_attack(const WeaponDef *w, int atk_slot);
 const AttackDef *weapon_find_attack_by_name(const WeaponDef *w, const char *name, int *out_slot);
+int weapon_compute_damage(const WeaponDef *w, const AttackDef *atk);
 
 #endif /* SOUL2D_WEAPON_H */

@@ -28,8 +28,17 @@ WeaponDef *weapon_register(const char *id)
     WeaponDef *w = &weapon_types[num_weapon_types++];
     memset(w, 0, sizeof(*w));
     w->used = true;
+    w->level = 1;
     strncpy(w->id, id, sizeof(w->id) - 1);
     return w;
+}
+
+int weapon_compute_damage(const WeaponDef *w, const AttackDef *atk)
+{
+    if (!atk) return 0;
+    int lvl = (w && w->level > 1) ? w->level : 1;
+    /* +15% damage per weapon level above 1 */
+    return atk->damage + ((atk->damage * (lvl - 1) * 15) / 100);
 }
 
 const WeaponDef *weapon_find(const char *id)

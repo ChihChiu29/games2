@@ -32,6 +32,7 @@ GAME_SRCS=(
   character.c
   combat.c
   render_vga.c
+  world.c
   data_lua.c
   main.c
   platform_dos.c

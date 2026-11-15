@@ -29,6 +29,7 @@
 #define SC_A     0x1E
 #define SC_S     0x1F
 #define SC_D     0x20
+#define SC_B     0x30
 #define SC_R     0x13
 #define SC_U     0x16
 #define SC_I     0x17

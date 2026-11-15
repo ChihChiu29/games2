@@ -3,8 +3,17 @@ register_weapon("broadsword", {
     name           = "Broadsword",
     kind           = "MELEE",
     style          = "SWORD",
+    level          = 1,
     length_px      = 17,
     blade_width_px = 3,
+
+    skill = {
+        name            = "HEAVY CLEAVE",
+        stamina_cost    = 26,
+        cooldown_frames = 80,
+        atk_slot        = 1,
+        bonus_damage    = 10,
+    },
 
     -- Normal Attack: Wide Horizontal Slash
     normal_attack = {

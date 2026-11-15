@@ -1677,7 +1677,7 @@ static char ibm_scan_row_choice(int my, int mx, int btn)
 		char c = chs[0];
 		if (mx >= pos[0] - 2 || pos[0] <= 16)
 		{
-			if (btn == 2 && strstr(row0, "Descs") && islower((unsigned char)c))
+			if (btn == 2 && (strstr(row0, "Descs") || strstr(row0, "=Info")) && islower((unsigned char)c))
 				return ((char)toupper((unsigned char)c));
 			return (c);
 		}
@@ -1693,7 +1693,7 @@ static char ibm_scan_row_choice(int my, int mx, int btn)
 	if (mx - pos[best] <= 22)
 	{
 		char c = chs[best];
-		if (btn == 2 && strstr(row0, "Descs") && islower((unsigned char)c))
+		if (btn == 2 && (strstr(row0, "Descs") || strstr(row0, "=Info")) && islower((unsigned char)c))
 			return ((char)toupper((unsigned char)c));
 		return (c);
 	}
@@ -2100,11 +2100,11 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 			}
 		}
 
-		/* 7g. Right-click in menus (unless right-clicking a spell for its description) cancels/exits */
+		/* 7g. Right-click in menus (unless right-clicking a spell/power for its description) cancels/exits */
 		if (btn == 2)
 		{
 			ch = ibm_scan_row_choice(my, mx, 2);
-			if (ch && isupper((unsigned char)ch) && strstr(row0, "Descs"))
+			if (ch && isupper((unsigned char)ch) && (strstr(row0, "Descs") || strstr(row0, "=Info")))
 			{
 				Term_keypress(ch);
 				return (TRUE);
@@ -2181,7 +2181,8 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 			if (p_star)
 			{
 				int sx = (int)(p_star - row0);
-				if (mx >= sx - 1 && mx <= sx + 8)
+				int star_len = (strncmp(p_star, "* to ", 5) == 0) ? 8 : 5;
+				if (mx >= sx - 1 && mx <= sx + star_len)
 				{
 					Term_keypress('*');
 					return (TRUE);

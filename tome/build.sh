@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-2.3.5}"
+VERSION="${1:-2.3.6}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_ROOT="${SCRIPT_DIR}/tome_src/src_230"
 SRC_DIR="${SRC_ROOT}/src"
 DJGPP_BIN="/home/chih/Workspace/git/games2/NH5/NetHack/lib/djgpp/bin"
 CWSDPMI_EXE="/home/chih/Workspace/git/games2/NH5/NetHack/lib/djgpp/cwsdpmi/bin/CWSDPMI.EXE"
-OUT_ZIP="${SCRIPT_DIR}/tome2_${VERSION}_dospure.zip"
+OUT_ZIP="${SCRIPT_DIR}/release/tome2_${VERSION}_dospure.zip"
 
 export PATH="${DJGPP_BIN}:${PATH}"
 

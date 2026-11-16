@@ -1,0 +1,1434 @@
+package forge.neo.ui;
+
+
+import forge.neo.MenuLayout;
+import forge.neo.NeoText;
+import forge.neo.match.NeoFormat;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
+import javafx.scene.control.ScrollPane;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.FlowPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
+
+/**
+ * El menu inicial: con que quieres jugar.
+ *
+ * <p>Va ANTES del selector de mazo. La razon es que Forge no es solo Commander:
+ * el motor trae todos los formatos programados, y lo unico que los separa es el
+ * {@code GameType} y la carpeta de mazos ({@link NeoFormat}). Poner aqui la
+ * eleccion cuesta una pantalla y abre el resto del juego.
+ *
+ * <p>Cada formato dice en una linea que es, porque "Oathbreaker" o "Tiny
+ * Leaders" no le dicen nada a quien no los haya jugado, y cuantos mazos tienes
+ * de ese formato — asi se ve de un vistazo cual puedes jugar ya.
+ */
+public class MainMenu extends BorderPane {
+
+    /** Que ha elegido el jugador. */
+    public interface Actions {
+        void tutorial();
+
+        void play(NeoFormat format);
+
+        void otherFormats();
+
+        void draft();
+
+        void sealed();
+
+        void tournament();
+
+        /** Ascenso: el roguelike. */
+        void ascent();
+
+        /**
+         * La Aventura: el Adventure de Forge (mapa, pueblos, mazmorras) con los
+         * combates y el editor de mazos de NeoForge. Se abre en su propio
+         * proceso; ver {@code forge.neo.adventure.AdventureLauncher}.
+         */
+        default void adventure() {
+        }
+
+        void online();
+
+        void quest();
+
+        void puzzles();
+
+        /** La enciclopedia: todas las cartas, para mirarlas. */
+        void library();
+
+        void look();
+
+        void achievements();
+
+        /** Las repeticiones: tus ultimas partidas, para volver a verlas. */
+        default void replays() {
+        }
+
+        void settings();
+
+        void quit();
+    }
+
+    public MainMenu(final Actions actions) {
+        getStyleClass().addAll("table-root", "home");
+
+        final Label title = new Label(NeoText.get("menu.title"));
+        title.getStyleClass().add("home-title");
+        final Label subtitle = new Label(NeoText.get("menu.subtitle"));
+        subtitle.getStyleClass().add("home-subtitle");
+        // El idioma, ARRIBA DEL TODO y en la primera pantalla.
+        //
+        // Salio de una pregunta muy buena: *"si entra un aleman no va a saber
+        // llegar a partida"*. Un ajuste de idioma escondido dentro de Ajustes
+        // solo lo encuentra quien ya entiende el idioma en el que esta — o sea,
+        // quien no lo necesita. Y por eso cada idioma se llama por su nombre EN
+        // SU IDIOMA ("Deutsch", no "Aleman"): asi se reconoce sin leer nada mas.
+        final VBox words = new VBox(2, title, subtitle);
+        words.setAlignment(Pos.CENTER_LEFT);
+
+        // El logo, AL LADO del titulo y no encima. La primera pantalla ya
+        // reparte su alto entre la barra de idiomas, la cabecera y la rejilla
+        // de modos; una imagen apilada arriba se lo come y la rejilla empieza a
+        // recortar. Al lado no cuesta alto ninguno.
+        //
+        // Si no hay logo (sin ventana, o el recurso no esta) NeoLogo devuelve
+        // null y la cabecera se queda exactamente como estaba: un icono que
+        // falta no puede dejar sin menu.
+        final javafx.scene.image.ImageView mark = forge.neo.NeoLogo.view(76);
+        final HBox header = mark == null ? new HBox(words) : new HBox(16, mark, words);
+        header.setAlignment(Pos.CENTER);
+
+        // Idioma, cabecera y Discord en UNA sola fila (24-09-2026, pedido en
+        // itch.io). La fila de botones de idioma ocupaba tres lineas encima de
+        // todo, y en 1080p la rejilla ya no entraba entera: se cortaba en la
+        // cuarta fila. Ahora el idioma es un desplegable — sigue en la primera
+        // pantalla y con la bandera y el nombre en su idioma, que es lo que lo
+        // hace encontrable para quien no entiende el que esta puesto.
+        //
+        // Tres columnas con el mismo ancho a los lados para que el logo quede
+        // centrado de verdad sobre la rejilla, sea cual sea lo que mide cada
+        // lado.
+        final javafx.scene.layout.GridPane top = new javafx.scene.layout.GridPane();
+        for (final double pct : new double[] {30, 40, 30}) {
+            final javafx.scene.layout.ColumnConstraints c =
+                    new javafx.scene.layout.ColumnConstraints();
+            c.setPercentWidth(pct);
+            top.getColumnConstraints().add(c);
+        }
+        final Region language = languagePicker();
+        // itch.io al lado de Discord (28-09-2026): la pagina del juego a un
+        // clic, y el puntito cuando hay una version nueva. Ver NeoUpdate.
+        final Button itchButton = itchButton();
+        final javafx.scene.shape.Circle itchDot = new javafx.scene.shape.Circle(5);
+        itchDot.getStyleClass().add("itch-dot");
+        itchDot.setMouseTransparent(true);
+        itchDot.setTranslateX(4);
+        itchDot.setTranslateY(-4);
+        final javafx.scene.layout.StackPane itch =
+                new javafx.scene.layout.StackPane(itchButton, itchDot);
+        javafx.scene.layout.StackPane.setAlignment(itchDot, Pos.TOP_RIGHT);
+        // Del tamanyo del boton: la fila mide lo que el logo del centro, y
+        // estirada el puntito se iba a flotar muy por encima de la esquina.
+        itch.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+        // Y Ko-fi, el ultimo (10-10-2026, Ana: "la mejor manera que hay para
+        // que nos donen es meterlo en el juego").
+        final HBox discord = new HBox(8, itch, discordButton(), kofiButton());
+        discord.setAlignment(Pos.CENTER_RIGHT);
+        top.add(language, 0, 0);
+        top.add(header, 1, 0);
+        top.add(discord, 2, 0);
+        javafx.scene.layout.GridPane.setValignment(language, javafx.geometry.VPos.CENTER);
+        top.setPadding(new Insets(12, 30, 8, 30));
+
+        modes = new FlowPane(16, 16);
+        modes.setAlignment(Pos.CENTER);
+        modes.setPadding(new Insets(10, 40, 10, 40));
+        // Las tarjetas se reparten el ancho: cuatro columnas en una pantalla
+        // entera, menos si la ventana es estrecha (ver fitCards). Con un ancho
+        // fijo, o sobraba media fila o faltaba media tarjeta.
+        modes.setPrefWrapLength(UiScale.px(3 * MAX_CARD + 32));
+
+        // El tutorial, EL PRIMERO de todos y con la misma pinta que un modo.
+        //
+        // Va primero porque es lo unico que hay que hacer antes que nada: esta
+        // interfaz tiene gestos que no se descubren solos (click derecho para
+        // leer una carta, Ctrl+rueda para acercar la mesa, clicar el rail de
+        // fases para pararte en el turno del rival) y quien no los conozca
+        // juega peor sin saber por que. La letra pequenya lo dice sin rodeos.
+        tile("tutorial", modeCard(ModeArt.Mode.TUTORIAL, NeoText.get("menu.tutorial"),
+                NeoText.get("menu.tutorial.desc"),
+                tutorialNote(), true, actions::tutorial));
+
+        // Commander y Estandar primero: son la base, el resto de casillas se
+        // ordena a partir de aqui.
+        tile("commander", formatTile(NeoFormat.COMMANDER, actions));
+        tile("standard", formatTile(NeoFormat.ESTANDAR, actions));
+
+        // Aventura y torneo, PROMOVIDOS por delante de Brawl y Oathbreaker
+        // (decision del autor, 31-08-2026): en la practica son los modos que
+        // mas se juegan, y el menu se lee de arriba a abajo — lo primero que
+        // se ve tiene que ser lo que mas se usa, no el orden en que se
+        // construyeron.
+        //
+        // La aventura: coleccion, creditos, sobres y progreso guardado.
+        tile("quest", modeCard(ModeArt.Mode.QUEST, NeoText.get("menu.quest"),
+                NeoText.get("menu.quest.desc"),
+                questNote(), true, actions::quest));
+
+        // El torneo (la auditoría del motor, apartado C6): es una pregunta distinta de las
+        // demas — "quiero un cuadro de eliminacion directa con MI mazo,
+        // contra rivales que el motor se inventa" — y no una opcion de otra
+        // casilla.
+        tile("tournament", modeCard(ModeArt.Mode.TOURNAMENT, NeoText.get("menu.tournament"),
+                NeoText.get("menu.tournament.desc"),
+                tournamentNote(), true, actions::tournament));
+
+        // ASCENSO, en el sitio que ocupaba Tiny Leaders (decision del autor,
+        // 03-09-2026). Es una pregunta distinta de todas las de arriba —
+        // "quiero una partida de una hora de la que pueda morir" — y ademas la
+        // mas nueva: tiene que verse de primeras o no la abre nadie. Tiny
+        // Leaders baja a "Otros formatos", que es donde encaja: es un formato
+        // de construido mas, y responde la MISMA pregunta que las casillas de
+        // su alrededor (elige un mazo y juega).
+        tile("ascent", modeCard(ModeArt.Mode.ASCENT, NeoText.get("menu.ascent"),
+                NeoText.get("menu.ascent.desc"),
+                ascentNote(), true, actions::ascent));
+
+        // LA AVENTURA, justo despues de Ascenso: el Adventure de Forge, que es
+        // una pregunta distinta de todas ("quiero recorrer un mundo"), con los
+        // combates y el editor de mazos nuestros. En espanyol el modo de siempre
+        // pasa a llamarse "Quest", como en ingles, para no confundirlos.
+        //
+        // NO en Mac: el Adventure (libGDX) y JavaFX quieren los dos el hilo
+        // principal, y eso en macOS no se ha probado. Mejor sin casilla que con
+        // una que no abre.
+        if (!forge.neo.platform.NeoOs.MAC) {
+            tile("adventure", modeCard(ModeArt.Mode.ADVENTURE, NeoText.get("menu.adventure"),
+                    NeoText.get("menu.adventure.desc"),
+                    NeoText.get(forge.neo.adventure.AdventureLauncher.isRunning()
+                            ? "menu.adventure.open" : "menu.adventure.note"),
+                    true, actions::adventure));
+            // Solo pruebas: -Dneo.adventure.autoLaunch=true la abre sola, una vez.
+            if (forge.neo.adventure.AdventureLauncher.takeAutoLaunch()) {
+                javafx.application.Platform.runLater(actions::adventure);
+            }
+        }
+
+        // "Otros formatos": Modern, Pioneer, Pauper... Responden la MISMA
+        // pregunta que las casillas de arriba ("elige un mazo y juega"), asi
+        // que no se meten una por una — quince casillas mas y el menu deja de
+        // ser un menu (la auditoría del motor). Una casilla agrupa, y de ahi a la
+        // pantalla de mazos de siempre.
+        tile("otherFormats", modeCard(ModeArt.Mode.OTHER_FORMATS, NeoText.get("menu.otherFormats"),
+                NeoText.get("menu.otherFormats.desc"),
+                NeoText.get("menu.otherFormats.note"), true, actions::otherFormats));
+
+        // El draft tampoco se entra eligiendo mazo: el mazo lo montas tu
+        // abriendo sobres, y despues lo llevas hasta que se rompe.
+        tile("draft", modeCard(ModeArt.Mode.DRAFT, NeoText.get("menu.draft"),
+                NeoText.get("menu.draft.desc"),
+                draftNote(), true, actions::draft));
+
+        // El sellado: el mismo evento que el draft, pero sin pasar sobres.
+        // Va justo al lado porque es la misma decision — "quiero jugar con lo
+        // que me toque" — y quien conoce uno reconoce el otro.
+        tile("sealed", modeCard(ModeArt.Mode.SEALED, NeoText.get("menu.sealed"),
+                NeoText.get("menu.sealed.desc"),
+                sealedNote(), true, actions::sealed));
+
+        // Brawl y Oathbreaker, DESPUES de aventura y torneo: se juegan menos
+        // (decision del autor, misma fecha).
+        tile("brawl", formatTile(NeoFormat.BRAWL, actions));
+        tile("oathbreaker", formatTile(NeoFormat.OATHBREAKER, actions));
+
+        // La partida privada. Va con los modos y no escondida en Ajustes: es
+        // una forma de jugar, no una opcion. Y dice de cuantos a cuantos, que
+        // es lo primero que se pregunta quien va a llamar a sus amigos.
+        tile("online", modeCard(ModeArt.Mode.ONLINE, NeoText.get("menu.online"),
+                NeoText.get("menu.online.desc"),
+                NeoText.get("menu.online.note"), true, actions::online));
+
+        // Los puzzles son un modo propio: no hay mazo que elegir, son
+        // situaciones preparadas con un objetivo. Forge trae cientos.
+        tile("puzzles", modeCard(ModeArt.Mode.PUZZLES, NeoText.get("menu.puzzles"), NeoText.get("menu.puzzles.desc"),
+                NeoText.get("menu.puzzles.note"), true, actions::puzzles));
+
+        // La enciclopedia (pedida en itch.io, 27-09-2026). Tampoco es un modo
+        // de juego, pero es una pregunta que no hacia ninguna pantalla — "que
+        // cartas existen" — y el constructor solo la contesta a traves de un
+        // mazo. Va con Personalizar y Logros: las casillas de mirar, no de jugar.
+        tile("library", modeCard(ModeArt.Mode.LIBRARY, NeoText.get("menu.library"),
+                NeoText.get("menu.library.desc"),
+                NeoText.get("menu.library.note",
+                        forge.model.FModel.getMagicDb().getCommonCards().getUniqueCards().size()),
+                true, actions::library));
+
+        // Personalizar no es un modo de juego, pero va aqui y no escondido en
+        // Ajustes: lo que se toca ahi se VE, y lo que se ve se busca en la
+        // primera pantalla.
+        tile("look", modeCard(ModeArt.Mode.LOOK, NeoText.get("menu.look"),
+                NeoText.get("menu.look.desc"),
+                lookNote(), true, actions::look));
+
+        // Los logros tampoco son un modo: son el registro de lo que ya has
+        // hecho. Van aqui porque es donde se vuelve al terminar de jugar.
+        tile("achievements", modeCard(ModeArt.Mode.ACHIEVEMENTS, NeoText.get("menu.achievements"),
+                NeoText.get("menu.achievements.desc"),
+                achievementNote(), true, actions::achievements));
+
+        // EL ORDEN Y LAS QUE SE ESCONDEN, DEL JUGADOR (Discord, 24-10-2026:
+        // "I will also never use the Tutorial so it'd be great to be able to
+        // customize the main screen"). Lo de arriba es el orden de FABRICA; el
+        // de verdad lo pone relayout() con MenuLayout, que comparte Android.
+        // Clic derecho en una casilla: esconderla, o entrar a ordenar.
+        for (final java.util.Map.Entry<String, Region> t : tiles.entrySet()) {
+            t.getValue().setOnContextMenuRequested(e -> {
+                tileMenu(t.getKey(), t.getValue(), e.getScreenX(), e.getScreenY());
+                e.consume();
+            });
+        }
+
+        // Lo que dice que hacer mientras se ordena, encima de la rejilla.
+        editHint.getStyleClass().add("menu-edit-hint");
+        editHint.setWrapText(true);
+        editHint.setMaxWidth(Double.MAX_VALUE);
+        editHint.setAlignment(Pos.CENTER);
+        VBox.setMargin(editHint, new Insets(4, 40, 0, 40));
+        // Todo lo de arriba va DENTRO de un visor con desplazamiento.
+        //
+        // El menu cabia justo, y al anyadir el logo dejo de caber: la fila de
+        // idiomas se comia por arriba o el pie por abajo, segun como se
+        // maquetara. Recortar sin salida es mentir sobre lo que hay (regla 5 de
+        // los principios de interfaz), asi que en vez de apretar los margenes
+        // — que volveria a romperse con la siguiente casilla o al subir la
+        // escala — se deja bajar con la rueda.
+        final VBox centre = new VBox(top, editHint, modes);
+        centre.setAlignment(Pos.CENTER);
+
+        final ScrollPane scroll = new ScrollPane(centre);
+        scroll.getStyleClass().add("dialog-scroll");
+        scroll.setFitToWidth(true);
+        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        setCenter(scroll);
+        // El ancho se mide en el VISOR, no en la rejilla: un FlowPane no baja
+        // de su tarjeta mas ancha (su minimo es el ancho PREFERIDO de sus
+        // hijos), asi que midiendose a si mismo nunca veia que la ventana
+        // habia encogido, y con una sola columna el lado derecho se cortaba.
+        scroll.viewportBoundsProperty().addListener((o, a, b) -> fitCards(modes, b.getWidth()));
+        modes.getChildren().addListener((javafx.collections.ListChangeListener<javafx.scene.Node>) ch ->
+                fitCards(modes, scroll.getViewportBounds().getWidth()));
+
+        final Button settings = new Button(NeoText.get("common.settings"));
+        settings.getStyleClass().add("btn-secondary");
+        settings.setOnAction(e -> actions.settings());
+
+        // Las repeticiones, en el pie y no en una casilla (la auditoría del motor):
+        // no es una forma de jugar, es mirar atras, como los ajustes.
+        final Button replays = new Button(NeoText.get("menu.replays"));
+        replays.getStyleClass().add("btn-secondary");
+        replays.setOnAction(e -> actions.replays());
+
+        final Button quit = new Button(NeoText.get("common.quit"));
+        quit.getStyleClass().add("btn-secondary");
+        quit.setOnAction(e -> actions.quit());
+
+        // Que motor se esta jugando, abajo a la izquierda. Pedido por un
+        // jugador el 22-09-2026: cuando falla una carta o una regla el fallo es
+        // DEL MOTOR, y para reportarlo en Card-Forge hay que decir contra que
+        // version pasa — el instalador oficial lo lleva en el nombre del
+        // fichero y aqui no habia forma de saberlo. Se sella al compilar, asi
+        // que se actualiza solo con cada actualizar.bat. Delante va la nuestra
+        // (pedido el 24-09-2026), que sale del pom. Ver NeoVersion.
+        final String engine = forge.neo.NeoVersion.label();
+        final Region gap = new Region();
+        HBox.setHgrow(gap, Priority.ALWAYS);
+        final HBox footer = new HBox(10);
+        if (engine != null) {
+            // Se puede seleccionar con el raton: quien vaya a abrir un informe
+            // en Card-Forge tiene que poder copiarlo, y un Label normal no deja.
+            final javafx.scene.control.TextField copiable =
+                    new javafx.scene.control.TextField(engine);
+            copiable.setEditable(false);
+            copiable.getStyleClass().add("home-version");
+            // Medido con la letra por defecto, que es la de 1080p: en 2K la del
+            // campo es un tercio mas grande y la fecha salia cortada.
+            copiable.setPrefWidth(new javafx.scene.text.Text(engine)
+                    .getLayoutBounds().getWidth() * UiScale.growth() + UiScale.px(18));
+            // Tampoco se encoge: lo que cede es el aviso de version.
+            copiable.setMinWidth(Region.USE_PREF_SIZE);
+            footer.getChildren().add(copiable);
+        }
+        // El aviso de version nueva, justo al lado del numero que dice cual
+        // tienes. En el pie y no en medio: no le quita alto a la rejilla ni
+        // tapa nada, y no hay que cerrarlo para jugar. Llega cuando conteste
+        // itch.io, que puede ser despues de montarse el menu.
+        final HBox update = new HBox();
+        update.getStyleClass().add("update-banner");
+        update.setAlignment(Pos.CENTER_LEFT);
+        showUpdate(update, itchButton, itchDot);
+        forge.neo.update.NeoUpdate.whenKnown(() -> showUpdate(update, itchButton, itchDot));
+        // La descarga de "Actualizar ahora" sigue aunque se salga del menu; el
+        // que se ensenye la recoge. Se suelta al salir de la escena (principio 11).
+        forge.neo.update.UpdateFlow.listen(() -> showUpdate(update, itchButton, itchDot));
+        update.sceneProperty().addListener((o, was, is) -> {
+            if (is == null) {
+                forge.neo.update.UpdateFlow.listen(null);
+            }
+        });
+        footer.getChildren().add(update);
+        // Las notas del parche al abrir una version nueva, con "Apoya el
+        // proyecto" (Ana, 11-11-2026). Una vez por arranque. Ver PatchNotes.
+        update.sceneProperty().addListener((o, was, is) -> {
+            if (is != null) {
+                javafx.application.Platform.runLater(this::maybePatchNotes);
+            }
+        });
+        // Ordenar el menu, en el pie con lo demas que no es jugar. Mientras se
+        // ordena, el mismo boton dice "Listo" (y se marca), y a su izquierda
+        // sale "Restaurar": lo que deshace todo va lejos de la inercia del Listo.
+        editButton.setOnAction(e -> {
+            editing = !editing;
+            relayout();
+        });
+        resetButton.getStyleClass().add("btn-secondary");
+        resetButton.setOnAction(e -> {
+            MenuLayout.reset();
+            relayout();
+        });
+        footer.getChildren().addAll(gap, resetButton, editButton, replays, settings, quit);
+        // Los botones del pie no se encogen nunca hasta "...": si falta sitio,
+        // cede el aviso de version, que parte su texto en lineas (el de un fallo
+        // al actualizar es largo).
+        for (final Button b : new Button[] {resetButton, editButton, replays, settings, quit}) {
+            b.setMinWidth(Region.USE_PREF_SIZE);
+        }
+        footer.getStyleClass().add("home-footer");
+        footer.setPadding(new Insets(12, 30, 16, 30));
+        footer.setAlignment(Pos.CENTER_RIGHT);
+        setBottom(footer);
+
+        // Solo pruebas: -Dneo.menu.edit=true abre el menu ordenando.
+        editing = Boolean.getBoolean("neo.menu.edit");
+        relayout();
+    }
+
+    /** La rejilla de modos: las casillas en el orden del jugador. */
+    private final FlowPane modes;
+
+    /** Todas las casillas, por su identificador y en el orden de FABRICA. */
+    private final java.util.LinkedHashMap<String, Region> tiles = new java.util.LinkedHashMap<>();
+
+    /** Lo de encima de cada casilla mientras se ordena (se hace una vez). */
+    private final java.util.Map<String, Region> editLayers = new java.util.HashMap<>();
+
+    private final Label editHint = new Label(NeoText.get("menu.edit.hint"));
+    private final Button editButton = new Button();
+    private final Button resetButton = new Button(NeoText.get("menu.edit.reset"));
+
+    /** Si se esta ordenando el menu. */
+    private boolean editing;
+
+    /** La casilla que se esta arrastrando, mientras dura el arrastre. */
+    private String dragging;
+
+    private void tile(final String id, final Region tile) {
+        tiles.put(id, tile);
+        // Ordenando, la casilla NO entra en su modo, venga el clic de donde venga.
+        // La capa de encima se comia los clics, pero las flechas y Ocultar
+        // reordenan la rejilla al soltar, y el clic que llega justo despues caia
+        // en la casilla de debajo y abria el modo (Ana, probandolo). Un filtro
+        // en la casilla lo para antes de que llegue a nadie; los botones no lo
+        // necesitan, disparan al soltar.
+        tile.addEventFilter(javafx.scene.input.MouseEvent.MOUSE_CLICKED, e -> {
+            if (editing) {
+                e.consume();
+            }
+        });
+    }
+
+    private java.util.List<String> factoryOrder() {
+        return new java.util.ArrayList<>(tiles.keySet());
+    }
+
+    /**
+     * Pone las casillas en el orden del jugador. Ordenando salen TODAS, las
+     * ocultas apagadas, para poder volver a ensenyarlas; si no, solo las
+     * visibles. Las casillas son las mismas de siempre: solo cambia el orden de
+     * los hijos y la capa de encima.
+     */
+    private void relayout() {
+        final java.util.List<String> defaults = factoryOrder();
+        final java.util.List<String> ids = editing
+                ? MenuLayout.order(defaults) : MenuLayout.visible(defaults);
+        final java.util.List<javafx.scene.Node> kids = new java.util.ArrayList<>();
+        // Todas, tambien las que no salen: una que se esconde ordenando y luego
+        // se da a Listo no puede volver otro dia con la capa puesta.
+        for (final java.util.Map.Entry<String, Region> t : tiles.entrySet()) {
+            decorate(t.getKey(), t.getValue());
+        }
+        for (final String id : ids) {
+            kids.add(tiles.get(id));
+        }
+        modes.getChildren().setAll(kids);
+
+        editHint.setVisible(editing);
+        editHint.setManaged(editing);
+        editButton.setText(NeoText.get(editing ? "menu.edit.done" : "menu.edit"));
+        editButton.getStyleClass().removeAll("btn-primary", "btn-secondary");
+        editButton.getStyleClass().add(editing ? "btn-primary" : "btn-secondary");
+        resetButton.setVisible(editing);
+        resetButton.setManaged(editing);
+        resetButton.setDisable(!MenuLayout.customized(defaults));
+    }
+
+    /** Pone o quita la capa de ordenar, y apaga la casilla si esta oculta. */
+    private void decorate(final String id, final Region tile) {
+        if (!(tile instanceof javafx.scene.layout.StackPane box)) {
+            return;
+        }
+        final Region layer = editLayers.computeIfAbsent(id, this::editLayer);
+        final boolean dim = editing && MenuLayout.isHidden(id);
+        box.getChildren().remove(layer);
+        for (final javafx.scene.Node n : box.getChildren()) {
+            n.setOpacity(dim ? 0.35 : 1);
+        }
+        if (editing) {
+            box.getChildren().add(layer);
+            refreshLayer(id, layer);
+        }
+    }
+
+    /**
+     * La capa de encima de una casilla mientras se ordena: tapa la casilla
+     * entera (asi un clic no entra en el modo), se arrastra, y abajo lleva las
+     * flechas y el boton de ocultar.
+     */
+    private Region editLayer(final String id) {
+        final boolean rtl = Rtl.on();
+        // En arabe la rejilla va de derecha a izquierda: "antes" esta a la derecha.
+        final Button earlier = layerButton(rtl ? "\u2192" : "\u2190", NeoText.get("menu.edit.earlier"));
+        final Button later = layerButton(rtl ? "\u2190" : "\u2192", NeoText.get("menu.edit.later"));
+        final Button hide = new Button();
+        hide.getStyleClass().add("menu-edit-button");
+        earlier.setOnAction(e -> {
+            MenuLayout.move(factoryOrder(), id, -1);
+            relayout();
+        });
+        later.setOnAction(e -> {
+            MenuLayout.move(factoryOrder(), id, 1);
+            relayout();
+        });
+        hide.setOnAction(e -> {
+            MenuLayout.setHidden(factoryOrder(), id, !MenuLayout.isHidden(id));
+            relayout();
+        });
+        final Label hiddenMark = new Label(NeoText.get("menu.edit.hidden"));
+        hiddenMark.getStyleClass().add("menu-edit-hidden");
+        // Arriba a la derecha, encima del dibujo: el titulo y la linea de abajo
+        // se siguen leyendo, y el dibujo es adorno.
+        final HBox bar = new HBox(UiScale.px(6), hiddenMark, earlier, later, hide);
+        bar.setAlignment(Pos.CENTER_RIGHT);
+        bar.setPadding(new Insets(UiScale.px(10)));
+        bar.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+
+        final javafx.scene.layout.StackPane layer = new javafx.scene.layout.StackPane(bar);
+        javafx.scene.layout.StackPane.setAlignment(bar, Pos.TOP_RIGHT);
+        layer.getStyleClass().add("menu-edit-layer");
+        layer.setUserData(new Object[] {hide, hiddenMark, earlier, later});
+        layer.setCursor(javafx.scene.Cursor.MOVE);
+        // La capa se come los clics: ordenando, una casilla no abre su modo.
+        layer.setOnMouseClicked(javafx.event.Event::consume);
+
+        // Arrastrar y soltar: la casilla va al sitio de aquella sobre la que se suelta.
+        layer.setOnDragDetected(e -> {
+            final javafx.scene.input.Dragboard db =
+                    layer.startDragAndDrop(javafx.scene.input.TransferMode.MOVE);
+            final javafx.scene.input.ClipboardContent content =
+                    new javafx.scene.input.ClipboardContent();
+            content.putString(id);
+            db.setContent(content);
+            final javafx.scene.SnapshotParameters sp = new javafx.scene.SnapshotParameters();
+            sp.setFill(javafx.scene.paint.Color.TRANSPARENT);
+            sp.setTransform(javafx.scene.transform.Transform.scale(0.5, 0.5));
+            db.setDragView(tiles.get(id).snapshot(sp, null), e.getX() / 2, e.getY() / 2);
+            dragging = id;
+            e.consume();
+        });
+        layer.setOnDragOver(e -> {
+            if (dragging != null && !dragging.equals(id)) {
+                e.acceptTransferModes(javafx.scene.input.TransferMode.MOVE);
+            }
+            e.consume();
+        });
+        layer.setOnDragEntered(e -> {
+            if (dragging != null && !dragging.equals(id)) {
+                layer.getStyleClass().add("menu-edit-drop");
+            }
+        });
+        layer.setOnDragExited(e -> layer.getStyleClass().remove("menu-edit-drop"));
+        layer.setOnDragDropped(e -> {
+            final boolean ok = dragging != null && !dragging.equals(id);
+            if (ok) {
+                MenuLayout.moveTo(factoryOrder(), dragging, id);
+            }
+            e.setDropCompleted(ok);
+            e.consume();
+            // Despues del evento: relayout cambia los hijos de la rejilla, y
+            // este nodo esta dentro.
+            if (ok) {
+                javafx.application.Platform.runLater(this::relayout);
+            }
+        });
+        layer.setOnDragDone(e -> dragging = null);
+        return layer;
+    }
+
+    /** Lo que cambia en la capa: ocultar o mostrar, y que flechas valen. */
+    private void refreshLayer(final String id, final Region layer) {
+        final Object[] parts = (Object[]) layer.getUserData();
+        final Button hide = (Button) parts[0];
+        final Label hiddenMark = (Label) parts[1];
+        final boolean hidden = MenuLayout.isHidden(id);
+        final java.util.List<String> all = MenuLayout.order(factoryOrder());
+        hide.setText(NeoText.get(hidden ? "menu.edit.show" : "menu.edit.hide"));
+        hide.setDisable(!MenuLayout.canHide(factoryOrder(), id));
+        hiddenMark.setVisible(hidden);
+        hiddenMark.setManaged(hidden);
+        ((Button) parts[2]).setDisable(all.indexOf(id) <= 0);
+        ((Button) parts[3]).setDisable(all.indexOf(id) >= all.size() - 1);
+    }
+
+    private static Button layerButton(final String glyph, final String tip) {
+        final Button b = new Button(glyph);
+        b.getStyleClass().add("menu-edit-button");
+        b.setTooltip(new javafx.scene.control.Tooltip(tip));
+        b.setAccessibleText(tip);
+        return b;
+    }
+
+    /** El clic derecho en una casilla: esconderla, o ponerse a ordenar. */
+    private void tileMenu(final String id, final Region tile, final double x, final double y) {
+        if (editing) {
+            return;
+        }
+        final javafx.scene.control.ContextMenu menu = new javafx.scene.control.ContextMenu();
+        menu.getStyleClass().add("card-menu");
+        final javafx.scene.control.MenuItem hide =
+                new javafx.scene.control.MenuItem(NeoText.get("menu.edit.hideThis"));
+        hide.setDisable(!MenuLayout.canHide(factoryOrder(), id));
+        hide.setOnAction(e -> {
+            MenuLayout.setHidden(factoryOrder(), id, true);
+            relayout();
+        });
+        final javafx.scene.control.MenuItem order =
+                new javafx.scene.control.MenuItem(NeoText.get("menu.edit") + "\u2026");
+        order.setOnAction(e -> {
+            editing = true;
+            relayout();
+        });
+        menu.getItems().addAll(hide, order);
+        menu.show(tile, x, y);
+    }
+
+    /**
+     * El desplegable de idioma de la primera pantalla.
+     *
+     * <p>Cambiar de idioma pide reiniciar — los nombres de carta se precargan
+     * antes de leer las cartas, ver {@link forge.neo.NeoLanguage} — asi que al
+     * elegir otro, el boton pasa a ensenyarlo y debajo sale el aviso. Es la
+     * unica pantalla donde el idioma se puede tocar ANTES de que importe.
+     *
+     * <p>Fue una fila con los diez idiomas a la vista hasta el 24-09-2026: tres
+     * lineas de botones que casi nadie toca mas de una vez, y que dejaban la
+     * rejilla sin sitio en 1080p. El menu reusa el estilo del de click derecho
+     * ({@code card-menu}).
+     */
+    private static Region languagePicker() {
+        final java.util.List<forge.neo.NeoLanguage.Option> langs =
+                forge.neo.NeoLanguage.available();
+        final String current = forge.neo.NeoLanguage.current();
+
+        final Button button = new Button();
+        button.getStyleClass().add("segment");
+        button.setMinWidth(Region.USE_PREF_SIZE);
+        button.setGraphicTextGap(6);
+        button.setTooltip(new javafx.scene.control.Tooltip(NeoText.get("menu.language")));
+        button.setAccessibleText(NeoText.get("menu.language"));
+
+        final Label note = new Label();
+        note.getStyleClass().add("home-subtitle");
+        note.setWrapText(true);
+        note.setVisible(false);
+        note.setManaged(false);
+
+        final javafx.scene.control.ContextMenu menu = new javafx.scene.control.ContextMenu();
+        menu.getStyleClass().add("card-menu");
+        final javafx.scene.control.ToggleGroup group = new javafx.scene.control.ToggleGroup();
+        for (final forge.neo.NeoLanguage.Option option : langs) {
+            final javafx.scene.control.RadioMenuItem item =
+                    new javafx.scene.control.RadioMenuItem(option.getLabel());
+            // La bandera AL LADO del nombre, no en vez de el: a este tamanyo hay
+            // banderas que se parecen mucho, y el nombre escrito en su propio
+            // idioma es lo que identifica de verdad. Ver FlagIcon.
+            item.setGraphic(FlagIcon.of(option.getId(), UiScale.px(12)));
+            item.setToggleGroup(group);
+            item.setSelected(option.getId().equals(current));
+            item.setOnAction(e -> {
+                forge.neo.NeoLanguage.set(option.getId());
+                showLanguage(button, option);
+                note.setText(NeoText.get("menu.language.restart", option.getLabel()));
+                note.setVisible(true);
+                note.setManaged(true);
+            });
+            menu.getItems().add(item);
+            if (option.getId().equals(current)) {
+                showLanguage(button, option);
+            }
+        }
+        if (button.getText() == null || button.getText().isEmpty()) {
+            button.setText(NeoText.get("menu.language"));
+        }
+        button.setOnAction(e -> menu.show(button, javafx.geometry.Side.BOTTOM, 0, 4));
+
+        final VBox box = new VBox(6, button, note);
+        box.setAlignment(Pos.CENTER_LEFT);
+        return box;
+    }
+
+    /** El boton del desplegable ensenya el idioma elegido y la flecha. */
+    private static void showLanguage(final Button button,
+                                     final forge.neo.NeoLanguage.Option option) {
+        button.setText(option.getLabel() + "  ▾");
+        button.setGraphic(FlagIcon.of(option.getId(), UiScale.px(12)));
+    }
+
+    /** La invitacion permanente al servidor de Discord de Neo Forge. */
+    static final String DISCORD_URL = "https://discord.gg/fF5Tn7Z2pv";
+
+    /**
+     * El logo de Discord, arriba a la derecha: abre la invitacion en el
+     * navegador.
+     *
+     * <p>Solo el logo, sin texto: es un simbolo que se reconoce solo, y en la
+     * fila de idiomas un boton con letras competiria con ellos. El tooltip dice
+     * lo que hace para quien no lo reconozca.
+     */
+    private static Button discordButton() {
+        // El logo oficial (brand assets de Discord), en su caja de 127x96.
+        final javafx.scene.shape.SVGPath logo = new javafx.scene.shape.SVGPath();
+        logo.setContent("M107.7,8.07A105.15,105.15,0,0,0,81.47,0a72.06,72.06,0,0,0-3.36,6.83"
+                + "A97.68,97.68,0,0,0,49,6.83,72.37,72.37,0,0,0,45.64,0,105.89,105.89,0,0,0,19.39,8.09"
+                + "C2.79,32.65-1.71,56.6.54,80.21h0A105.73,105.73,0,0,0,32.71,96.36,77.7,77.7,0,0,0,39.6,85.25"
+                + "a68.42,68.42,0,0,1-10.85-5.18c.91-.66,1.8-1.34,2.66-2a75.57,75.57,0,0,0,64.32,0"
+                + "c.87.71,1.76,1.39,2.66,2a68.68,68.68,0,0,1-10.87,5.19,77,77,0,0,0,6.89,11.1"
+                + "A105.25,105.25,0,0,0,126.6,80.22h0C129.24,52.84,122.09,29.11,107.7,8.07Z"
+                + "M42.45,65.69C36.18,65.69,31,60,31,53s5-12.74,11.43-12.74S54,46,53.89,53,48.84,65.69,42.45,65.69Z"
+                + "m42.24,0C78.41,65.69,73.25,60,73.25,53s5-12.74,11.44-12.74S96.23,46,96.12,53,91.08,65.69,84.69,65.69Z");
+        logo.getStyleClass().add("discord-logo");
+        // A 22 px de ancho. Se escala el nodo y se envuelve en un Group para
+        // que el layout mida lo que se ve, no la caja original de 127 px.
+        final double scale = 22 / 127.14;
+        logo.setScaleX(scale);
+        logo.setScaleY(scale);
+
+        final Button b = new Button();
+        b.setGraphic(new javafx.scene.Group(logo));
+        b.getStyleClass().add("discord-button");
+        b.setTooltip(new javafx.scene.control.Tooltip(NeoText.get("menu.discord")));
+        b.setAccessibleText(NeoText.get("menu.discord"));
+        b.setMinWidth(Region.USE_PREF_SIZE);
+        b.setOnAction(e -> {
+            try {
+                forge.gui.GuiBase.getInterface().browseToUrl(DISCORD_URL);
+            } catch (final Exception ex) {
+                System.err.println("[neo] no se ha podido abrir Discord: " + ex);
+            }
+        });
+        return b;
+    }
+
+    /** Las notas se miran una vez por arranque, aunque se vuelva al menu. */
+    private static boolean patchNotesChecked;
+
+    /** En las capturas (--snapshot) no se piden: una prueba no sale a la red. */
+    public static void skipPatchNotes() {
+        patchNotesChecked = System.getProperty("neo.patchnotes.version") == null;
+    }
+
+    /**
+     * Si esta version es mas nueva que la ultima cuyas notas se vieron, se piden
+     * a GitHub (una vez, en su hilo) y se ensenyan con "Apoya el proyecto".
+     * Sin marca y sin ser la primera vez = quien ya jugaba antes de que esto
+     * existiera: tambien se le ensenyan. {@code -Dneo.patchnotes.version=X}
+     * fuerza las de X (para capturarlo).
+     */
+    private void maybePatchNotes() {
+        if (patchNotesChecked) {
+            return;
+        }
+        patchNotesChecked = true;
+        final String forced = System.getProperty("neo.patchnotes.version");
+        final String current = forced != null ? forced : forge.neo.NeoVersion.neoVersion();
+        // La regla, la misma que Android: PatchNotes.due.
+        if (forced == null && !forge.neo.update.PatchNotes.due(current)) {
+            return;
+        }
+        forge.neo.update.PatchNotes.fetch(current, notes -> {
+            if (notes != null) {
+                javafx.application.Platform.runLater(() -> showPatchNotes(current, notes));
+            }
+        });
+    }
+
+    private void showPatchNotes(final String version, final String notes) {
+        if (getScene() == null) {
+            return;
+        }
+        // Dentro del propio menu, encima de todo y fuera de su reparto: un
+        // Popup seria otra ventana (ni la captura ni el CSS de la escena lo ven).
+        final javafx.scene.layout.StackPane shade = new javafx.scene.layout.StackPane();
+        final Runnable done = () -> {
+            getChildren().remove(shade);
+            forge.neo.update.PatchNotes.markSeen(version);
+        };
+        final ConfirmDialog dialog = new ConfirmDialog(
+                NeoText.get("update.notes.title", version),
+                notes + System.lineSeparator() + System.lineSeparator() + NeoText.get("update.notes.support"),
+                java.util.List.of(NeoText.get("update.notes.kofi"), NeoText.get("common.close")), 1,
+                i -> {
+                    if (i == 0) {
+                        try {
+                            forge.gui.GuiBase.getInterface().browseToUrl(KOFI_URL);
+                        } catch (final Exception e) {
+                            System.err.println("[neo] no se pudo abrir Ko-fi: " + e);
+                        }
+                    }
+                    done.run();
+                });
+        shade.getChildren().add(dialog);
+        shade.setStyle("-fx-background-color: rgba(0,0,0,0.6);");
+        shade.setManaged(false);
+        // Apoyar, con los colores de Ko-fi como su boton del menu: que se vea.
+        // El de por defecto sigue siendo Cerrar (un Intro por inercia no abre
+        // el navegador).
+        dialog.option(0).setStyle("-fx-background-color: #29abe0; -fx-text-fill: white;"
+                + " -fx-font-weight: bold;");
+        final Runnable fit = () -> shade.resizeRelocate(0, 0, getWidth(), getHeight());
+        widthProperty().addListener((o, a, b) -> fit.run());
+        heightProperty().addListener((o, a, b) -> fit.run());
+        getChildren().add(shade);
+        fit.run();
+        System.out.println("[neo] notas del parche de " + version + " a la vista");
+    }
+
+    /** La pagina de Ko-fi de Neo Forge, donde se dona. */
+    static final String KOFI_URL = "https://ko-fi.com/dokkodolabs";
+
+    /**
+     * El logo de Ko-fi, el ultimo de la fila: abre la pagina para donar.
+     *
+     * <p>Pedido por Ana el 10-10-2026: un boton dentro del juego es la forma
+     * mas directa de que alguien done, y la pagina ya sale al final de cada
+     * devlog. Mismo tamanyo y forma que los otros dos; el azul de los botones
+     * de Ko-fi y no su rojo, que al lado del de itch.io no se distinguiria.
+     * El dibujo es el de Simple Icons (CC0), en su caja de 24x24, como el de
+     * itch.io.
+     */
+    static Button kofiButton() {
+        final javafx.scene.shape.SVGPath logo = new javafx.scene.shape.SVGPath();
+        logo.setContent("M23.881 8.948c-.773-4.085-4.859-4.593-4.859-4.593H.723c-.604 0-.679.798-.679.798"
+                + "s-.082 7.324-.022 11.822c.164 2.424 2.586 2.672 2.586 2.672s8.267-.023 11.966-.049"
+                + "c2.438-.426 2.683-2.566 2.658-3.734 4.352.24 7.422-2.831 6.649-6.916zm-11.062 3.511"
+                + "c-1.246 1.453-4.011 3.976-4.011 3.976s-.121.119-.31.023c-.076-.057-.108-.09-.108-.09"
+                + "-.443-.441-3.368-3.049-4.034-3.954-.709-.965-1.041-2.7-.091-3.71.951-1.01 3.005-1.086 "
+                + "4.363.407 0 0 1.565-1.782 3.468-.963 1.904.82 1.832 3.011.723 4.311zm6.173.478"
+                + "c-.928.116-1.682.028-1.682.028V7.284h1.77s1.971.551 1.971 2.638c0 1.913-.985 2.667"
+                + "-2.059 3.015z");
+        logo.getStyleClass().add("kofi-logo");
+        // El corazon en el rojo de Ko-fi, encima del hueco que deja la taza: es
+        // lo que hace que se reconozca (Ana: "usa los colores y logo de kofi
+        // para que se identifique bien"). Es el mismo trazo del corazon del
+        // dibujo, en absoluto.
+        final javafx.scene.shape.SVGPath heart = new javafx.scene.shape.SVGPath();
+        heart.setContent("M12.819 12.459c-1.246 1.453-4.011 3.976-4.011 3.976s-.121.119-.31.023"
+                + "c-.076-.057-.108-.09-.108-.09-.443-.441-3.368-3.049-4.034-3.954-.709-.965-1.041-2.7"
+                + "-.091-3.71.951-1.01 3.005-1.086 4.363.407 0 0 1.565-1.782 3.468-.963 1.904.82 1.832 "
+                + "3.011.723 4.311z");
+        heart.getStyleClass().add("kofi-heart");
+        // Los dos en el mismo grupo y se escala el grupo: escalados cada uno
+        // por su lado, cada uno lo haria desde su propio centro y el corazon
+        // se saldria de la taza. Con el mismo alto que Discord e itch.io.
+        final javafx.scene.Group cup = new javafx.scene.Group(logo, heart);
+        final double scale = (22 * 96.36 / 127.14) / 14.5;
+        cup.setScaleX(scale);
+        cup.setScaleY(scale);
+
+        final Button b = new Button();
+        b.setGraphic(new javafx.scene.Group(cup));
+        b.getStyleClass().add("kofi-button");
+        b.setTooltip(new javafx.scene.control.Tooltip(NeoText.get("menu.kofi")));
+        b.setAccessibleText(NeoText.get("menu.kofi"));
+        b.setMinWidth(Region.USE_PREF_SIZE);
+        b.setOnAction(e -> {
+            try {
+                forge.gui.GuiBase.getInterface().browseToUrl(KOFI_URL);
+            } catch (final Exception ex) {
+                System.err.println("[neo] no se ha podido abrir Ko-fi: " + ex);
+            }
+        });
+        return b;
+    }
+
+    /**
+     * El logo de itch.io, al lado del de Discord: abre la pagina del juego.
+     *
+     * <p>Pedido el 28-09-2026 junto con el aviso de version nueva. Mismo
+     * tamanyo y misma forma que el de Discord, con el rojo de itch.io. El
+     * dibujo es el de Simple Icons (CC0), en su caja de 24x24.
+     */
+    static Button itchButton() {
+        final javafx.scene.shape.SVGPath logo = new javafx.scene.shape.SVGPath();
+        logo.setContent("M3.13 1.338C2.08 1.96.02 4.328 0 4.95v1.03c0 1.303 1.22 2.45 2.325 2.45 "
+                + "1.33 0 2.436-1.102 2.436-2.41 0 1.308 1.07 2.41 2.4 2.41 1.328 0 2.362-1.102 "
+                + "2.362-2.41 0 1.308 1.137 2.41 2.466 2.41h.024c1.33 0 2.466-1.102 2.466-2.41 0 "
+                + "1.308 1.034 2.41 2.363 2.41 1.33 0 2.4-1.102 2.4-2.41 0 1.308 1.106 2.41 2.435 "
+                + "2.41C22.78 8.43 24 7.282 24 5.98V4.95c-.02-.62-2.082-2.99-3.13-3.612-3.253-.114"
+                + "-5.508-.134-8.87-.133-3.362 0-7.945.053-8.87.133zm6.376 6.477a2.74 2.74 0 0 1-.468"
+                + ".602c-.5.49-1.19.795-1.947.795a2.786 2.786 0 0 1-1.95-.795c-.182-.178-.32-.37-.446"
+                + "-.59-.127.222-.303.412-.486.59a2.788 2.788 0 0 1-1.95.795c-.092 0-.187-.025-.264"
+                + "-.052-.107 1.113-.152 2.176-.168 2.95v.005l-.006 1.167c.02 2.334-.23 7.564 1.03 "
+                + "8.85 1.952.454 5.545.662 9.15.663 3.605 0 7.198-.21 9.15-.664 1.26-1.284 1.01"
+                + "-6.514 1.03-8.848l-.006-1.167v-.004c-.016-.775-.06-1.838-.168-2.95-.077.026-.172"
+                + ".052-.263.052a2.788 2.788 0 0 1-1.95-.795c-.184-.178-.36-.368-.486-.59-.127.22"
+                + "-.265.412-.447.59a2.786 2.786 0 0 1-1.95.794c-.76 0-1.446-.303-1.948-.793a2.74 "
+                + "2.74 0 0 1-.468-.602 2.738 2.738 0 0 1-.463.602 2.787 2.787 0 0 1-1.95.794h-.16"
+                + "a2.787 2.787 0 0 1-1.95-.793 2.738 2.738 0 0 1-.464-.602zm-2.004 2.59v.002c.795"
+                + ".002 1.5 0 2.373.953.687-.072 1.406-.108 2.125-.107.72 0 1.438.035 2.125.107.873"
+                + "-.953 1.578-.95 2.372-.953.376 0 1.876 0 2.92 2.934l1.123 4.028c.832 2.995-.266 "
+                + "3.068-1.636 3.07-2.03-.075-3.156-1.55-3.156-3.025-1.124.184-2.436.276-3.748.277"
+                + "-1.312 0-2.624-.093-3.748-.277 0 1.475-1.125 2.95-3.156 3.026-1.37-.004-2.468"
+                + "-.077-1.636-3.072l1.122-4.027c1.045-2.934 2.545-2.934 2.92-2.934zM12 12.714c"
+                + "-.002.002-2.14 1.964-2.523 2.662l1.4-.056v1.22c0 .056.56.033 1.123.007.562.026 "
+                + "1.124.05 1.124-.008v-1.22l1.4.055C14.138 14.677 12 12.713 12 12.713z");
+        logo.getStyleClass().add("itch-logo");
+        // El dibujo mide 21,5 de alto; asi sale con el mismo alto que el de
+        // Discord (22 px de ancho en su caja de 127x96) y los dos botones
+        // quedan iguales.
+        final double scale = (22 * 96.36 / 127.14) / 21.5;
+        logo.setScaleX(scale);
+        logo.setScaleY(scale);
+
+        final Button b = new Button();
+        b.setGraphic(new javafx.scene.Group(logo));
+        b.getStyleClass().add("itch-button");
+        b.setTooltip(new javafx.scene.control.Tooltip(NeoText.get("menu.itch")));
+        b.setAccessibleText(NeoText.get("menu.itch"));
+        b.setMinWidth(Region.USE_PREF_SIZE);
+        b.setOnAction(e -> openItch());
+        return b;
+    }
+
+    private static void openItch() {
+        try {
+            forge.gui.GuiBase.getInterface().browseToUrl(forge.neo.update.NeoUpdate.PAGE_URL);
+        } catch (final Exception ex) {
+            System.err.println("[neo] no se ha podido abrir itch.io: " + ex);
+        }
+    }
+
+    /**
+     * Lo que se sabe de la version nueva, puesto en el pie y en el boton de
+     * itch.io. Se llama al montar el menu y otra vez cuando contesta itch.io.
+     *
+     * <p>El puntito sale mientras haya una mas nueva, aunque se le haya dado
+     * "Ahora no": asi el aviso deja de estorbar pero no desaparece del todo.
+     */
+    private static void showUpdate(final HBox box, final Button itch,
+                                   final javafx.scene.shape.Circle dot) {
+        final String newer = forge.neo.update.NeoUpdate.newer();
+        final String offer = forge.neo.update.NeoUpdate.offer();
+        dot.setVisible(newer != null);
+        final String tip = newer == null ? NeoText.get("menu.itch")
+                : NeoText.get("menu.itch.newer", newer);
+        itch.getTooltip().setText(tip);
+        itch.setAccessibleText(tip);
+
+        box.getChildren().clear();
+        box.getStyleClass().remove("update-done");
+        if (showSelfUpdate(box, itch, dot, offer)) {
+            box.setVisible(true);
+            box.setManaged(true);
+            return;
+        }
+        box.setVisible(offer != null);
+        box.setManaged(offer != null);
+        if (offer == null) {
+            return;
+        }
+        final Label text = new Label(NeoText.get("update.available", offer));
+        text.getStyleClass().add("update-banner-text");
+        text.setMinWidth(0);
+        final Button open = new Button(NeoText.get("update.open"));
+        open.getStyleClass().add("update-open");
+        open.setMinWidth(Region.USE_PREF_SIZE);
+        open.setOnAction(e -> openItch());
+        final Button later = new Button(NeoText.get("update.later"));
+        later.getStyleClass().add("update-later");
+        later.setMinWidth(Region.USE_PREF_SIZE);
+        later.setOnAction(e -> {
+            forge.neo.update.NeoUpdate.dismiss(offer);
+            showUpdate(box, itch, dot);
+        });
+        if (forge.neo.update.UpdateFlow.available()) {
+            // Actualizar desde dentro: solo Windows y el paquete del .exe.
+            final Button install = new Button(NeoText.get("update.install"));
+            install.getStyleClass().add("update-install");
+            install.setMinWidth(Region.USE_PREF_SIZE);
+            install.setOnAction(e -> forge.neo.update.UpdateFlow.start(offer));
+            box.getChildren().addAll(text, install, open, later);
+        } else {
+            box.getChildren().addAll(text, open, later);
+        }
+    }
+
+    /**
+     * El aviso mientras "Actualizar ahora" esta en marcha, listo, fallado o
+     * recien hecho ({@link forge.neo.update.UpdateFlow}). Devuelve si lo ha
+     * pintado; si no, va el aviso de siempre.
+     */
+    private static boolean showSelfUpdate(final HBox box, final Button itch,
+                                          final javafx.scene.shape.Circle dot, final String offer) {
+        final forge.neo.update.UpdateFlow.State st = forge.neo.update.UpdateFlow.state();
+        if (st == forge.neo.update.UpdateFlow.State.IDLE) {
+            return false;
+        }
+        final Label text = new Label(forge.neo.update.UpdateFlow.text());
+        text.getStyleClass().add("update-banner-text");
+        text.setMinWidth(0);
+        // Un fallo se explica en una frase larga ("no se ha cambiado nada,
+        // tus datos estan bien, bajalo de itch.io"): se parte en lineas en vez
+        // de cortarse con "..." (principio 5).
+        text.setWrapText(true);
+        text.setMaxWidth(UiScale.px(520));
+        box.getChildren().add(text);
+        switch (st) {
+            case WORKING -> {
+                final javafx.scene.control.ProgressBar bar =
+                        new javafx.scene.control.ProgressBar(forge.neo.update.UpdateFlow.fraction());
+                bar.getStyleClass().add("update-progress");
+                final Button cancel = new Button(NeoText.get("update.cancel"));
+                cancel.getStyleClass().add("update-later");
+                cancel.setMinWidth(Region.USE_PREF_SIZE);
+                cancel.setOnAction(e -> forge.neo.update.UpdateFlow.cancel());
+                box.getChildren().addAll(bar, cancel);
+            }
+            case READY -> {
+                if (forge.neo.update.UpdateFlow.isRestarting()) {
+                    break;
+                }
+                final Button restart = new Button(NeoText.get("update.restart"));
+                restart.getStyleClass().add("update-install");
+                restart.setMinWidth(Region.USE_PREF_SIZE);
+                restart.setOnAction(e -> forge.neo.update.UpdateFlow.restart());
+                box.getChildren().add(restart);
+            }
+            case FAILED, DONE -> {
+                if (st == forge.neo.update.UpdateFlow.State.DONE) {
+                    box.getStyleClass().add("update-done");
+                } else {
+                    // Para que nos lo puedan pasar (Ana): el informe al
+                    // portapapeles, listo para pegarlo en Discord.
+                    final String details = forge.neo.update.UpdateFlow.details();
+                    if (details != null) {
+                        final Button copy = new Button(NeoText.get("update.copyDetails"));
+                        copy.getStyleClass().add("update-later");
+                        copy.setMinWidth(Region.USE_PREF_SIZE);
+                        copy.setOnAction(e -> {
+                            forge.gui.GuiBase.getInterface().copyToClipboard(details);
+                            copy.setText(NeoText.get("update.copied"));
+                        });
+                        box.getChildren().add(copy);
+                    }
+                    final Button open = new Button(NeoText.get("update.open"));
+                    open.getStyleClass().add("update-open");
+                    open.setMinWidth(Region.USE_PREF_SIZE);
+                    open.setOnAction(e -> openItch());
+                    box.getChildren().add(open);
+                }
+                final Button ok = new Button(NeoText.get("common.accept"));
+                ok.getStyleClass().add("update-later");
+                ok.setMinWidth(Region.USE_PREF_SIZE);
+                ok.setOnAction(e -> {
+                    forge.neo.update.UpdateFlow.reset();
+                    showUpdate(box, itch, dot);
+                });
+                box.getChildren().add(ok);
+            }
+            default -> {
+            }
+        }
+        return true;
+    }
+
+    /**
+     * La letra pequenya del tutorial.
+     *
+     * <p>Mientras quede algo por hacer dice para que sirve — no cuantas
+     * lecciones hay, que a quien acaba de llegar no le dice nada. Cuando ya
+     * estan las tres, pasa a decir eso, porque entonces la pregunta que se hace
+     * quien lo mira es otra: "esto ya lo hice?".
+     */
+    private static String tutorialNote() {
+        return forge.neo.tutorial.NeoTutorial.allDone()
+                ? NeoText.get("menu.tutorial.done")
+                : NeoText.get("menu.tutorial.note");
+    }
+
+    /** Lo que hay puesto ahora mismo, para que la casilla diga algo util. */
+    private static String lookNote() {
+        final String name = forge.neo.look.NeoLook.playerName();
+        return name.isBlank() ? forge.neo.NeoText.get("menu.look.note")
+                : forge.neo.NeoText.get("menu.look.noteName", name);
+    }
+
+    /**
+     * Cuantos logros llevas, en la propia casilla.
+     *
+     * <p>Es el dato que hace que se entre: un "34 de 412" invita a mirar, y
+     * "Logros" a secas no dice si hay algo dentro.
+     */
+    private static String achievementNote() {
+        final int[] totals = forge.neo.NeoAchievements.totals(
+                forge.neo.NeoAchievements.all());
+        return NeoText.get("menu.achievements.note", totals[0], totals[1]);
+    }
+
+    /** Si hay una aventura empezada, la casilla dice cuantas tienes. */
+    /**
+     * La casilla de Ascenso dice por donde vas.
+     *
+     * <p>Que el menu sepa que hay una run a medias — y en que acto y con
+     * cuanta vida — es lo que hace que se vuelva a ella. Sin eso, "Ascenso" es
+     * una casilla que no distingue entre empezar y continuar, que son las dos
+     * cosas mas distintas que hay en este modo.
+     */
+    private static String ascentNote() {
+        final forge.neo.ascent.AscentRun run = forge.neo.ascent.AscentRun.current();
+        if (run != null) {
+            return NeoText.get("menu.ascent.running", run.getAct(), run.getLife());
+        }
+        final int max = forge.neo.ascent.AscentUnlocks.maxAscension();
+        return max > 0 ? NeoText.get("menu.ascent.ascension", max)
+                : NeoText.get("menu.ascent.none");
+    }
+
+    private static String questNote() {
+        final java.util.List<String> saves = forge.neo.quest.NeoQuest.saves();
+        if (saves.isEmpty()) {
+            return NeoText.get("menu.quest.none");
+        }
+        return saves.size() == 1
+                ? NeoText.get("menu.quest.one")
+                : NeoText.get("menu.quest.many", saves.size());
+    }
+
+    /** Si hay un draft a medias, la casilla lo dice en vez de invitar a otro. */
+    private static String sealedNote() {
+        final forge.neo.draft.DraftRun run =
+                forge.neo.draft.DraftRun.current(forge.neo.draft.DraftRun.Kind.SEALED);
+        return limitedNote(run, forge.neo.draft.DraftRun.Kind.SEALED, "menu.sealed.none");
+    }
+
+    private static String draftNote() {
+        return limitedNote(forge.neo.draft.DraftRun.current(),
+                forge.neo.draft.DraftRun.Kind.DRAFT, "menu.draft.none");
+    }
+
+    /**
+     * Como va el ultimo evento abierto; y si ese ya no esta (se borro), cuantos
+     * hay guardados. Decir "empieza uno nuevo" con otros guardados mandaria al
+     * jugador a buscar algo que el menu le dice que no existe.
+     */
+    private static String limitedNote(final forge.neo.draft.DraftRun current,
+                                      final forge.neo.draft.DraftRun.Kind kind,
+                                      final String noneKey) {
+        if (current != null) {
+            return NeoText.get("menu.draft.running", current.getWins(), current.getLosses());
+        }
+        final int saved = forge.neo.draft.DraftRun.saved(kind).size();
+        return saved == 0 ? NeoText.get(noneKey) : NeoText.get("menu.limited.saved", saved);
+    }
+
+    /** Si hay un torneo a medias o recien terminado, la casilla lo dice. */
+    private static String tournamentNote() {
+        final forge.neo.tournament.NeoTournament t = forge.neo.tournament.NeoTournament.current();
+        if (t == null) {
+            return NeoText.get("menu.tournament.none");
+        }
+        if (t.isOver()) {
+            return NeoText.get("menu.tournament.done");
+        }
+        return NeoText.get("menu.tournament.running", t.currentRoundIndex() + 1, t.totalRounds());
+    }
+
+    /**
+     * La tarjeta de un {@link NeoFormat} — cuantos mazos tienes de ese
+     * formato, en la propia casilla.
+     *
+     * <p>Antes esto salia de un bucle sobre {@code NeoFormat.values()} en el
+     * orden del enum; ahora el orden lo decide esta pantalla a mano (aventura
+     * y torneo promovidos por delante de Brawl/Oathbreaker), asi que cada
+     * formato se coloca donde toca con su propia llamada.
+     */
+    private static Region formatTile(final NeoFormat format, final Actions actions) {
+        final int count = format.decks().size();
+        final ModeArt.Mode art = format == NeoFormat.COMMANDER ? ModeArt.Mode.COMMANDER
+                : format == NeoFormat.BRAWL ? ModeArt.Mode.BRAWL
+                : format == NeoFormat.OATHBREAKER ? ModeArt.Mode.OATHBREAKER
+                : ModeArt.Mode.STANDARD;
+        return modeCard(art, format.getLabel(), format.getDescription(),
+                count == 0 ? NeoText.get("menu.noDecks") : NeoText.get("menu.deckCount", count),
+                true, () -> actions.play(format));
+    }
+
+    /**
+     * Reparte el ancho entre las tarjetas: tantas columnas como quepan con al
+     * menos {@code MIN_CARD} cada una (texto y dibujo), hasta {@code MAX_COLS},
+     * y la fila llena de lado a lado. En una pantalla entera son cuatro; en una
+     * ventana a media pantalla, dos; en una muy estrecha, una.
+     *
+     * @param viewport el ancho del visor con desplazamiento (ver quien lo llama)
+     */
+    private static void fitCards(final FlowPane modes, final double viewport) {
+        final double w = viewport - modes.getPadding().getLeft() - modes.getPadding().getRight();
+        if (w <= 0) {
+            return;
+        }
+        final double gap = modes.getHgap();
+        final int cols = (int) Math.max(1, Math.min(MAX_COLS, Math.floor((w + gap) / (UiScale.px(MIN_CARD) + gap))));
+        final double card = Math.min(UiScale.px(MAX_CARD), Math.floor((w - gap * (cols - 1)) / cols) - 1);
+        for (final javafx.scene.Node n : modes.getChildren()) {
+            if (n instanceof Region r && r.getStyleClass().contains("mode-card")) {
+                r.setPrefWidth(card);
+                r.setMaxWidth(card);
+            }
+        }
+    }
+
+    private static final double MIN_CARD = 330;
+    private static final double MAX_CARD = 480;
+    private static final int MAX_COLS = 4;
+
+    /** Lo alto que llega a ser el dibujo: con mas texto la tarjeta crece, el dibujo no. */
+    private static final double MAX_ART = 150;
+
+    /** El radio de las esquinas: el del recorte y el del borde, el MISMO. */
+    private static final double RADIUS = 12;
+
+    /**
+     * El fondo de la tarjeta si el CSS aun no lo ha puesto: el {@code -neo-panel}
+     * de siempre. Lo normal es leerlo de la propia tarjeta ({@link #panelOf}), y
+     * asi el velo sigue al token si alguien lo cambia.
+     */
+    private static final javafx.scene.paint.Color PANEL = javafx.scene.paint.Color.web("#1B212A");
+
+    /**
+     * <b>La tarjeta de un modo, como la de Android</b> (Discord, 09-10-2026:
+     * <i>"The android layout seems vivid while the PC one feels like an old
+     * version of the same program"</i>). Es la {@code TarjetaDeModo} de Android:
+     * un dibujo por modo ({@link ModeArt}) que sale por la derecha con el halo de
+     * sus colores detras, el texto a la izquierda sobre un velo que lo mantiene
+     * legible, un hilo de luz del color del modo en el canto de arriba y el borde
+     * del mismo color, que se enciende al pasar el raton.
+     *
+     * <p>Lo que se queda del PC, y es a proposito: la linea de debajo dice lo que
+     * hay DENTRO (cuantos mazos tienes, la run a medias, si las lecciones estan
+     * hechas), que vale mas que la etiqueta fija de Android; va del color del
+     * modo y con sus puntos de color delante.
+     *
+     * <p>El dibujo es un {@code Canvas} que se repinta al cambiar de tamanyo o de
+     * estado, no en cada fotograma: el menu no anima nada. En arabe la escena va
+     * de derecha a izquierda y el texto se va a la derecha; el lienzo NO se
+     * espeja solo, asi que {@link #paintCard} lo espeja.
+     */
+    private static Region modeCard(final ModeArt.Mode mode, final String name, final String description,
+                                   final String footnote, final boolean enabled, final Runnable action) {
+        final Label title = new Label(name);
+        title.getStyleClass().add("mode-card-name");
+        // Que parta antes que cortarse con "...": un titulo largo en una
+        // tarjeta estrecha no tendria otra salida (principio 5).
+        title.setWrapText(true);
+
+        final Label desc = new Label(description);
+        desc.getStyleClass().add("mode-card-desc");
+        desc.setWrapText(true);
+
+        final Label note = new Label(footnote);
+        note.getStyleClass().add("mode-card-note");
+        note.setWrapText(true);
+        note.setStyle("-fx-text-fill: " + rgba(mode.tint(), 0.92) + ";");
+
+        // Los puntos de sus colores: el modo se acaba reconociendo por su
+        // color, igual que un mazo.
+        final HBox dots = new HBox(UiScale.px(4));
+        for (final javafx.scene.paint.Color c : mode.colors()) {
+            dots.getChildren().add(new javafx.scene.shape.Circle(UiScale.px(4.5), enabled ? c
+                    : ModeArt.alpha(c, 0.4)));
+        }
+        dots.setAlignment(Pos.CENTER_LEFT);
+        dots.setMinWidth(Region.USE_PREF_SIZE);
+        final HBox foot = new HBox(UiScale.px(8), dots, note);
+        foot.setAlignment(Pos.CENTER_LEFT);
+
+        final Region gap = new Region();
+        VBox.setVgrow(gap, javafx.scene.layout.Priority.ALWAYS);
+        final VBox text = new VBox(UiScale.px(5), title, desc, gap, foot);
+        text.setAlignment(Pos.TOP_LEFT);
+
+        final javafx.scene.canvas.Canvas art = new javafx.scene.canvas.Canvas();
+        art.setManaged(false);
+        art.setMouseTransparent(true);
+
+        final javafx.scene.layout.StackPane box = new javafx.scene.layout.StackPane(art, text);
+        box.getStyleClass().add("mode-card");
+        javafx.scene.layout.StackPane.setAlignment(text, Pos.TOP_LEFT);
+        box.setPrefWidth(UiScale.px(MAX_CARD));
+        box.setMinHeight(UiScale.px(140));
+        final javafx.scene.shape.Rectangle clip = new javafx.scene.shape.Rectangle();
+        clip.setArcWidth(UiScale.px(RADIUS * 2));
+        clip.setArcHeight(UiScale.px(RADIUS * 2));
+        box.setClip(clip);
+
+        final Runnable paint = () -> {
+            final double w = box.getWidth();
+            final double h = box.getHeight();
+            art.setWidth(w);
+            art.setHeight(h);
+            clip.setWidth(w);
+            clip.setHeight(h);
+            // El hueco del dibujo sale de SU tamanyo, que no crece con el texto.
+            // Si saliera del alto de la tarjeta, una descripcion larga la haria
+            // mas alta, eso estrecharia el texto, saldrian mas lineas... y como
+            // el FlowPane iguala las filas, la de al lado tambien. Y nunca mas
+            // del 40% del ancho: lo que no quepa lo tapa el velo, no el titulo.
+            final double room = Math.min(artSize(h) * 0.66, w * 0.40);
+            text.setPadding(new Insets(UiScale.px(16), room, UiScale.px(14), UiScale.px(20)));
+            paintCard(art, mode, enabled, box.isHover() && enabled,
+                    box.getEffectiveNodeOrientation() == javafx.geometry.NodeOrientation.RIGHT_TO_LEFT,
+                    panelOf(box));
+        };
+        box.layoutBoundsProperty().addListener((o, a, b) -> paint.run());
+        box.hoverProperty().addListener((o, a, b) -> paint.run());
+
+        if (enabled) {
+            // Solo el boton principal: el derecho abre el menu de la casilla.
+            box.setOnMouseClicked(e -> {
+                if (e.getButton() == javafx.scene.input.MouseButton.PRIMARY) {
+                    action.run();
+                }
+            });
+        } else {
+            box.setDisable(true);
+        }
+        return box;
+    }
+
+    private static double artSize(final double h) {
+        return Math.min(h, UiScale.px(MAX_ART));
+    }
+
+    /** El fondo que el CSS le ha puesto a la tarjeta ({@code -neo-panel}), o el de fabrica. */
+    private static javafx.scene.paint.Color panelOf(final Region r) {
+        final javafx.scene.layout.Background bg = r.getBackground();
+        if (bg != null && !bg.getFills().isEmpty()
+                && bg.getFills().get(0).getFill() instanceof javafx.scene.paint.Color c) {
+            return c;
+        }
+        return PANEL;
+    }
+
+    /**
+     * El fondo de una tarjeta: halos, dibujo, velo, el hilo de luz de arriba y
+     * el borde. El borde va AQUI y no en el CSS: un {@code Region} pinta su
+     * borde antes que sus hijos, y el lienzo (casi opaco bajo el texto) lo tapaba
+     * en tres cuartas partes de la tarjeta.
+     */
+    private static void paintCard(final javafx.scene.canvas.Canvas c, final ModeArt.Mode mode,
+                                  final boolean enabled, final boolean glow, final boolean rtl,
+                                  final javafx.scene.paint.Color panel) {
+        final javafx.scene.canvas.GraphicsContext g = c.getGraphicsContext2D();
+        final double w = c.getWidth();
+        final double h = c.getHeight();
+        g.clearRect(0, 0, w, h);
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+        // En arabe el texto va a la derecha y el dibujo tiene que irse a la
+        // izquierda: el lienzo NO se espeja solo (se probo), asi que se espeja
+        // aqui, entero, como hace Android con su graphicsLayer.
+        g.save();
+        if (rtl) {
+            g.translate(w, 0);
+            g.scale(-1, 1);
+        }
+        final double f = enabled ? 1 : 0.35;
+        final double lit = glow ? 1 : 0;
+        final double a = artSize(h);
+        final double cx = w - a * 0.40;
+        final double cy = h * 0.52;
+        // Un halo por color, un poco desplazados: un modo de dos colores se ve
+        // de dos colores, y no de su mezcla (que suele ser barro).
+        final java.util.List<javafx.scene.paint.Color> colors = mode.colors();
+        final double radius = a * 0.95;
+        for (int i = 0; i < colors.size(); i++) {
+            final double dx = (i - (colors.size() - 1) / 2.0) * a * 0.35;
+            final javafx.scene.paint.Color col = colors.get(i);
+            g.setFill(new javafx.scene.paint.RadialGradient(0, 0, cx + dx, cy, radius, false,
+                    javafx.scene.paint.CycleMethod.NO_CYCLE,
+                    new javafx.scene.paint.Stop(0, ModeArt.alpha(col, (0.30 + 0.20 * lit) * f)),
+                    new javafx.scene.paint.Stop(1, ModeArt.alpha(col, 0))));
+            g.fillOval(cx + dx - radius, cy - radius, radius * 2, radius * 2);
+        }
+        ModeArt.draw(g, mode, cx, cy, a * 0.64, mode.ink().interpolate(javafx.scene.paint.Color.WHITE, 0.15),
+                panel, f);
+        // El velo del texto: de opaco a la izquierda a nada pasado el centro.
+        g.setFill(new javafx.scene.paint.LinearGradient(0, 0, w, 0, false,
+                javafx.scene.paint.CycleMethod.NO_CYCLE,
+                new javafx.scene.paint.Stop(0, ModeArt.alpha(panel, 0.92)),
+                new javafx.scene.paint.Stop(0.45, ModeArt.alpha(panel, 0.70)),
+                new javafx.scene.paint.Stop(0.75, ModeArt.alpha(panel, 0))));
+        g.fillRect(0, 0, w, h);
+        // La luz de arriba: un hilo del color del modo en el canto superior,
+        // que es lo que da a la tarjeta canto de objeto.
+        final javafx.scene.paint.Color tint = mode.tint();
+        g.setStroke(new javafx.scene.paint.LinearGradient(0, 0, w, 0, false,
+                javafx.scene.paint.CycleMethod.NO_CYCLE,
+                new javafx.scene.paint.Stop(0, ModeArt.alpha(tint, 0)),
+                new javafx.scene.paint.Stop(0.5, ModeArt.alpha(tint, 0.6 * f)),
+                new javafx.scene.paint.Stop(1, ModeArt.alpha(tint, 0))));
+        g.setLineWidth(1.5);
+        g.strokeLine(0, 0.75, w, 0.75);
+        g.restore();
+        // El borde, del color del modo; se enciende al pasar el raton. Con el
+        // mismo radio que el recorte, o en 2K la esquina salia mordida.
+        final double lw = UiScale.px(1.5);
+        final double arc = UiScale.px(RADIUS * 2) - lw;
+        g.setStroke(ModeArt.alpha(tint, !enabled ? 0.25 : glow ? 0.95 : 0.55));
+        g.setLineWidth(lw);
+        g.strokeRoundRect(lw / 2, lw / 2, w - lw, h - lw, arc, arc);
+    }
+
+    private static String rgba(final javafx.scene.paint.Color c, final double a) {
+        return String.format(java.util.Locale.ROOT, "rgba(%d,%d,%d,%.2f)", (int) Math.round(c.getRed() * 255),
+                (int) Math.round(c.getGreen() * 255), (int) Math.round(c.getBlue() * 255), a);
+    }
+
+}

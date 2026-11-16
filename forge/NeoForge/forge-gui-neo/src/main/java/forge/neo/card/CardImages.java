@@ -1,0 +1,1352 @@
+package forge.neo.card;
+
+import java.io.File;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import forge.ImageKeys;
+import forge.gui.GuiBase;
+import forge.item.PaperCard;
+import forge.util.ImageUtil;
+import javafx.application.Platform;
+import javafx.scene.image.Image;
+
+/**
+ * Resuelve la imagen de una carta y la cachea ya decodificada.
+ *
+ * <p>REGLA DE RENDIMIENTO: decodificar un JPEG cuesta milisegundos; hacerlo por
+ * frame hunde los fps. Aqui se decodifica UNA vez por clave y se reutiliza el
+ * objeto {@link Image}, que JavaFX sube a textura por su cuenta.
+ *
+ * <p>Flujo para una clave de imagen:
+ * <ol>
+ *   <li>Si esta en cache, se devuelve.</li>
+ *   <li>Si {@link ImageKeys#getImageFile} encuentra el fichero en disco, se
+ *       carga en segundo plano.</li>
+ *   <li>Si no, se pide a {@code ImageFetcher} que la baje de Scryfall y se
+ *       avisa cuando llegue.</li>
+ * </ol>
+ * Mientras tanto {@link #get} devuelve {@code null} y quien pinta debe usar el
+ * dibujo procedural de respaldo.
+ */
+public final class CardImages {
+
+    private CardImages() {
+    }
+
+    /**
+     * Cuantas imagenes se guardan a la vez.
+     *
+     * <p>400 es el mismo numero que trae Forge de fabrica
+     * ({@code FPref.UI_IMAGE_CACHE_MAXIMUM}). A 1,27 MB cada una son unos
+     * 500 MB en el peor caso, que dentro de {@code -Xmx2g} deja sitio de sobra
+     * para el motor y las 33.696 cartas.
+     *
+     * <p>Es un numero fijo y <b>no se lee de las preferencias de Forge a
+     * proposito</b>: esta clase se toca muy pronto y {@code FModel} puede no
+     * estar inicializado todavia, asi que preguntarle aqui seria cambiar un
+     * problema de memoria por uno de orden de arranque.
+     */
+    private static final int MAX_CACHED = 400;
+
+    /**
+     * Las imagenes ya decodificadas, <b>con techo</b>.
+     *
+     * <p><b>Por que hay techo.</b> Esto era un {@code ConcurrentHashMap} que
+     * solo se vaciaba al cambiar el idioma del arte, o sea que crecia sin
+     * limite durante toda la sesion. Y no es poca cosa: una carta de Scryfall
+     * son 488x680, que en disco ocupa unos 75 KB pero <b>decodificada son
+     * 1,27 MB</b> — lo que ocupa es el mapa de bits, no el fichero. Con
+     * {@code -Xmx2g} eso da unas <b>1.400 cartas distintas por sesion</b>
+     * antes de quedarse sin memoria, y pasear por la coleccion de una aventura
+     * o paginar el catalogo del deck builder pasa de 1.400 sin despeinarse.
+     *
+     * <p>No es un invento nuestro: es lo que hace Forge en
+     * {@code forge-gui-desktop/src/main/java/forge/ImageCache.java}, con el
+     * mismo {@code CacheBuilder}, el mismo tope por defecto y la misma
+     * caducidad por falta de uso.
+     *
+     * <p><b>Expulsar una imagen que esta en pantalla no la borra de la
+     * pantalla.</b> El {@code ImageView} que la pinta guarda su propia
+     * referencia, asi que la carta se sigue viendo; lo unico que se suelta es
+     * NUESTRA copia. Y volver a necesitarla es barato porque {@link #load}
+     * mira el disco antes que la red: se vuelve a leer el fichero, no se
+     * vuelve a descargar. Por eso esto no puede provocar ni parpadeos ni
+     * enfriamientos de Scryfall.
+     *
+     * <p>Ademas de contarlas, {@code softValues()}: si aun asi faltara
+     * memoria, el recolector puede llevarse imagenes que nadie esta mirando
+     * antes que tirar la aplicacion. El techo es la regla, esto es la red.
+     */
+    private static final com.google.common.cache.Cache<String, Image> CACHE =
+            com.google.common.cache.CacheBuilder.newBuilder()
+                    .maximumSize(MAX_CACHED)
+                    .expireAfterAccess(15, java.util.concurrent.TimeUnit.MINUTES)
+                    .softValues()
+                    .build();
+
+    private static final Set<String> PENDING = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Las que no llegaron, <b>con la hora a la que se dejo de intentar</b>.
+     *
+     * <p>Antes esto era un conjunto y era un billete sin vuelta: una carta que
+     * cayera aqui se quedaba sin arte <b>el resto de la sesion</b>, aunque el
+     * motivo fuera pasajero. Y casi siempre lo es — Scryfall sirve <b>una
+     * peticion cada 100 ms</b>, asi que una pagina del catalogo o el principio
+     * de una partida meten decenas de imagenes en cola y muchas ni se llegan a
+     * pedir antes de que salte el vigilante. Reportado jugando: <i>"nuevo mazo,
+     * ¿por que no veo mis artes?"</i>.
+     *
+     * <p>Ahora se abandona <b>por ahora</b>: pasado {@link #RETRY_FAILED_MS},
+     * la siguiente vez que alguien pida esa carta se vuelve a intentar desde
+     * cero. Como quien pinta la pide en cada refresco, las que estan en
+     * pantalla se recuperan solas.
+     */
+    private static final Map<String, Long> FAILED = new ConcurrentHashMap<>();
+
+    /**
+     * Las que de verdad no tienen imagen que pedir. Estas si son para siempre.
+     *
+     * <p>Es el unico caso honesto de "no lo vuelvas a intentar": cartas sin
+     * numero de coleccionista o personalizadas, que no existen impresas. Ver
+     * {@link #cannotBeDownloaded}.
+     */
+    private static final Set<String> NO_IMAGE = ConcurrentHashMap.newKeySet();
+
+    /** Cuanto se deja pasar antes de darle otra oportunidad a una imagen. */
+    private static final long RETRY_FAILED_MS = 90_000;
+
+    /**
+     * Traduce una CLAVE de imagen a la RUTA del fichero.
+     *
+     * <p>Esto es facil de pasar por alto y sin ello no se ve ni una imagen:
+     * {@code CardStateView.getImageKey()} devuelve una clave de busqueda del
+     * tipo {@code c:Cabal Coffers|MB2|1}, pero {@link ImageKeys#getImageFile}
+     * espera una ruta relativa del tipo {@code MB2/Cabal Coffers.full.jpg}.
+     * Pasarle la clave sin traducir hace que no encuentre nada y, peor, que la
+     * apunte en su cache negativa para siempre.
+     */
+    private static String toFilename(final String imageKey) {
+        if (imageKey == null || !imageKey.startsWith(ImageKeys.CARD_PREFIX)) {
+            // Una ficha sin expansion se busca con la suya: ver TokenKeys.
+            return TokenKeys.complete(imageKey);
+        }
+        try {
+            final PaperCard pc = ImageUtil.getPaperCardFromImageKey(imageKey);
+            if (pc == null) {
+                return imageKey;
+            }
+            return imageKey.endsWith(ImageKeys.BACKFACE_POSTFIX)
+                    ? pc.getCardAltImageKey()
+                    : pc.getCardImageKey();
+        } catch (final Exception e) {
+            return imageKey;
+        }
+    }
+
+    /**
+     * La impresion exacta en disco, por calidades: la elegida en Ajustes y si
+     * falta, la mejor que haya (ImageQuality.lookupOrder). Las fichas y lo que
+     * no es una carta, solo en la normal.
+     */
+    private static File findOnDisk(final String imageKey) {
+        if (imageKey == null || !imageKey.startsWith(ImageKeys.CARD_PREFIX)) {
+            return ImageKeys.getImageFile(toFilename(imageKey));
+        }
+        for (final ImageQuality q : ImageQuality.lookupOrder()) {
+            final File f = exactOnDisk(q, imageKey);
+            if (f != null) {
+                return f;
+            }
+        }
+        return null;
+    }
+
+    private static File exactOnDisk(final ImageQuality q, final String imageKey) {
+        final File f = q == ImageQuality.NORMAL ? ImageKeys.getImageFile(toFilename(imageKey))
+                : q.exactFile(toFilename(imageKey));
+        return f != null && f.exists() ? f : null;
+    }
+
+    /**
+     * La imagen en el idioma del juego, si ya esta bajada.
+     *
+     * <p>Va aparte de {@link #findOnDisk} porque {@code ImageKeys} solo mira en
+     * la carpeta de Forge, que compartimos con la instalacion normal del
+     * usuario. Ver {@link CardArt}.
+     */
+    private static File findLocalized(final String imageKey) {
+        if (!CardArt.isLocalized()) {
+            return null;
+        }
+        final File f = CardArt.fileFor(toFilename(imageKey));
+        return f != null && f.exists() ? f : null;
+    }
+
+    /** Cartas a las que ya se les ha pedido el arte traducido en esta sesion. */
+    private static final Set<String> LOCALIZED_ASKED = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Se avisa aqui (en el hilo de JavaFX) cuando han llegado imagenes nuevas.
+     *
+     * <p><b>No lleva la clave, y es a proposito.</b> Quien escucha repinta el
+     * arbol entero — no sabe que nodo mira que carta — asi que una llamada por
+     * imagen es una pasada por el arbol por imagen. Importando un mazo de 97
+     * cartas eso son 97 barridos completos de la pantalla, y en el hilo de
+     * interfaz: la aplicacion se arrastra justo mientras estan llegando las
+     * imagenes, que es cuando peor sienta. Ahora se agrupan; ver
+     * {@link #NOTIFY_GAP}.
+     */
+    public interface Listener {
+        void imagesReady();
+    }
+
+    private static final Set<Listener> LISTENERS = ConcurrentHashMap.newKeySet();
+
+    public static void addListener(final Listener l) {
+        LISTENERS.add(l);
+    }
+
+    public static void removeListener(final Listener l) {
+        LISTENERS.remove(l);
+    }
+
+    /**
+     * La imagen que hay AHORA en la cache para esa clave, o {@code null}, sin
+     * pedirla si no esta. La usa {@code CardNode} para enterarse de que un
+     * respaldo se ha cambiado por la imagen buena (ver alli).
+     */
+    public static Image peek(final String imageKey) {
+        return NONE_FOR_TEST || imageKey == null || imageKey.isEmpty() ? null : CACHE.getIfPresent(imageKey);
+    }
+
+    /** Solo pruebas: como si no hubiera ninguna imagen (la carta sin imagen, TypeIcons). */
+    private static final boolean NONE_FOR_TEST = Boolean.getBoolean("neo.images.none");
+
+    /**
+     * Imagen ya disponible para esta clave, o {@code null}.
+     * Si no esta, dispara la carga/descarga en segundo plano.
+     */
+    public static Image get(final String imageKey) {
+        if (NONE_FOR_TEST || imageKey == null || imageKey.isEmpty()) {
+            return null;
+        }
+        final Image cached = CACHE.getIfPresent(imageKey);
+        if (cached != null) {
+            return cached;
+        }
+        if (NO_IMAGE.contains(imageKey)) {
+            return null;
+        }
+        final Long gaveUpAt = FAILED.get(imageKey);
+        if (gaveUpAt != null) {
+            if (System.currentTimeMillis() - gaveUpAt < RETRY_FAILED_MS) {
+                return null;
+            }
+            // Otra oportunidad, y con el contador a cero: lo que fallo casi
+            // nunca era la carta, era la cola.
+            FAILED.remove(imageKey);
+            TRIES.remove(imageKey);
+            if (DEBUG) {
+                System.out.println("[neo-img] otra oportunidad para " + imageKey);
+            }
+        }
+        if (!PENDING.add(imageKey)) {
+            return null;
+        }
+        watch(imageKey);
+        load(imageKey);
+        return null;
+    }
+
+    // ---------------------------------------------------------------
+    // El vigilante: que "pedida" no signifique nunca "olvidada"
+    // ---------------------------------------------------------------
+
+    /**
+     * Cuanto se le da a una peticion antes de darla por perdida.
+     *
+     * <p>Generoso a proposito: Scryfall va a una peticion cada 100 ms y en una
+     * tanda grande hay cola. Esto no es un tiempo de espera de red, es el
+     * plazo tras el cual se acepta que <b>no va a llegar aviso ninguno</b>.
+     */
+    private static final long WATCHDOG_MS = 20_000;
+
+    /** Cuantas veces se vuelve a intentar una imagen que no llego. */
+    private static final int MAX_TRIES = 3;
+
+    private static final Map<String, Integer> TRIES = new ConcurrentHashMap<>();
+
+    /**
+     * Vigila una peticion, porque <b>puede no contestar nunca</b>.
+     *
+     * <p>Aqui estaba el fallo de "busco una carta y no carga". {@code PENDING}
+     * era un billete de ida: se anotaba la clave y se confiaba en que el aviso
+     * de descarga llegara para quitarla. Pero {@code ImageFetcher.fetchImage}
+     * se vuelve por donde ha venido <b>sin llamar al callback</b> en varios
+     * casos, y uno de ellos es el que salta justo despues de importar un mazo:
+     * si Scryfall nos ha limitado (429), {@code setupObserver} descarta la
+     * peticion y se queda en un enfriamiento (lo que diga el <b>Retry-After</b>). La clave
+     * se quedaba en {@code PENDING} para siempre, y como {@link #get} no vuelve
+     * a intentar lo que ya esta pedido, esa carta salia en blanco <b>el resto
+     * de la sesion</b> — incluso pasado el enfriamiento, incluso buscandola a
+     * mano. Sin un solo mensaje de error.
+     *
+     * <p>Asi que a los {@value #WATCHDOG_MS} ms sin imagen se suelta la clave y
+     * se pide un repintado, que hace que quien la necesite la vuelva a pedir.
+     * Hasta {@value #MAX_TRIES} veces: una carta que de verdad no tiene imagen
+     * no puede quedarse reintentando para siempre. Y mientras dure el
+     * enfriamiento de Scryfall <b>el intento no cuenta</b>, porque no se ha
+     * llegado a preguntar nada.
+     */
+    /**
+     * El plazo real, que <b>crece con la cola</b>.
+     *
+     * <p>Scryfall se sirve a una peticion cada 100 ms pase lo que pase, asi que
+     * con cincuenta imagenes pedidas la ultima tarda cinco segundos solo en
+     * <i>intentarse</i>. Con un plazo fijo, abrir el catalogo o empezar una
+     * partida marcaba como imposibles un monton de cartas por las que no se
+     * habia llegado a preguntar. El plazo no mide la red: mide cuanto se
+     * espera antes de aceptar que <b>no va a llegar aviso ninguno</b>, y eso
+     * depende de cuantos haya delante.
+     */
+    private static long watchdogMs() {
+        return Math.min(MAX_WATCHDOG_MS, WATCHDOG_MS + PENDING.size() * 150L);
+    }
+
+    /** Techo del plazo: mas alla de esto ya no se esta esperando, se cuelga. */
+    private static final long MAX_WATCHDOG_MS = 150_000;
+
+    private static void watch(final String imageKey) {
+        TIMER.schedule(() -> {
+            if (CACHE.getIfPresent(imageKey) != null || !PENDING.contains(imageKey)) {
+                return;
+            }
+            if (coolingDown()) {
+                watch(imageKey);
+                return;
+            }
+            final int tries = TRIES.merge(imageKey, 1, Integer::sum);
+            PENDING.remove(imageKey);
+            if (tries >= MAX_TRIES) {
+                giveUpForNow(imageKey);
+                if (DEBUG) {
+                    System.out.println("[neo-img] me rindo POR AHORA con " + imageKey
+                            + " (se reintenta en " + (RETRY_FAILED_MS / 1000) + "s)");
+                }
+                return;
+            }
+            if (DEBUG) {
+                System.out.println("[neo-img] sin respuesta, reintento " + tries
+                        + " de " + imageKey);
+            }
+            scheduleRepaint();
+        }, watchdogMs(), java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Cartas para las que <b>no hay imagen que pedir</b>, y se sabe de antemano.
+     *
+     * <p>Algunas de Alchemy no tienen numero de coleccionista ni edicion de
+     * papel: no existen impresas. (Las rebalanceadas que SI lo tienen, como
+     * {@code AFR A-9}, se pueden bajar: ver {@link RebalancedArt}.) {@code ImageFetcher} lo
+     * comprueba, escribe <i>"does not have a collector number, skipping
+     * scryfall download"</i> y <b>se vuelve sin avisar a nadie</b>. Se pregunta
+     * aqui la misma condicion para no montar una descarga que ya sabemos que no
+     * va a ninguna parte — y sobre todo para que el vigilante no se pase un
+     * minuto reintentandolas.
+     */
+    private static boolean cannotBeDownloaded(final String imageKey) {
+        if (imageKey == null || !imageKey.startsWith(ImageKeys.CARD_PREFIX)) {
+            return false;
+        }
+        try {
+            final PaperCard pc = ImageUtil.getPaperCardFromImageKey(imageKey);
+            return pc != null && (pc.getRules().isCustom()
+                    || forge.item.IPaperCard.NO_COLLECTOR_NUMBER.equals(pc.getCollectorNumber()));
+        } catch (final Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Abandona esta imagen <b>por ahora</b>, no para siempre.
+     *
+     * <p>La diferencia es todo el arreglo: ver {@link #FAILED}.
+     */
+    private static void giveUpForNow(final String imageKey) {
+        FAILED.put(imageKey, System.currentTimeMillis());
+    }
+
+    /** Si Scryfall nos ha cortado y estamos esperando a que se le pase. */
+    private static boolean coolingDown() {
+        return GuiBase.getInterface().getImageFetcher()
+                instanceof forge.neo.platform.NeoImageFetcher neo && neo.isCoolingDown();
+    }
+
+    /**
+     * Cuantos segundos quedan de enfriamiento de Scryfall, o 0 si no hay
+     * ninguno en marcha.
+     *
+     * <p>Lo usa {@link forge.neo.ui.ImageCooldownBadge} para avisar en
+     * pantalla: sin esto, un corte real de Scryfall (HTTP 429, lo que dure
+     * sin descargas — ver {@link #FAILED}) se ve identico a un fallo nuestro,
+     * cartas sin arte y ni una pista de por que. Reportado jugando: <i>"nuevo
+     * mazo, le doy a jugar, y las cartas no tienen arte"</i>.
+     */
+    public static long coolingDownSecondsLeft() {
+        return GuiBase.getInterface().getImageFetcher()
+                instanceof forge.neo.platform.NeoImageFetcher neo ? neo.coolingDownSecondsLeft() : 0;
+    }
+
+    public static boolean isCached(final String imageKey) {
+        return imageKey != null && CACHE.getIfPresent(imageKey) != null;
+    }
+
+    /** Si ya se ha avisado de que la cache toco techo. */
+    private static final java.util.concurrent.atomic.AtomicBoolean CEILING_LOGGED =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    /**
+     * Deja constancia, UNA vez, de que la cache ha llegado a su tope.
+     *
+     * <p>Es la unica forma de comprobar que el techo funciona sin montar
+     * andamiaje: se juega un rato, se pasea por el catalogo y se mira el
+     * registro. Si la linea sale, la cache esta expulsando; si no sale, es que
+     * en esa sesion no se llegaron a ver {@value #MAX_CACHED} cartas distintas
+     * y por tanto no habia nada que expulsar.
+     *
+     * <p>Y si algun dia se reporta <i>"las cartas se quedan en blanco"</i>,
+     * esta linea es lo primero que hay que mirar: dice si el problema empieza
+     * justo cuando la cache empieza a soltar imagenes.
+     */
+    private static void noteCeiling() {
+        if (CACHE.size() >= MAX_CACHED && CEILING_LOGGED.compareAndSet(false, true)) {
+            System.out.printf("[neo-img] cache llena: %d imagenes, a partir de ahora"
+                    + " se sueltan las que menos se usan%n", MAX_CACHED);
+        }
+    }
+
+    public static int cacheSize() {
+        return (int) CACHE.size();
+    }
+
+    /**
+     * Lo que ocupan, decodificadas, las imagenes que hay ahora en la cache
+     * (ancho x alto x 4 bytes). Para medir, no para decidir nada:
+     * {@code -Dneo.fx.bench=true}.
+     */
+    public static long cachedBytes() {
+        long total = 0;
+        for (final Image im : CACHE.asMap().values()) {
+            if (im != null) {
+                total += (long) im.getWidth() * (long) im.getHeight() * 4L;
+            }
+        }
+        return total;
+    }
+
+    /**
+     * Tira la cache y vuelve a empezar.
+     *
+     * <p>Solo hace falta al cambiar el idioma del arte: las imagenes ya
+     * decodificadas son de otro idioma, y sin esto seguirian en pantalla hasta
+     * reiniciar. Tambien se limpia {@code FAILED}, porque una carta que no
+     * existia en un idioma puede existir en el otro.
+     */
+    public static void clear() {
+        CACHE.invalidateAll();
+        // Y las copias nitidas, que son de las originales que se acaban de tirar.
+        SCALED.invalidateAll();
+        FAILED.clear();
+        NO_IMAGE.clear();
+        LOCALIZED_ASKED.clear();
+        TRIES.clear();
+    }
+
+    /**
+     * Busca la imagen, y si hace falta la pide.
+     *
+     * <p><b>El orden importa y no es obvio.</b> Jugando en castellano, la carta
+     * castellana manda; pero si todavia no esta bajada, lo que NO se puede
+     * hacer es dejar la mesa en blanco mientras Scryfall contesta — y menos
+     * teniendo la inglesa ahi al lado. Asi que:
+     *
+     * <ol>
+     *   <li>Si esta la traducida, esa.</li>
+     *   <li>Si no, se pide — y <b>mientras tanto se ensenya la inglesa</b> si
+     *       la hay. Cuando llegue la traducida, {@code imageReady} repinta y la
+     *       carta se cambia sola.</li>
+     *   <li>Si no hay ninguna de las dos, el camino de siempre.</li>
+     * </ol>
+     */
+    private static void load(final String imageKey) {
+        // Mirar el disco es I/O: fuera del hilo de interfaz.
+        final Runnable job = () -> {
+            try {
+                // Las tuyas primero (pics/own): ganan a todo. Ver OfflineArt.own.
+                final File own = OfflineArt.own(imageKey, false);
+                if (own != null && own.exists()) {
+                    decode(imageKey, own);
+                    return;
+                }
+                final File localized = findLocalized(imageKey);
+                if (localized != null) {
+                    decode(imageKey, localized);
+                    return;
+                }
+
+                final boolean askLocalized = CardArt.isLocalized()
+                        && LOCALIZED_ASKED.add(imageKey);
+
+                // Calidad a calidad (ImageQuality): primero la elegida — su
+                // impresion exacta y si no, su arte por nombre —, y si no hay
+                // nada, la mejor de las otras. Asi, quien se baja todo en
+                // maxima juega en maxima aunque tenga la normal de antes.
+                File file = null;
+                boolean fallback = false;
+                for (final ImageQuality q : ImageQuality.lookupOrder()) {
+                    final File exact = imageKey.startsWith(ImageKeys.CARD_PREFIX)
+                            ? exactOnDisk(q, imageKey) : (q == ImageQuality.NORMAL ? findOnDisk(imageKey) : null);
+                    if (exact != null && exact.exists()) {
+                        file = exact;
+                        break;
+                    }
+                    // Sin la impresion exacta: el arte bajado de antemano para
+                    // jugar sin internet, si esta. Ver OfflineArt.
+                    final File art = OfflineArt.find(imageKey, false, q.artDir());
+                    if (art != null && art.exists()) {
+                        file = art;
+                        fallback = true;
+                        break;
+                    }
+                }
+                if (file != null && file.exists()) {
+                    decode(imageKey, file);
+                    // ⚠️ EL RESPALDO SE PINTA, PERO NO CUENTA COMO TERMINADO.
+                    //
+                    // OfflineArt es UNA imagen por NOMBRE.  Antes, en cuanto
+                    // aparecia, se pintaba y aqui se acababa todo: la impresion
+                    // exacta no se pedia nunca, y como ya habia algo en CACHE,
+                    // get() no volvia a buscar.  O sea que a quien tuviera el
+                    // arte sin conexion, las doce impresiones de Baleful Strix
+                    // le salian con el mismo dibujo PARA SIEMPRE - reportado en
+                    // Mac el 23-09-2026, con captura del selector de impresion.
+                    // Android tuvo el mismo fallo y se arreglo igual (decision
+                    // 109 de alli).
+                    //
+                    // Ahora se ensenya el respaldo mientras tanto - para eso
+                    // esta - y ademas se pide la exacta; cuando llega,
+                    // resolveAfterDownload la pone encima y la carta se cambia
+                    // sola.  Sin internet la descarga falla y se queda el
+                    // respaldo, que es exactamente lo que tiene que pasar.
+                    final boolean exact = fallback && !cannotBeDownloaded(imageKey);
+                    if (askLocalized) {
+                        requestLocalized(imageKey, exact);
+                    } else if (exact) {
+                        requestDownload(imageKey);
+                    }
+                    return;
+                }
+                if (cannotBeDownloaded(imageKey)) {
+                    PENDING.remove(imageKey);
+                    NO_IMAGE.add(imageKey);
+                    return;
+                }
+                if (askLocalized) {
+                    // Sin nada que ensenyar: se intenta la traducida y, la
+                    // haya o no, se sigue con el camino de siempre.
+                    requestLocalized(imageKey);
+                } else {
+                    requestDownload(imageKey);
+                }
+            } catch (final Exception e) {
+                if (DEBUG) {
+                    System.out.println("[neo-img] fallo buscando " + imageKey + ": " + e);
+                }
+                PENDING.remove(imageKey);
+                giveUpForNow(imageKey);
+            }
+        };
+        LOADERS.submit(job);
+    }
+
+    /**
+     * Los hilos que buscan y piden imagenes. <b>Pocos, y a proposito.</b>
+     *
+     * <p>Antes se lanzaba un hilo suelto por imagen. Con una carta en pantalla
+     * da igual; al importar un mazo de 97 son 97 hilos que se ponen a la vez a
+     * dar vueltas por el disco — y buscar una imagen que <i>no esta</i> no es
+     * barato: {@code ImageKeys.getImageFile} prueba una docena de variantes de
+     * nombre y encima puede encolar una busqueda por edicion en
+     * {@code ThreadUtil.getServicePool()}, que es <b>el mismo pool que hace las
+     * descargas</b>. O sea que buscar acaba compitiendo con descargar.
+     *
+     * <p>Y no se pierde nada teniendolos contados: Scryfall se sirve a una
+     * peticion cada 100 ms pase lo que pase ({@code ImageFetcher.paceScryfall}),
+     * asi que mas hilos no traen ni una imagen antes.
+     */
+    private static final java.util.concurrent.ExecutorService LOADERS =
+            java.util.concurrent.Executors.newFixedThreadPool(4, r -> {
+                final Thread t = new Thread(r, "neo-img-load");
+                t.setDaemon(true);
+                return t;
+            });
+
+    /**
+     * Pide la descarga a Forge.
+     *
+     * <p>OJO: {@code ImageFetcher.fetchImage} hace
+     * {@code FThreads.assertExecutedByEdt(true)} — SOLO se puede llamar desde el
+     * hilo de interfaz, o lanza {@code IllegalStateException}. La descarga en si
+     * la hace el fetcher en su propio pool, asi que llamarlo desde el hilo de UI
+     * no bloquea nada.
+     */
+    /**
+     * Pide el arte en el idioma del juego.
+     *
+     * <p>El {@code whenDone} se llama pase lo que pase, y es donde se decide:
+     * si ha llegado la traducida, se cambia por ella; si no y no habia nada que
+     * ensenyar, se sigue con la descarga de siempre.
+     */
+    private static void requestLocalized(final String imageKey) {
+        requestLocalized(imageKey, false);
+    }
+
+    /**
+     * @param alsoExact lo que hay puesto es el RESPALDO por nombre
+     *                  ({@link OfflineArt}), no la impresion: si no llega la
+     *                  traducida, hay que pedir la exacta aunque la cache ya
+     *                  tenga algo.  Ver {@link #load}.
+     */
+    private static void requestLocalized(final String imageKey, final boolean alsoExact) {
+        final forge.util.ImageFetcher fetcher = GuiBase.getInterface().getImageFetcher();
+        if (!(fetcher instanceof forge.neo.platform.NeoImageFetcher neo)) {
+            requestDownload(imageKey);
+            return;
+        }
+        neo.fetchLocalized(imageKey, () -> {
+            final File f = findLocalized(imageKey);
+            if (f != null) {
+                decode(imageKey, f);
+                return;
+            }
+            if (alsoExact || CACHE.getIfPresent(imageKey) == null) {
+                // No habia nada puesto, o lo puesto era el respaldo: toca el
+                // camino normal.
+                requestDownload(imageKey);
+            }
+        });
+    }
+
+    private static void requestDownload(final String imageKey) {
+        // Las rebalanceadas de Arena (A-...) ya no estan en la API de Scryfall
+        // ni en su indice, pero sus fotos siguen en la CDN: se piden directas
+        // con el identificador que llevamos nosotros. Ver RebalancedArt.
+        if (requestRebalanced(imageKey)) {
+            return;
+        }
+        // Las mascotas de la Quest: Forge tiene su arte pero no lo pide en
+        // partida (busca en otra lista). Ver PetArt.
+        if (requestPet(imageKey)) {
+            return;
+        }
+        GuiBase.getInterface().invokeInEdtLater(() -> {
+            try {
+                GuiBase.getInterface().getImageFetcher().fetchImage(TokenKeys.complete(imageKey),
+                        () -> resolveAfterDownload(imageKey));
+            } catch (final Exception e) {
+                System.err.println("[neo] no se pudo pedir la imagen " + imageKey + ": " + e);
+                PENDING.remove(imageKey);
+                giveUpForNow(imageKey);
+            }
+        });
+    }
+
+    /**
+     * Pide una rebalanceada a la CDN, si la tabla la conoce.
+     *
+     * <p>Al mismo fichero que dejaria {@code ImageFetcher.fetchImage}
+     * ({@link #downloadedFile} lo busca ahi), para que Forge y la cache de
+     * siempre la encuentren luego sin saber nada de esto.
+     *
+     * @return {@code false} si no es una rebalanceada que tengamos: que siga
+     *         el camino normal
+     */
+    private static boolean requestRebalanced(final String imageKey) {
+        final String url = RebalancedArt.cdnUrl(imageKey);
+        if (url == null
+                || !(GuiBase.getInterface().getImageFetcher() instanceof forge.neo.platform.NeoImageFetcher neo)
+                || !forge.model.FModel.getPreferences().getPrefBoolean(
+                        forge.localinstance.properties.ForgePreferences.FPref.UI_ENABLE_ONLINE_IMAGE_FETCHER)) {
+            return false;
+        }
+        final String name = toFilename(imageKey);
+        if (name == null || name.isEmpty()) {
+            return false;
+        }
+        final File dest = new File(forge.localinstance.properties.ForgeConstants.CACHE_CARD_PICS_DIR, name + ".jpg");
+        neo.fetchDirect(url, dest.getPath(), ok -> {
+            if (ok) {
+                resolveAfterDownload(imageKey);
+            } else {
+                PENDING.remove(imageKey);
+                giveUpForNow(imageKey);
+            }
+        });
+        return true;
+    }
+
+    /**
+     * El arte de una mascota de la Quest, directo a la carpeta de tokens de
+     * Forge, que es donde {@code ImageKeys} la busca luego.
+     *
+     * @return {@code false} si no es una mascota: que siga el camino normal
+     */
+    private static boolean requestPet(final String imageKey) {
+        final String url = PetArt.urlFor(imageKey);
+        if (url == null
+                || !(GuiBase.getInterface().getImageFetcher() instanceof forge.neo.platform.NeoImageFetcher neo)
+                || !forge.model.FModel.getPreferences().getPrefBoolean(
+                        forge.localinstance.properties.ForgePreferences.FPref.UI_ENABLE_ONLINE_IMAGE_FETCHER)) {
+            return false;
+        }
+        final File dest = new File(PetArt.folder(), PetArt.fileFor(imageKey));
+        neo.fetchDirect(url, dest.getPath(), ok -> {
+            if (ok) {
+                resolveAfterDownload(imageKey);
+            } else {
+                PENDING.remove(imageKey);
+                giveUpForNow(imageKey);
+            }
+        });
+        return true;
+    }
+
+    /**
+     * Donde deja el fichero una descarga que acaba de terminar.
+     *
+     * <p>Se calcula igual que {@code ImageFetcher.fetchImage}: la carpeta de
+     * cartas de Forge mas {@code getCardImageKey()}. Y la variante
+     * {@code .fullborder}, porque Scryfall sirve la carta con borde completo y
+     * {@code doFetch} renombra el destino al guardarla.
+     */
+    private static File downloadedFile(final String imageKey) {
+        final String name = toFilename(imageKey);
+        if (name == null || name.isEmpty()) {
+            return null;
+        }
+        // Por calidades, como load(): la elegida primero. Solo en la normal,
+        // en "alta" la imagen recien bajada (que doFetch deja en cards-large)
+        // perdia contra la normal que ya hubiera, y se seguia viendo esa.
+        for (final ImageQuality q : ImageQuality.lookupOrder()) {
+            final File dir = q.cardsDir();
+            for (final String candidate : new String[] {
+                    name.replace(".full", ".fullborder") + ".jpg",
+                    name + ".jpg",
+                    // Y el recorte de arte, que es otra preferencia del jugador
+                    // (UI_CARD_ART_FORMAT) y deja otro nombre de fichero.
+                    name.replace(".full", ".artcrop") + ".jpg"}) {
+                final File f = new File(dir, candidate);
+                if (f.exists()) {
+                    return f;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Coge la imagen recien descargada.
+     *
+     * <p><b>Se mira el fichero directamente, y no es un atajo: era el
+     * problema.</b> El aviso solo llega cuando la descarga ha ido <i>bien</i>,
+     * asi que el fichero esta puesto — lo que pasa es que {@code ImageKeys} no
+     * lo sabe: lleva dos caches negativas ({@code missingCards} y
+     * {@code toFind}) que siguen diciendo "no esta". La version anterior lo
+     * resolvia llamando a {@code clearMissingCards()} en un bucle de hasta 8
+     * intentos con 350 ms de espera. Con una carta, invisible; con un mazo
+     * entero, 97 hilos vaciando <b>a la vez</b> una cache global que es de
+     * todos — asi que cada busqueda de cada carta volvia a hacer el recorrido
+     * completo por el disco, y encima cada fallo encola una busqueda por
+     * edicion en el pool que hace las descargas. Las imagenes tardaban una
+     * eternidad justamente por lo que se hizo para que aparecieran antes.
+     *
+     * <p>Si aun asi no aparece — otra fuente que no sea Scryfall, un nombre
+     * raro — se cae al camino de siempre, una vez y sin bucle.
+     */
+    /** El camino de siempre: vaciar la cache negativa y preguntar a Forge. */
+    private static boolean lookUpOnDisk(final String imageKey) {
+        ImageKeys.clearMissingCards();
+        final File f = findOnDisk(imageKey);
+        if (f != null && f.exists()) {
+            decode(imageKey, f);
+            return true;
+        }
+        return false;
+    }
+
+    private static void resolveAfterDownload(final String imageKey) {
+        LOADERS.submit(() -> {
+            final File direct = downloadedFile(imageKey);
+            if (direct != null) {
+                decode(imageKey, direct);
+                return;
+            }
+            if (lookUpOnDisk(imageKey)) {
+                return;
+            }
+            // Un solo reintento, y ESPERANDO EN EL RELOJ, no en un hilo de
+            // carga: la unica cache que no se puede vaciar desde fuera es
+            // `toFind`, que se limpia sola en cuanto termina la busqueda por
+            // edicion que la puso. Dormir aqui ataria uno de los cuatro hilos
+            // que estan sacando las demas imagenes.
+            TIMER.schedule(() -> LOADERS.submit(() -> {
+                if (!lookUpOnDisk(imageKey)) {
+                    PENDING.remove(imageKey);
+                    giveUpForNow(imageKey);
+                }
+            }), 300, java.util.concurrent.TimeUnit.MILLISECONDS);
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // Volver a bajar la imagen, SOLO si Scryfall ya la tiene en HD
+    // ---------------------------------------------------------------
+
+    /** Lo que ha pasado al pedir otra vez la imagen. */
+    public enum Refresh {
+        /** Habia HD y ya esta puesta. */
+        UPDATED,
+        /** Scryfall todavia no la tiene en alta: no se ha tocado nada. */
+        NOT_YET,
+        /** Sin red, o la descarga no llego: no se ha tocado nada. */
+        OFFLINE,
+        /** Scryfall nos esta limitando: no se ha tocado nada. */
+        BUSY,
+        /** Esta carta no se pide a Scryfall (propia, sin numero...). */
+        UNSUPPORTED
+    }
+
+    /**
+     * <b>Vuelve a bajar la imagen de esta carta si Scryfall ya la tiene en
+     * HD</b>, y si no, no toca nada.
+     *
+     * <p>Pregunta en itch.io (29-09-2026): Scryfall pone una imagen provisional
+     * mientras no tiene el escaneo bueno, y una vez bajada la cache no vuelve a
+     * mirar nunca. Se pide primero la ficha de ESA impresion — la misma url que
+     * usa Forge para la imagen, con {@code format=json} —, y solo si dice
+     * {@code highres_image: true} se descarga encima. La descarga escribe a un
+     * {@code .tmp} y solo sustituye el fichero si llega entera
+     * ({@code NeoImageFetcher.doFetch}), asi que sin red, con un 429 o con
+     * cualquier fallo la imagen que habia se queda. Va por el limitador de
+     * Scryfall de siempre.
+     *
+     * <p>Se refresca la imagen QUE SE VE: la traducida si la hay (y esta
+     * puesta), o la de Forge.
+     *
+     * @param done se llama una vez, en el hilo de interfaz
+     */
+    public static void refreshFromScryfall(final String imageKey, final java.util.function.Consumer<Refresh> done) {
+        final Thread t = new Thread(() -> {
+            final Refresh r = refreshBlocking(imageKey);
+            javafx.application.Platform.runLater(() -> done.accept(r));
+        }, "neo-art-refresh");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * Lo mismo, esperando la respuesta en ESTE hilo (nunca el de interfaz).
+     * Lo usa tambien {@code run.cmd refreshartcheck}, que no tiene JavaFX.
+     */
+    public static Refresh refreshBlocking(final String imageKey) {
+        if (imageKey == null || imageKey.isEmpty()
+                || !(GuiBase.getInterface().getImageFetcher() instanceof forge.neo.platform.NeoImageFetcher neo)
+                || !forge.model.FModel.getPreferences().getPrefBoolean(
+                        forge.localinstance.properties.ForgePreferences.FPref.UI_ENABLE_ONLINE_IMAGE_FETCHER)) {
+            return Refresh.UNSUPPORTED;
+        }
+        try {
+            return refreshNow(imageKey, neo);
+        } catch (final RuntimeException e) {
+            System.err.println("[neo-img] no se pudo refrescar " + imageKey + ": " + e);
+            return Refresh.OFFLINE;
+        }
+    }
+
+    private static Refresh refreshNow(final String imageKey, final forge.neo.platform.NeoImageFetcher neo) {
+        final String face = imageKey.endsWith(ImageKeys.BACKFACE_POSTFIX) ? "back" : "";
+        final forge.item.PaperCard card = forge.util.ImageUtil.getPaperCardFromImageKey(imageKey);
+        if (card == null || card.getRules() == null || card.getRules().isCustom()
+                || card.getCollectorNumber().equals(forge.item.IPaperCard.NO_COLLECTOR_NUMBER)) {
+            return Refresh.UNSUPPORTED;
+        }
+        final forge.card.CardEdition edition = forge.StaticData.instance().getEditions().get(card.getEdition());
+        if (edition == null) {
+            return Refresh.UNSUPPORTED;
+        }
+        if (forge.util.ScryfallRateLimiter.isCoolingDown()) {
+            return Refresh.BUSY;
+        }
+        // Que fichero se esta viendo: el traducido si esta puesto, si no el de
+        // Forge. Se refresca ESE, en su idioma.
+        final File localized = findLocalized(imageKey);
+        final String lang = localized != null ? CardArt.language() : "";
+        final boolean crop = "Crop".equals(forge.model.FModel.getPreferences()
+                .getPref(forge.localinstance.properties.ForgePreferences.FPref.UI_CARD_ART_FORMAT));
+        final String imageUrl = forge.localinstance.properties.ForgeConstants.URL_PIC_SCRYFALL_DOWNLOAD
+                + forge.util.ImageUtil.getScryfallDownloadUrl(card, face, edition.getScryfallCode(),
+                        lang == null ? "" : lang, crop && localized == null);
+        final String jsonUrl = imageUrl.replace("format=image", "format=json");
+
+        final Boolean highres = askHighres(jsonUrl);
+        if (highres == null) {
+            return forge.util.ScryfallRateLimiter.isCoolingDown() ? Refresh.BUSY : Refresh.OFFLINE;
+        }
+        if (!highres) {
+            return Refresh.NOT_YET;
+        }
+
+        final String dest;
+        if (localized != null) {
+            dest = localized.getPath();
+        } else {
+            final String name = toFilename(imageKey);
+            if (name == null || name.isEmpty()) {
+                return Refresh.UNSUPPORTED;
+            }
+            // doFetch pasa .full a .fullborder, como con cualquier descarga.
+            dest = new File(forge.localinstance.properties.ForgeConstants.CACHE_CARD_PICS_DIR,
+                    name + ".jpg").getPath();
+        }
+        final java.util.concurrent.CompletableFuture<Boolean> got = new java.util.concurrent.CompletableFuture<>();
+        neo.fetchDirect(imageUrl, dest, got::complete);
+        final boolean ok;
+        try {
+            ok = got.get(60, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (final Exception e) {
+            return Refresh.OFFLINE;
+        }
+        if (!ok) {
+            return Refresh.OFFLINE;
+        }
+        // La nueva, en vez de la de memoria.
+        CACHE.invalidate(imageKey);
+        SCALED.invalidateAll();
+        FAILED.remove(imageKey);
+        ImageKeys.clearMissingCards();
+        final File now = localized != null ? localized : downloadedFile(imageKey);
+        if (now != null && now.exists()) {
+            decode(imageKey, now);
+        }
+        return Refresh.UPDATED;
+    }
+
+    /** El fichero de Forge de esa imagen, si esta en disco (ver ArtHdScan). */
+    public static File cachedFile(final String imageKey) {
+        return downloadedFile(imageKey);
+    }
+
+    /** Lo que necesita {@link ArtHdScan} del escritorio: un fichero por cara. */
+    public static final ArtHdScan.Store HD_STORE = new ArtHdScan.Store() {
+        @Override
+        public java.util.List<File> files(final String imageKey) {
+            // Solo el de la calidad elegida: cachedFile cae a la mejor que haya,
+            // y en "alta" eso bajaria la grande ENCIMA del fichero de la normal.
+            final File f = imageKey != null && imageKey.startsWith(ImageKeys.CARD_PREFIX)
+                    ? exactOnDisk(ImageQuality.current(), imageKey) : cachedFile(imageKey);
+            return f == null ? java.util.List.of() : java.util.List.of(f);
+        }
+
+        @Override
+        public boolean replace(final String imageKey, final String url, final File file) {
+            return replaceFromCdn(imageKey, url, file);
+        }
+    };
+
+    /**
+     * Baja {@code url} (la CDN de Scryfall) ENCIMA de {@code file}, por el
+     * {@code .tmp} de siempre: si no llega entera, el fichero no se toca. Si la
+     * imagen estaba en memoria, se cambia. Bloquea; nunca en el hilo de
+     * interfaz. Lo usa {@link ArtHdScan}.
+     */
+    public static boolean replaceFromCdn(final String imageKey, final String url, final File file) {
+        if (!(GuiBase.getInterface().getImageFetcher() instanceof forge.neo.platform.NeoImageFetcher neo)) {
+            return false;
+        }
+        final java.util.concurrent.CompletableFuture<Boolean> got = new java.util.concurrent.CompletableFuture<>();
+        neo.fetchDirect(url, file.getPath(), got::complete);
+        final boolean ok;
+        try {
+            ok = got.get(60, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (final Exception e) {
+            return false;
+        }
+        if (ok && CACHE.getIfPresent(imageKey) != null) {
+            CACHE.invalidate(imageKey);
+            SCALED.invalidateAll();
+            decode(imageKey, file);
+        }
+        return ok;
+    }
+
+    /**
+     * Si Scryfall tiene ESA impresion en alta ({@code highres_image}); null si
+     * no se ha podido saber (sin red, 429, 404...).
+     */
+    private static Boolean askHighres(final String jsonUrl) {
+        try {
+            forge.util.ScryfallRateLimiter.acquire(jsonUrl);
+            final java.net.HttpURLConnection http =
+                    (java.net.HttpURLConnection) new java.net.URL(jsonUrl).openConnection();
+            http.setRequestProperty("Accept", "application/json");
+            http.setRequestProperty("User-Agent", forge.neo.platform.NeoUserAgent.get());
+            http.setConnectTimeout(5_000);
+            http.setReadTimeout(8_000);
+            final int code = http.getResponseCode();
+            if (code != java.net.HttpURLConnection.HTTP_OK) {
+                forge.util.ScryfallRateLimiter.noteIfRateLimited(code, jsonUrl,
+                        http.getHeaderField("Retry-After"));
+                http.disconnect();
+                return null;
+            }
+            final String body;
+            try (java.io.InputStream in = http.getInputStream()) {
+                body = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            }
+            return java.util.regex.Pattern.compile("\"highres_image\"\\s*:\\s*true")
+                    .matcher(body).find();
+        } catch (final java.io.IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** Si la impresion exacta (o la ficha) tiene ya su imagen en el disco. */
+    public static boolean hasImageOnDisk(final String imageKey) {
+        try {
+            return imageKey != null && !imageKey.isEmpty() && findOnDisk(imageKey) != null;
+        } catch (final RuntimeException e) {
+            return true;
+        }
+    }
+
+    /**
+     * Pone una imagen PROPIA donde iria la de Scryfall ({@link OwnImage}) y la
+     * carga como si se acabara de bajar: la mesa, la enciclopedia y la carta
+     * ampliada la ven en el acto (Discord, 23-10-2026). Devuelve el fichero
+     * escrito, o {@code null} si esa clave no tiene sitio (no es carta ni ficha)
+     * o el fichero elegido no es JPG ni PNG.
+     */
+    public static File useOwnImage(final String imageKey, final File source) throws java.io.IOException {
+        final String ext = OwnImage.extensionOf(source == null ? null : source.getName());
+        if (ext == null) {
+            return null;
+        }
+        final byte[] card = asCard(source, ext);
+        if (card == null) {
+            return null;
+        }
+        final File target = OwnImage.install(imageKey, new java.io.ByteArrayInputStream(card), ext);
+        if (target == null) {
+            return null;
+        }
+        forgetAndReload(imageKey, target);
+        return target;
+    }
+
+    /**
+     * La imagen elegida, con forma y tamanyo de carta ({@link OwnImage#cardCrop},
+     * {@link OwnImage#fittedSize}): un fondo de pantalla de 3840x2160 se queda
+     * en el centro con forma de carta y a 672x936, como una de Scryfall. Lo que
+     * ya es una carta de ese tamanyo o menor se guarda tal cual. {@code null}
+     * si no se puede leer como imagen.
+     */
+    private static byte[] asCard(final File source, final String ext) throws java.io.IOException {
+        final java.awt.image.BufferedImage in = javax.imageio.ImageIO.read(source);
+        if (in == null) {
+            return null;
+        }
+        final int[] crop = OwnImage.cardCrop(in.getWidth(), in.getHeight());
+        final int[] size = OwnImage.fittedSize(crop[2], crop[3]);
+        if (crop[2] == in.getWidth() && crop[3] == in.getHeight()
+                && size[0] == crop[2] && size[1] == crop[3]) {
+            return java.nio.file.Files.readAllBytes(source.toPath());
+        }
+        final boolean png = ".png".equals(ext);
+        final java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(size[0], size[1],
+                png ? java.awt.image.BufferedImage.TYPE_INT_ARGB : java.awt.image.BufferedImage.TYPE_INT_RGB);
+        final java.awt.Graphics2D g = out.createGraphics();
+        try {
+            g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+                    java.awt.RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+            g.setRenderingHint(java.awt.RenderingHints.KEY_RENDERING, java.awt.RenderingHints.VALUE_RENDER_QUALITY);
+            g.drawImage(in, 0, 0, size[0], size[1], crop[0], crop[1], crop[0] + crop[2], crop[1] + crop[3], null);
+        } finally {
+            g.dispose();
+        }
+        final java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        if (png) {
+            javax.imageio.ImageIO.write(out, "png", bytes);
+        } else {
+            final javax.imageio.ImageWriter writer = javax.imageio.ImageIO.getImageWritersByFormatName("jpg").next();
+            final javax.imageio.ImageWriteParam param = writer.getDefaultWriteParam();
+            param.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
+            param.setCompressionQuality(0.92f);
+            try (javax.imageio.stream.ImageOutputStream ios = javax.imageio.ImageIO.createImageOutputStream(bytes)) {
+                writer.setOutput(ios);
+                writer.write(null, new javax.imageio.IIOImage(out, null, null), param);
+            } finally {
+                writer.dispose();
+            }
+        }
+        return bytes.toByteArray();
+    }
+
+    /**
+     * Quita la imagen propia de esa clave y vuelve a la que habia (ver
+     * {@link OwnImage#restore}). false si no habia propia.
+     */
+    public static boolean restoreOriginalImage(final String imageKey) {
+        if (!OwnImage.restore(imageKey)) {
+            return false;
+        }
+        File back = null;
+        for (final String ext : new String[] {".jpg", ".png"}) {
+            final File t = OwnImage.target(imageKey, ext);
+            if (t != null && t.isFile()) {
+                back = t;
+            }
+        }
+        forgetAndReload(imageKey, back);
+        return true;
+    }
+
+    /** Olvida lo que se sabia de esa imagen y, si hay fichero, lo vuelve a leer. */
+    private static void forgetAndReload(final String imageKey, final File file) {
+        // Lo que recordaba que NO habia imagen, fuera: la del motor y las nuestras.
+        ImageKeys.clearMissingCards();
+        FAILED.remove(imageKey);
+        NO_IMAGE.remove(imageKey);
+        CACHE.invalidate(imageKey);
+        SCALED.asMap().keySet().removeIf(k -> k.startsWith(imageKey));
+        if (file != null) {
+            LOADERS.submit(() -> decode(imageKey, file));
+        } else {
+            notifyReady(imageKey);
+        }
+    }
+
+    private static void decode(final String imageKey, final File file) {
+        try {
+            final Image img = new Image(file.toURI().toString(), false);
+            if (img.isError()) {
+                if (DEBUG) {
+                    System.out.println("[neo-img] no se pudo leer " + file + ": " + img.getException());
+                }
+                giveUpForNow(imageKey);
+            } else {
+                CACHE.put(imageKey, img);
+                noteCeiling();
+                notifyReady(imageKey);
+            }
+        } catch (final Exception e) {
+            giveUpForNow(imageKey);
+        } finally {
+            PENDING.remove(imageKey);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // La copia nitida: la carta ya reducida a los pixeles a los que se ve
+    // ---------------------------------------------------------------
+
+    /**
+     * Las copias reducidas. Pequenas (una carta de 150 px son ~130 KB), asi que
+     * caben muchas mas que originales, pero con techo igual: una partida larga
+     * pasa por muchos tamanos distintos al encoger la mesa.
+     */
+    private static final com.google.common.cache.Cache<String, Image> SCALED =
+            com.google.common.cache.CacheBuilder.newBuilder()
+                    .maximumSize(600)
+                    .expireAfterAccess(15, java.util.concurrent.TimeUnit.MINUTES)
+                    .softValues()
+                    .build();
+
+    /** Las que se estan reduciendo ahora mismo, para no encargar dos veces la misma. */
+    private static final Set<String> SCALING = ConcurrentHashMap.newKeySet();
+
+    /** Ajuste "Cartas mas nitidas"; null hasta que alguien lo pregunta. */
+    private static volatile Boolean sharp;
+
+    /**
+     * Si se usan las copias nitidas.
+     *
+     * <p>{@code -Dneo.images.hq=false|true} manda sobre el ajuste: es lo que
+     * permite capturar el antes y el despues sin tocarle los ajustes a nadie.
+     */
+    public static boolean isSharp() {
+        Boolean s = sharp;
+        if (s == null) {
+            final String forced = System.getProperty("neo.images.hq");
+            s = forced != null ? Boolean.valueOf(forced)
+                    : forge.neo.NeoSettings.getBool(forge.neo.NeoSettings.SHARP_ART, true);
+            sharp = s;
+        }
+        return s;
+    }
+
+    /** Lo cambia Ajustes. Apagado, todas las cartas vuelven a pintar la original. */
+    public static void setSharp(final boolean on) {
+        sharp = on;
+        SCALED.invalidateAll();
+    }
+
+    /**
+     * La carta reducida a exactamente {@code width x height} pixeles, o null si
+     * todavia no esta (y entonces se encarga en segundo plano) o si no hace falta.
+     *
+     * <p>"No hace falta" es reducir menos de un 10%, o agrandar: ahi la original
+     * se ve igual o mejor, y quien pinta debe usar la original. Lo mismo mientras
+     * se hace la copia: <b>nunca se ensenya una imagen mas pequena de lo que toca</b>,
+     * que se veria borrosa — como mucho se ve un momento como antes.
+     *
+     * <p>La clave lleva la identidad de la original: si esa carta se vuelve a
+     * leer (otro idioma de arte, la descarga buena), la copia vieja no se puede
+     * confundir con la nueva.
+     *
+     * @param full la imagen que ya se esta pintando (la de {@link #get})
+     */
+    public static Image scaled(final String imageKey, final Image full, final int width, final int height) {
+        if (imageKey == null || full == null || width <= 0 || height <= 0 || !isSharp()) {
+            return null;
+        }
+        final int sw = (int) full.getWidth();
+        final int sh = (int) full.getHeight();
+        if (sw <= 0 || sh <= 0 || full.isError() || width >= sw * 0.9 || height >= sh * 0.9) {
+            return null;
+        }
+        final String key = imageKey + '@' + width + 'x' + height + '#' + System.identityHashCode(full);
+        final Image hit = SCALED.getIfPresent(key);
+        if (hit != null) {
+            return hit;
+        }
+        if (!SCALING.add(key)) {
+            return null;
+        }
+        try {
+            LOADERS.submit(() -> {
+                try {
+                    final javafx.scene.image.PixelReader reader = full.getPixelReader();
+                    if (reader == null) {
+                        return;
+                    }
+                    final int[] src = new int[sw * sh];
+                    reader.getPixels(0, 0, sw, sh,
+                            javafx.scene.image.PixelFormat.getIntArgbInstance(), src, 0, sw);
+                    final int[] dst = Resample.downscale(src, sw, sh, width, height);
+                    final javafx.scene.image.WritableImage out =
+                            new javafx.scene.image.WritableImage(width, height);
+                    out.getPixelWriter().setPixels(0, 0, width, height,
+                            javafx.scene.image.PixelFormat.getIntArgbInstance(), dst, 0, width);
+                    SCALED.put(key, out);
+                    notifyReady(imageKey);
+                } catch (final Exception e) {
+                    // Sin copia nitida se sigue viendo la original: no es motivo
+                    // para nada mas que dejarlo dicho.
+                    if (DEBUG) {
+                        System.out.println("[neo-img] no se ha podido reducir " + imageKey + ": " + e);
+                    }
+                } finally {
+                    SCALING.remove(key);
+                }
+            });
+        } catch (final java.util.concurrent.RejectedExecutionException e) {
+            SCALING.remove(key);
+        }
+        return null;
+    }
+
+    /**
+     * Lo que se espera antes de repintar, para juntar las imagenes que llegan
+     * a la vez.
+     *
+     * <p>Scryfall se sirve a un ritmo de una peticion cada 100 ms, asi que en
+     * una tanda grande llega una imagen cada poco: con este hueco caben varias
+     * en cada barrido y la pantalla sigue pareciendo instantanea (150 ms es el
+     * suelo de las animaciones de la seccion 6, o sea lo que ya se considera
+     * "en el acto").
+     */
+    private static final long NOTIFY_GAP = 120;
+
+    private static final java.util.concurrent.atomic.AtomicBoolean NOTIFY_PENDING =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** {@code -Dneo.images.debug=true}: cuantas imagenes lleva la tanda. */
+    private static final boolean DEBUG = Boolean.getBoolean("neo.images.debug");
+    private static final java.util.concurrent.atomic.AtomicInteger BATCH =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /**
+     * Pide un repintado sin que haya llegado ninguna imagen concreta.
+     *
+     * <p>Lo usa la descarga de arte: ahi aparecen miles de ficheros de golpe y
+     * ninguno pasa por {@code notifyReady}, asi que la mesa no se enteraria.
+     */
+    public static void repaint() {
+        scheduleRepaint();
+    }
+
+    private static void notifyReady(final String key) {
+        BATCH.incrementAndGet();
+        scheduleRepaint();
+    }
+
+    /** Pide UN repintado, junto con lo que llegue en los proximos 120 ms. */
+    private static void scheduleRepaint() {
+        if (LISTENERS.isEmpty()) {
+            return;
+        }
+        // Solo se programa un aviso: las imagenes que lleguen mientras tanto
+        // entran en el mismo barrido gratis.
+        if (!NOTIFY_PENDING.compareAndSet(false, true)) {
+            return;
+        }
+        TIMER.schedule(() -> {
+            NOTIFY_PENDING.set(false);
+            if (DEBUG) {
+                System.out.println("[neo-img] repintando: " + BATCH.getAndSet(0)
+                        + " imagen(es) en esta tanda");
+            } else {
+                BATCH.set(0);
+            }
+            final Runnable fire = () -> {
+                for (final Listener l : LISTENERS) {
+                    try {
+                        l.imagesReady();
+                    } catch (final Exception ignored) {
+                        // un listener roto no debe tumbar la carga
+                    }
+                }
+            };
+            if (Platform.isFxApplicationThread()) {
+                fire.run();
+            } else {
+                try {
+                    Platform.runLater(fire);
+                } catch (final IllegalStateException ignored) {
+                    // toolkit no arrancado (modo consola)
+                }
+            }
+        }, NOTIFY_GAP, java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
+    private static final java.util.concurrent.ScheduledExecutorService TIMER =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                final Thread t = new Thread(r, "neo-img-notify");
+                t.setDaemon(true);
+                return t;
+            });
+}

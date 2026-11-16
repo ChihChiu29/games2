@@ -1,0 +1,10348 @@
+package forge.neo.match;
+
+import forge.neo.NeoText;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Consumer;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import forge.LobbyPlayer;
+import forge.deck.CardPool;
+import forge.game.Game;
+import forge.game.GameEntityView;
+import forge.game.GameView;
+import forge.game.card.CardView;
+import forge.game.spellability.StackItemView;
+import forge.interfaces.IGameController;
+import forge.player.AutoYieldStore;
+import forge.gamemodes.match.YieldController;
+import forge.localinstance.properties.ForgePreferences.FPref;
+import forge.game.event.GameEvent;
+import forge.game.event.GameEventLandPlayed;
+import forge.game.event.GameEventSpellAbilityCast;
+import forge.game.event.GameEventTurnPhase;
+import forge.game.event.GameEventPlayerDamaged;
+import forge.game.event.GameEventCardChangeZone;
+import forge.game.phase.PhaseType;
+import forge.game.player.DelayedReveal;
+import forge.game.player.IHasIcon;
+import forge.game.player.PlayerView;
+import forge.game.spellability.SpellAbilityView;
+import forge.game.zone.ZoneType;
+import forge.gamemodes.net.NetworkGuiGame;
+import forge.gamemodes.match.NextGameDecision;
+import forge.gui.GuiBase;
+import forge.gui.interfaces.IGuiGame;
+import forge.item.PaperCard;
+import forge.localinstance.skin.FSkinProp;
+import forge.neo.platform.NeoGuiBase;
+import forge.neo.ui.AbilityMenu;
+import forge.neo.ui.AmountDialog;
+import forge.neo.ui.CardPromptDialog;
+import forge.neo.ui.ChoiceDialog;
+import forge.neo.ui.ConfirmDialog;
+import forge.neo.ui.DamageDialog;
+import forge.neo.ui.GameOverScreen;
+import forge.neo.ui.TableScreen;
+import forge.neo.platform.UiDispatcher;
+import forge.neo.ui.PromptBanner;
+import forge.trackable.TrackableCollection;
+import forge.util.FSerializableFunction;
+import forge.util.ITriggerEvent;
+
+/**
+ * FASE 1 — implementacion de {@link IGuiGame} sin interfaz grafica.
+ *
+ * <p>Objetivo: validar que una partida real de Commander arranca, avanza y
+ * termina estando conducida por NUESTRO codigo, no por la GUI Swing. Todo se
+ * imprime por consola.
+ *
+ * <p>Dos modos:
+ * <ul>
+ *   <li>{@code OBSERVE} — todos los jugadores son IA y nosotros solo
+ *       observamos. Valida el camino de LECTURA: GameView, eventos, zonas.
+ *       Es la base de las fases 2 y 3 (pintar).</li>
+ *   <li>{@code AUTO_PLAY} — hay un jugador humano, pero contestamos
+ *       automaticamente. Valida el camino de ESCRITURA: el modelo bloqueante
+ *       de peticion/respuesta, que es la parte de verdad arriesgada.</li>
+ * </ul>
+ *
+ * <p>En la fase 4 las decisiones dejaran de ser automaticas y se le pediran al
+ * usuario. La estructura no cambia: cambia quien contesta.
+ */
+/*
+ * Por que NetworkGuiGame y no AbstractGuiGame, que es lo que era:
+ *
+ * NetworkGuiGame ES un AbstractGuiGame — solo anyade la implementacion de
+ * applyDelta(DeltaPacket), que en AbstractGuiGame es un no-op. Fuera de red no
+ * cambia absolutamente nada, porque ese metodo solo lo llama el servidor por el
+ * cable. Y dentro de red es imprescindible: el servidor no manda el GameView
+ * entero en cada cambio, manda SOLO las propiedades que se han movido
+ * (DeltaSyncManager). Heredando de AbstractGuiGame esos paquetes se recibirian
+ * y se tirarian en silencio, y la mesa del invitado no se moveria nunca.
+ *
+ * No anyade ni un metodo abstracto, asi que el cambio es esta linea y ya.
+ */
+public class NeoMatchUI extends NetworkGuiGame implements OverlookedSink {
+
+    public enum Mode {
+        /** Todo IA; solo miramos. */
+        OBSERVE,
+        /** Hay humano pero contestamos solos (validacion). */
+        AUTO_PLAY,
+        /** Juega el usuario. */
+        HUMAN
+    }
+
+    private final Mode mode;
+    private final boolean verbose;
+
+    /** Un solo hilo para contestar al motor. NUNCA responder en el hilo del motor. */
+    private final ExecutorService responder =
+            Executors.newSingleThreadExecutor(r -> {
+                final Thread t = new Thread(r, "neo-responder");
+                t.setDaemon(true);
+                return t;
+            });
+
+    /** Que hacer cuando el match se cierre. Lo lee {@link NeoGame}. */
+    public enum Exit {
+        /** Volver a la pantalla de inicio. */
+        MENU,
+        /** Empezar otra partida con los mismos mazos. */
+        RESTART
+    }
+
+    private volatile Exit exitAction;
+
+    /**
+     * De donde viene esta partida, o sea <b>a donde se vuelve al acabarla</b>.
+     *
+     * <p>Es lo unico que decide que botones ensena {@link GameOverScreen}, y no
+     * es cosmetico: en un modo con estado propio (la aventura, una run de
+     * Ascenso) "otra partida" es un boton que <b>miente</b> — el modo esta
+     * esperando a repartir su premio y a seguir su bucle, no a montar un duelo
+     * suelto. Un control que no hace lo que parece es peor que no tenerlo
+     * (principio 1 de las notas de diseño).
+     */
+    public enum Ending {
+        /**
+         * Partida suelta: "volver al menu" y "otra partida" dicen la verdad.
+         */
+        NORMAL,
+        /**
+         * Duelo de la aventura. Sin "otra partida": el motor esta esperando a
+         * repartir la recompensa (el sobre de premio), y RESTART se saltaba esa
+         * pantalla entera para meterte directo en un duelo nuevo. Y sin "volver
+         * al menu": de ahi se vuelve al cuartel general.
+         */
+        QUEST,
+        /**
+         * Nodo de una run de Ascenso. Un solo boton, "continuar Ascenso", que
+         * lleva al premio y al mapa.
+         *
+         * <p>Los dos de siempre mentian los dos a la vez: "otra partida" se
+         * trataba como abandonar el duelo a medias y <b>se llevaba la run por
+         * delante</b> (reportado jugando), y "volver al menu" no volvia a
+         * ningun menu — el bucle del modo seguia igual hacia el premio. Aqui
+         * solo hay una continuacion posible, asi que solo hay un boton.
+         */
+        ASCENT,
+        /**
+         * Partida en red. Un solo boton, "volver a la sala": la sala sigue
+         * abierta y es desde donde el anfitrion monta la siguiente. "Otra
+         * partida" y "volver al menu" hacian los dos eso mismo, o sea que
+         * mentian los dos.
+         */
+        NET,
+        /**
+         * Una repeticion (Forge #12255, 16-10-2026): una partida grabada que se
+         * vuelve a ver. Llega como a un invitado de una partida en red —los
+         * mensajes que habria recibido un espectador— y no hay motor detras:
+         * los dos botones son Pausa y Velocidad ({@code ReplayPlayer}), salir es
+         * cerrarla, y el final tiene un solo boton, "cerrar la repeticion".
+         */
+        REPLAY
+    }
+
+    private volatile Ending ending = Ending.NORMAL;
+
+    public void setEnding(final Ending ending) {
+        this.ending = ending == null ? Ending.NORMAL : ending;
+    }
+
+    /**
+     * Salir de la partida en curso.
+     *
+     * <p>No se corta por lo sano: se <b>concede</b>. Es lo que hace la GUI
+     * Swing y es lo unico correcto, porque el motor puede estar bloqueado
+     * esperando una decision nuestra. Conceder termina la partida por las
+     * buenas, libera ese hilo y deja que Forge cierre el match como toca.
+     *
+     * <p>{@code concede()} de {@code AbstractGuiGame} ya distingue los casos
+     * raros (uno contra uno, multijugador donde quedan IAs peleando,
+     * espectador), asi que se reutiliza tal cual en vez de reimplementarlo.
+     */
+    /**
+     * Salida de emergencia: el motor no ha contestado y hay que irse igual.
+     *
+     * <p>Ver {@link #leaveMatch(Exit)}.
+     */
+    private volatile Runnable onAbandon;
+
+    public void setOnAbandon(final Runnable action) {
+        this.onAbandon = action;
+    }
+
+    /**
+     * Cuanto se espera a que el motor cierre la partida antes de irse por las
+     * bravas. Una concesion sana es instantanea; seis segundos son de sobra.
+     */
+    private static final long LEAVE_TIMEOUT_MS = 6_000;
+
+    /**
+     * Vigilante de "Salir".
+     *
+     * <p><b>Por que hace falta.</b> Salir de una partida se le PIDE al motor
+     * (se concede), y eso es lo correcto — el motor puede estar bloqueado
+     * esperando una decision nuestra y hay que liberarlo por las buenas. Pero
+     * da por hecho que el motor sigue vivo.
+     *
+     * <p>Y puede no estarlo. Caso real, jugando en red: la IA de Forge reventó
+     * con un NPE dentro de {@code AiBlockController} y <b>se llevo el hilo de
+     * la partida</b>. A partir de ahi no habia OK, no habia prioridad y "Salir"
+     * ponia "Cerrando la partida..." y se quedaba asi para siempre: los dos
+     * jugadores encerrados en una mesa muerta, sin mas salida que matar la
+     * ventana.
+     *
+     * <p>Un boton que no hace lo que dice es peor que no tenerlo (principio 1),
+     * y el jugador necesita una valvula de escape (principio 7). Asi que si el
+     * motor no ha cerrado la partida en {@value #LEAVE_TIMEOUT_MS} ms, la
+     * interfaz se va sola. La partida se pierde igual — ya estaba perdida —
+     * pero se sale.
+     */
+    private void watchdogForLeaving() {
+        final Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(LEAVE_TIMEOUT_MS);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            // Con la pantalla de victoria o derrota puesta, el motor SI ha
+            // contestado: la partida se ha acabado y espera el clic del
+            // jugador. Pasa en la Quest (salir es rendirse, y se dice con esa
+            // pantalla): sin esto, a los 6 s te sacaba al menu mientras la
+            // leias, sin botin ni vuelta al cuartel (13-10-2026).
+            if (closeNotified.get() || gameOverShowing) {
+                return;
+            }
+            System.out.println("[neo] el motor no ha cerrado la partida en "
+                    + (LEAVE_TIMEOUT_MS / 1000) + " s: se sale igual");
+            final Runnable out = onAbandon;
+            if (out != null && closeNotified.compareAndSet(false, true)) {
+                out.run();
+            }
+        }, "neo-leave-watchdog");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * Si se puede rendir SOLO esta partida de un partido al mejor de N (la
+     * pausa). La regla es {@link GameConcession#possible}, la misma en Android;
+     * aqui ademas, nada que rendir mirando o con la partida ya cerrada.
+     */
+    public boolean canConcedeGame() {
+        return mode != Mode.OBSERVE && !finished.get() && GameConcession.possible(this);
+    }
+
+    /**
+     * Rendir esta partida y seguir el partido: la pantalla de derrota de
+     * siempre, con "Siguiente partida". {@code exitAction} se queda en null, que
+     * es lo que hace que {@code finishGame} la ensenye en vez de salir. El como,
+     * en {@link GameConcession} (no pasa por el {@code concede()} de Forge).
+     */
+    public void concedeGame() {
+        if (!canConcedeGame()) {
+            return;
+        }
+        log("The player concedes this game (game %d of %d)",
+                getGameView().getNumPlayedGamesInMatch() + 1, getGameView().getNumGamesInMatch());
+        uiRunLater(() -> table.forgetEngineDialogs());
+        GameConcession.concede(this);
+    }
+
+    private final AtomicBoolean concededForTest = new AtomicBoolean();
+
+    /**
+     * <b>Has caido y las IA siguen</b> (Discord, 03-11-2026: <i>"is there no
+     * way to end a game after the ai's knocked me out first? or do i have to
+     * wait for them to battle it out?"</i>).
+     *
+     * <p>Forge sigue la partida entre las IA cuando el humano pierde en una mesa
+     * de tres o mas ({@code checkGameOverCondition} solo cierra con un jugador
+     * en pie). Salir por la pausa ya la cerraba, pero eso no lo adivina nadie y
+     * te sacaba al menu sin la pantalla de final. Asi que, UNA vez por partida,
+     * se pregunta: terminarla ahora (como el {@code forceEndGameForRemainingAIs}
+     * de Forge: {@code AllHumansLost}, y la pantalla de derrota de siempre) o
+     * quedarse a ver como acaba.
+     *
+     * <p>No en Ascenso ni en la Quest (alli se cierra sola, ver
+     * {@code AscentTableEnd}), ni en red (la partida es del anfitrion), ni
+     * mirando, ni en una repeticion. {@code -Dneo.out.autoEnd=true} contesta
+     * "terminar" sola, para {@code outcheck}.
+     */
+    private void offerEndWhenOut() {
+        final boolean autoEnd = Boolean.getBoolean("neo.out.autoEnd");
+        if ((mode != Mode.HUMAN && !autoEnd) || ending != Ending.NORMAL || isNetGame() || isReplay()
+                || outOffered.get() || finished.get() || (table == null && !autoEnd)) {
+            return;
+        }
+        final GameView gv = getGameView();
+        if (gv == null || gv.isGameOver() || gv.getPlayers() == null || gv.getPlayers().size() <= 2) {
+            return;
+        }
+        int standing = 0;
+        for (final PlayerView p : gv.getPlayers()) {
+            if (!live(p).getHasLost()) {
+                standing++;
+            }
+        }
+        boolean allMineOut = !getLocalPlayers().isEmpty();
+        for (final PlayerView p : getLocalPlayers()) {
+            allMineOut &= live(p).getHasLost();
+        }
+        if (!allMineOut || standing < 2 || !outOffered.compareAndSet(false, true)) {
+            return;
+        }
+        final int left = standing;
+        log("The player is out with %d still playing: offering to end the game", left);
+        if (autoEnd) {
+            endTheGameForReal();
+            return;
+        }
+        uiRunLater(() -> table.getOverlay().show(new forge.neo.ui.ConfirmDialog(
+                NeoText.get("out.title"), NeoText.get("out.detail", left),
+                java.util.List.of(NeoText.get("out.end"), NeoText.get("out.watch")), 0,
+                choice -> {
+                    table.getOverlay().hide();
+                    if (choice == 0) {
+                        log("The player ends the game after being knocked out");
+                        endTheGameForReal();
+                    }
+                })));
+    }
+
+    private final AtomicBoolean outOffered = new AtomicBoolean();
+
+    public void leaveMatch(final Exit action) {
+        this.exitAction = action;
+        if (isReplay()) {
+            // Ni motor ni partida que conceder: se para la reproduccion, y
+            // ella misma llama a afterGameEnd, que es lo que quita la mesa.
+            forge.gamemodes.net.client.ReplayPlayer.stopFor(this, true);
+            return;
+        }
+        // Igual que en finishGame: se abandona, asi que nada de reponer la
+        // pregunta a medias por la que se estaba saliendo.
+        uiRunLater(() -> table.forgetEngineDialogs());
+        watchdogForLeaving();
+        respondLater(() -> {
+            // Sin esto, concede() levantaria SU dialogo de confirmacion en
+            // ingles encima del nuestro, que ya ha preguntado.
+            autoConfirm = true;
+            try {
+                // En una mesa de tres o mas, rendirse SIN tocar las reglas
+                // desde este hilo (QuietConcede): el resto lo remata
+                // endTheGameForReal desde un hilo de partida.
+                if (!QuietConcede.tryConcede(this)) {
+                    concede();
+                }
+            } catch (final RuntimeException e) {
+                // No se deja pasar en silencio, pero TAMPOCO se aborta la
+                // salida: ver endTheGameForReal(), que es lo que la remata.
+                System.out.println("[neo] el motor ha fallado al conceder: " + e);
+            } finally {
+                autoConfirm = false;
+            }
+            endTheGameForReal();
+        });
+    }
+
+    /**
+     * Rematar la salida: que la partida se acabe DE VERDAD.
+     *
+     * <p><b>Por que hace falta.</b> Conceder no termina la partida cuando
+     * quedan rivales vivos: en una mesa a cuatro te sales tu y las tres IAs
+     * siguen jugando entre ellas. Forge lo sabe y lo remata solo... pero por
+     * un camino que se rompe de dos maneras, y las dos salieron jugando:
+     *
+     * <ul>
+     *   <li>{@code AbstractGuiGame.concede()} manda el {@code QUIT} <b>al
+     *       final</b>, despues de tocar el motor. Y lo toca desde el hilo de
+     *       interfaz: si por el camino salta una {@code
+     *       ConcurrentModificationException} — que en este registro salen a
+     *       pares — el {@code QUIT} no se manda nunca. El jugador ya ha
+     *       concedido, o sea que su parte es irreversible, y la pantalla se
+     *       queda ahi mirando como juegan las IAs.</li>
+     *   <li>Y al segundo intento entra por la otra rama (ya tiene resultado,
+     *       "no hace falta conceder") que si termina la partida. De ahi el
+     *       sintoma exacto que se reporto: <i>"le di a salir y no me salio;
+     *       tuve que darle otra vez"</i>.</li>
+     * </ul>
+     *
+     * <p>Asi que se hace en una sola pulsacion lo que antes costaba dos:
+     * conceder — que es lo que lo convierte en una derrota, y lo que la
+     * aventura anota — y acto seguido terminar la partida por
+     * {@code AllHumansLost}, que es literalmente lo que hace el
+     * {@code forceEndGameForRemainingAIs} de Forge. Desde ahi ya vuelve por el
+     * camino normal: {@code finishGame} ve el {@code exitAction} puesto y
+     * cierra el match.
+     *
+     * <p>Se toca el motor <b>desde un hilo de partida</b>
+     * ({@code GameAction.invoke}), no desde el de interfaz. Es de donde salian
+     * las {@code ConcurrentModificationException} de arriba.
+     */
+    private void endTheGameForReal() {
+        if (isNetGame()) {
+            // En red la partida no vive aqui: el motor esta en el ordenador del
+            // anfitrion y ya se le ha mandado la concesion. Rematarla desde
+            // este lado seria terminar una copia. Al invitado lo saca
+            // afterGameEnd (y si no llega, el vigilante).
+            return;
+        }
+        final GameView gv = getGameView();
+        if (gv == null || gv.isGameOver()) {
+            // Ya se acabo: finishGame llega (o ha llegado) por su cuenta.
+            return;
+        }
+        final Game game = gv.getGame();
+        if (game == null) {
+            return;
+        }
+        game.getAction().invoke(() -> {
+            try {
+                game.setGameOver(forge.game.GameEndReason.AllHumansLost);
+            } catch (final RuntimeException e) {
+                System.out.println("[neo] no se ha podido cerrar la partida: " + e);
+            }
+        });
+    }
+
+    public Exit getExitAction() {
+        return exitAction;
+    }
+
+    /** Mientras esta puesto, las confirmaciones del motor se dan por aceptadas. */
+    private volatile boolean autoConfirm;
+
+    private final AtomicBoolean finished = new AtomicBoolean(false);
+    private final AtomicInteger decisions = new AtomicInteger();
+    private PhaseType lastPhase;
+
+    /**
+     * La ronda, que el motor no lleva (ver {@link RoundCounter}). Una por
+     * partida: se rehace en {@code openView}. Se alimenta siempre, aunque el
+     * ajuste este apagado, para que encenderlo a media partida diga la buena.
+     */
+    private volatile RoundCounter rounds = new RoundCounter();
+
+    /** La ronda que se ensenya: 0 si el ajuste esta apagado o no se sabe. */
+    private int shownRound(final GameView gv) {
+        final int r = gv == null ? 0 : rounds.round(gv);
+        return RoundCounter.enabled() ? r : 0;
+    }
+
+    /** El registro detallado de esta partida, o null si esta apagado. Ver {@link DetailLog}. */
+    private volatile DetailLog detail;
+    private int lastTurn = -1;
+
+    /** Cuantos asientos de esta partida son mios. 0 = estoy mirando. */
+    private int discordSeats;
+
+    /**
+     * Cuantas veces seguidas, en este turno, el piloto automatico se ha
+     * encontrado un ataque que el motor no va a aceptar. Ver autoPressOk().
+     */
+    private final AtomicInteger attackRetries = new AtomicInteger();
+    private volatile int attackRetryTurn = -1;
+    private final AtomicBoolean attackGaveUp = new AtomicBoolean(false);
+    private static final int MAX_ATTACK_RETRIES = 6;
+    /** {@code -Dneo.autoplay.attackGuard=false}: apagarlo, para ver attackcheck en rojo. */
+    private static final boolean ATTACK_GUARD =
+            !"false".equals(System.getProperty("neo.autoplay.attackGuard"));
+
+    /** El piloto automatico ya se ha rendido con un bloqueo. Ver answerInvalidBlock(). */
+    private final AtomicBoolean blockGaveUp = new AtomicBoolean(false);
+    /** {@code -Dneo.autoplay.blockGuard=false}: apagarlo, para ver blockcheck en rojo. */
+    private static final boolean BLOCK_GUARD =
+            !"false".equals(System.getProperty("neo.autoplay.blockGuard"));
+
+    /**
+     * El OK del piloto automatico, decidido <b>al pulsarlo</b> y no al pedirlo.
+     *
+     * <p>Fuera del ataque es el {@code selectButtonOk} de siempre. En el ataque
+     * no puede serlo, y fue un cuelgue real: {@code questcheck} se paso 90
+     * minutos al 100% de CPU el 14-09-2026. {@code InputAttack.onOk} solo hace
+     * {@code stop()}; quien decide si el ataque vale es
+     * {@code PhaseHandler.declareAttackersTurnBasedAction}, que con
+     * {@code CombatUtil.validateAttackers} en falso <b>vuelve a preguntar</b>
+     * en un {@code do/while}. Con una criatura obligada a atacar (provocar,
+     * "ataca cada combate si puede") el ataque vacio nunca vale, el piloto
+     * contestaba OK otra vez, y asi hasta el infinito. Como los mazos del
+     * comprobador salen al azar, pasaba unas veces si y otras no.
+     *
+     * <p>Un humano nunca lo ve: lee el aviso y declara la criatura. Esto hace
+     * lo mismo por el camino mas corto — {@code alphaStrike}, que solo
+     * <b>anyade</b> atacantes y ya coloca a los obligados contra su defensor.
+     * No el boton Cancelar, que tambien ataca con todo pero con atacantes ya
+     * puestos los <b>retira</b>: con dos pulsaciones en cola (cada aviso llega
+     * al menos dos veces) una atacaria y la otra deshacia.
+     *
+     * <p>Y si ni asi vale (restricciones que se contradicen con atacar con
+     * todo), no hay nada mas que el piloto sepa probar: se dice FALLO en
+     * mayusculas — que es lo que busca {@code comprobar-todo.py} — y se
+     * termina la partida, en vez de dejar la bateria colgada horas.
+     */
+    private void autoPressOk() {
+        final IGameController controller = getGameController();
+        if (ATTACK_GUARD && controller instanceof forge.player.PlayerControllerHuman human
+                && human.getInputQueue().getInput()
+                        instanceof forge.gamemodes.match.input.InputAttack) {
+            final Game game = human.getGame();
+            final forge.game.combat.Combat combat = game == null ? null : game.getCombat();
+            if (combat != null && !forge.game.combat.CombatUtil.validateAttackers(combat)) {
+                answerInvalidAttack(human, combat);
+                return;
+            }
+            attackRetries.set(0);
+        }
+        if (BLOCK_GUARD && controller instanceof forge.player.PlayerControllerHuman human
+                && human.getInputQueue().getInput()
+                        instanceof forge.gamemodes.match.input.InputBlock
+                && !answerInvalidBlock(human)) {
+            return;
+        }
+        controller.selectButtonOk();
+    }
+
+    /**
+     * El gemelo del ataque, en la declaracion de <b>bloqueadores</b>. Devuelve
+     * si ya se puede pulsar OK.
+     *
+     * <p>Otro cuelgue real: {@code comprobar-todo.py} corto {@code questcheck}
+     * a los 300 s el 15-09-2026, con <i>"Spirit Token (124) must block an
+     * attacker, but has not been assigned to block any."</i> como ultima linea.
+     * Aqui el motor no repregunta: {@code InputBlock.onOk} valida con
+     * {@code CombatUtil.validateBlocks} y, si no vale, solo ensenya el aviso y
+     * sigue esperando. Al piloto no le llega otra pulsacion, y el hilo de la
+     * partida se queda en {@code showAndWait} para siempre, sin gastar CPU.
+     *
+     * <p>Lo que haria un humano: poner a bloquear a quien esta obligado (Lure,
+     * "bloquea cada combate si puede"). Primero solo eso, cambiando lo minimo
+     * lo que hace el piloto; si el motor aun no lo acepta (bloqueos de varias
+     * criaturas, "no puede bloquear sola"...), se le pide el bloqueo entero a
+     * la IA de Forge, que ya sabe de todas esas restricciones. Y si ni asi,
+     * FALLO y se termina la partida, como con el ataque.
+     */
+    private boolean answerInvalidBlock(final forge.player.PlayerControllerHuman human) {
+        final Game game = human.getGame();
+        final forge.game.combat.Combat combat = game == null ? null : game.getCombat();
+        if (combat == null) {
+            return true;
+        }
+        final forge.game.player.Player defender = blockingDefender(human, combat);
+        if (defender == null) {
+            return true;
+        }
+        final String problem = forge.game.combat.CombatUtil.validateBlocks(combat, defender);
+        if (problem == null) {
+            return true;
+        }
+        if (blockGaveUp.get()) {
+            return false;
+        }
+        trace("bloqueo obligado: %s | poniendo a bloquear a los obligados", problem);
+        assignRequiredBlocks(combat, defender);
+        String left = forge.game.combat.CombatUtil.validateBlocks(combat, defender);
+        if (left != null) {
+            trace("bloqueo obligado: %s | pidiendo el bloqueo a la IA", left);
+            try {
+                new forge.ai.AiBlockController(defender, false).assignBlockersForCombat(combat);
+            } catch (final RuntimeException e) {
+                trace("bloqueo obligado: la IA ha fallado al bloquear: %s", e);
+            }
+            left = forge.game.combat.CombatUtil.validateBlocks(combat, defender);
+        }
+        if (left == null) {
+            game.fireEvent(new forge.game.event.GameEventCombatChanged());
+            return true;
+        }
+        if (!blockGaveUp.compareAndSet(false, true)) {
+            return false;
+        }
+        System.out.println("  FALLO - piloto automatico: el motor rechaza el bloqueo (" + left
+                + "); se termina la partida para no colgar la bateria");
+        try {
+            human.concede();
+        } catch (final RuntimeException e) {
+            System.out.println("[neo] el motor ha fallado al conceder: " + e);
+        }
+        endTheGameForReal();
+        return false;
+    }
+
+    /**
+     * A quien le estamos declarando bloqueadores: a nosotros, o a quien nos
+     * haya cedido la declaracion (Odric, Lunarch Marshal y compania).
+     * {@code InputBlock} no publica su defensor, asi que se deduce como lo hace
+     * {@code PhaseHandler.declareBlockersTurnBasedAction}.
+     */
+    private static forge.game.player.Player blockingDefender(
+            final forge.player.PlayerControllerHuman human, final forge.game.combat.Combat combat) {
+        final forge.game.player.Player me = human.getPlayer();
+        forge.game.player.Player other = null;
+        for (final forge.game.player.Player p : combat.getDefendingPlayers()) {
+            final forge.game.player.Player declares =
+                    java.util.Objects.requireNonNullElse(p.getDeclaresBlockers(), p);
+            if (declares != me || !combat.isPlayerAttacked(p)) {
+                continue;
+            }
+            if (p == me) {
+                return p;
+            }
+            if (other == null) {
+                other = p;
+            }
+        }
+        return other;
+    }
+
+    /**
+     * Pone a bloquear a cada criatura que <b>debe</b> hacerlo, contra el primer
+     * atacante con el que la obligacion queda cumplida. Con Lure no vale uno
+     * cualquiera: bloquear a otro atacante no satisface a la criatura con
+     * Lure, por eso se prueba y se deshace.
+     */
+    private static void assignRequiredBlocks(final forge.game.combat.Combat combat,
+                                             final forge.game.player.Player defender) {
+        for (final forge.game.card.Card blocker : defender.getCreaturesInPlay()) {
+            if (!owesABlock(blocker, combat)) {
+                continue;
+            }
+            for (final forge.game.card.Card attacker : combat.getAttackers()) {
+                if (combat.isBlocking(blocker, attacker)
+                        || !forge.game.combat.CombatUtil.canBlock(attacker, blocker, combat)) {
+                    continue;
+                }
+                combat.addBlocker(attacker, blocker);
+                if (!owesABlock(blocker, combat)) {
+                    break;
+                }
+                combat.removeBlockAssignment(attacker, blocker);
+            }
+        }
+    }
+
+    private static boolean owesABlock(final forge.game.card.Card blocker,
+                                      final forge.game.combat.Combat combat) {
+        return forge.game.combat.CombatUtil.mustBlockAnAttacker(blocker, combat, null)
+                || (forge.game.staticability.StaticAbilityMustBlock.blocksEachCombatIfAble(blocker)
+                        && !combat.isBlocking(blocker));
+    }
+
+    private void answerInvalidAttack(final forge.player.PlayerControllerHuman human,
+                                     final forge.game.combat.Combat combat) {
+        if (attackGaveUp.get()) {
+            return;
+        }
+        final GameView gv = getGameView();
+        final int turn = gv == null ? -1 : gv.getTurn();
+        if (attackRetryTurn != turn) {
+            attackRetryTurn = turn;
+            attackRetries.set(0);
+        }
+        final int tries = attackRetries.incrementAndGet();
+        if (tries <= MAX_ATTACK_RETRIES && combat.getAttackers().isEmpty()) {
+            trace("ataque obligado: el vacio no vale, atacando con todo");
+            // alphaStrike vuelve a llamar a updateButtons, y de ahi sale el OK
+            // (detras de esta respuesta, no dentro: ver pilotRespond).
+            human.alphaStrike();
+            return;
+        }
+        // Con atacantes puestos y aun invalido no se espera a otra pulsacion:
+        // alphaStrike ya ha hecho lo que podia, y el motor vuelve a preguntar
+        // con el MISMO combate (conserva los atacantes). Otra pulsacion no
+        // llegaria nunca, y la partida se quedaria aparcada en silencio.
+        if (!attackGaveUp.compareAndSet(false, true)) {
+            return;
+        }
+        System.out.println("  FALLO - piloto automatico: el motor rechaza el ataque "
+                + tries + " veces seguidas (atacantes: " + combat.getAttackers()
+                + "); se termina la partida para no colgar la bateria");
+        try {
+            human.concede();
+        } catch (final RuntimeException e) {
+            System.out.println("[neo] el motor ha fallado al conceder: " + e);
+        }
+        endTheGameForReal();
+    }
+
+    public NeoMatchUI(final Mode mode, final boolean verbose) {
+        this.mode = mode;
+        this.verbose = verbose;
+    }
+
+    public int getDecisionCount() {
+        return decisions.get();
+    }
+
+    public boolean isFinished() {
+        return finished.get();
+    }
+
+    public void shutdown() {
+        responder.shutdownNow();
+    }
+
+    // ===============================================================
+    // Puente con la mesa (fase 3)
+    // ===============================================================
+
+    private volatile TableBinder binder;
+    private volatile TableScreen table;
+
+    /** Engancha la mesa. Si no hay, seguimos funcionando solo por consola. */
+    public void setBinder(final TableBinder binder) {
+        this.binder = binder;
+        pushToTable();
+    }
+
+    /** La pantalla con la que hablar en modo humano. */
+    public void setTable(final TableScreen table) {
+        this.table = table;
+        if (table == null || mode != Mode.HUMAN) {
+            return;
+        }
+        // Esto se llama desde el hilo que lanza la partida, no desde el de
+        // JavaFX, y toca nodos de la escena. Al hilo de interfaz con ello.
+        final UiDispatcher ui = uiDispatcher();
+        final Runnable wire = () -> {
+            wireGameLogButton();
+            table.setOnCardClicked(this::onCardClicked);
+            table.setOnStackCountClicked(this::onStackCountClicked);
+            table.setOnPlayerClicked(this::onPlayerClicked);
+            // Lanzar desde el cementerio o el exilio: el visor de la zona deja
+            // clicar lo que el motor dice que se puede lanzar desde ahi.
+            table.setPlayableOutside(this::isPlayableOutside);
+            table.setTryOutside(this::mayTryOutside);
+            // El visor de zonas ensenya cada carta solo si el motor lo permite:
+            // la biblioteca es informacion oculta.
+            table.setCardVisibility(this::mayView);
+            table.setLibrarySource(this::libraryToShow);
+            // "Equipar" desde la carta ampliada. Ver equipLabel.
+            table.setEquipAction(this::equipLabel, this::equipFromZoom);
+            table.setOnCardDropped(this::onCardDropped);
+            // Las tierras que giraria "Auto", con el raton sobre una carta de
+            // la mano. Ver TapPreview.
+            table.setOnHandHover(this::previewPayment);
+            // Cambiar de sitio una carta de la mano: el motor la mueve en su
+            // zona, asi que el orden aguanta cada repintado y vale en red.
+            table.setOnHandReorder((card, index) -> {
+                if (interactive() && !finished.get()) {
+                    respondLater(() -> getGameController().reorderHand(card, index));
+                }
+            });
+
+            // Gastar mana flotante clicando su pip.
+            table.setOnManaClicked(color ->
+                    respondLater(() -> getGameController().useMana(color)));
+
+            // "No me vuelvas a preguntar por esto": el menu del stack.
+            table.setOnStackMenu(this::showStackMenu);
+
+            // Paradas de fase: el control del auto-pass, como los stops de Arena.
+            table.setPhaseStops(p -> hasStop(true, p), p -> hasStop(false, p));
+            table.setOnPhaseToggled((mine, phase) -> {
+                toggleStop(mine, phase);
+                table.setPhaseStops(p -> hasStop(true, p), p -> hasStop(false, p));
+            });
+        };
+        if (ui != null) {
+            ui.runLater(wire);
+        } else {
+            wire.run();
+        }
+    }
+
+    private boolean interactive() {
+        return mode == Mode.HUMAN && table != null;
+    }
+
+    /** La ultima linea de disparo de una pregunta de modo. Ver {@link #getChoices}. */
+    private volatile String lastTriggerDetail;
+
+    /** Para {@code TriggerDetailCheck}: lo que habria salido bajo el titulo. */
+    String lastTriggerDetail() {
+        return lastTriggerDetail;
+    }
+
+    /** La linea que llego pegada al titulo (lo que veria un invitado), y el titulo sin ella. */
+    private volatile String lastWiredDetail;
+    private volatile String lastWiredTitle;
+
+    String lastWiredDetail() {
+        return lastWiredDetail;
+    }
+
+    String lastWiredTitle() {
+        return lastWiredTitle;
+    }
+
+    /**
+     * Click en cualquier carta de la mesa.
+     *
+     * <p>Es el verbo universal: {@code selectCard} sirve para lanzar un
+     * hechizo, activar una habilidad, elegir objetivo, sacrificar o declarar
+     * atacante. Quien decide que significa es el input activo del motor, no
+     * nosotros. Si la carta tiene varias habilidades jugables, el motor nos
+     * devolvera la llamada por {@code getAbilityToPlay}.
+     */
+    /**
+     * Click en el retrato de un jugador.
+     *
+     * <p>Lo pide el motor en varios sitios ("Who would you like to start this
+     * game? (Click on the portrait)", objetivos que son jugadores, a quien
+     * atacas). Sin esto la partida se queda esperando para siempre.
+     */
+    // Explicit opponent choice belongs to this game/turn, not to a visual seat.
+    // InputAttack resets its defender on entry; restore the user's choice with
+    // the normal selectPlayer input immediately before selecting an attacker.
+    private PlayerView chosenAttackPlayer;
+    private int chosenAttackGame = -1;
+    private int chosenAttackTurn = -1;
+
+    private void rememberAttackPlayer(final PlayerView player) {
+        final GameView gv = getGameView();
+        if (gv == null || player == null || isMe(player) || payingMana || isSelecting() || getSelectionMax() > 0
+                || !isMe(gv.getPlayerTurn()) || !player.isOpponentOf(gv.getPlayerTurn())) return;
+        final PhaseType phase = gv.getPhase();
+        if (phase != PhaseType.MAIN1 && phase != PhaseType.COMBAT_BEGIN
+                && phase != PhaseType.COMBAT_DECLARE_ATTACKERS) return;
+        chosenAttackPlayer = player;
+        chosenAttackGame = gv.getId();
+        chosenAttackTurn = gv.getTurn();
+    }
+
+    private PlayerView attackPlayerFor(final CardView card) {
+        final GameView gv = getGameView();
+        if (!isDeclaringAttackers() || chosenAttackPlayer == null || gv == null
+                || gv.getId() != chosenAttackGame || gv.getTurn() != chosenAttackTurn
+                || card.getZone() != ZoneType.Battlefield || !isMe(card.getController())
+                || card.getCurrentState() == null || !card.getCurrentState().isCreature()) return null;
+        for (final PlayerView player : gv.getPlayers()) {
+            if (player.equals(chosenAttackPlayer) && !player.getHasLost()) return player;
+        }
+        return null;
+    }
+
+    /** Solo para pruebas ({@code --field-click dr:Origen>Destino}): suelta una carta de la mesa sobre otra. */
+    public boolean dropForTest(final String sourceName, final String targetName) {
+        final GameView gv = getGameView();
+        if (gv == null) {
+            return false;
+        }
+        CardView source = null;
+        CardView target = null;
+        for (final PlayerView p : gv.getPlayers()) {
+            final Iterable<CardView> field = p.getCards(ZoneType.Battlefield);
+            if (field == null) {
+                continue;
+            }
+            for (final CardView c : field) {
+                if (source == null && c.getName().equalsIgnoreCase(sourceName)) {
+                    source = c;
+                } else if (target == null && c.getName().equalsIgnoreCase(targetName)) {
+                    target = c;
+                }
+            }
+        }
+        // Y si no esta en la mesa, de tu mano: soltar un aura sobre una
+        // criatura (AuraDrop), "dr:Rancor>Grizzly Bears".
+        boolean fromHand = false;
+        if (source == null) {
+            final PlayerView me = localPlayerView();
+            final Iterable<CardView> hand = me == null ? null : live(me).getCards(ZoneType.Hand);
+            if (hand != null) {
+                for (final CardView c : hand) {
+                    if (c.getName().equalsIgnoreCase(sourceName)) {
+                        source = c;
+                        fromHand = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (source == null || target == null) {
+            return false;
+        }
+        onCardDropped(source, fromHand, target);
+        return true;
+    }
+
+    /** Solo para pruebas ({@code --field-click pl:Nombre}): clica el retrato de ese jugador. */
+    public boolean clickPlayerNamed(final String name) {
+        final GameView gv = getGameView();
+        if (gv == null) {
+            return false;
+        }
+        final PlayerView me = localPlayer();
+        for (final PlayerView p : gv.getPlayers()) {
+            // "@rival": el primero que no seas tu (los nombres de la IA salen al azar).
+            if ("@rival".equals(name) ? !p.equals(me) : p.getName().equalsIgnoreCase(name)) {
+                onPlayerClicked(p);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void onPlayerClicked(final PlayerView player) {
+        if (!interactive() || player == null || finished.get()) {
+            return;
+        }
+        rememberAttackPlayer(player);
+        didDetail("clicked player " + DetailLog.name(player));
+        respondLater(() -> getGameController().selectPlayer(player, null));
+    }
+
+    /** Lo que ha hecho el jugador, al registro detallado si esta encendido. */
+    private void didDetail(final String what) {
+        final DetailLog d = detail;
+        if (d != null) {
+            d.did(what);
+        }
+    }
+
+    /**
+     * El jugador ha cambiado de pestanya de rival.
+     *
+     * <p><b>La pestanya elige tambien a quien atacas.</b> Mientras declaras
+     * atacantes, {@code InputAttack} guarda un "defensor actual" y TODO lo que
+     * cliques ataca a ese, mires a quien mires. Cambiar de pestanya no se lo
+     * decia: mirabas a IA-3, clicabas una criatura, y atacaba a IA-1. Fallo
+     * real jugando, y de los peores — el ataque se declara perfectamente, solo
+     * que contra quien no era, y no hay forma de darse cuenta hasta que pega.
+     *
+     * <p>Aqui no hay ninguna regla nuestra: es el MISMO {@code selectPlayer}
+     * que manda clicar su retrato. Solo se traduce el gesto.
+     */
+    public void onOpponentFocused(final PlayerView player) {
+        if (!interactive() || player == null || finished.get()) {
+            return;
+        }
+        rememberAttackPlayer(player);
+        if (!isDeclaringAttackers() || isHighlighted(player)) {
+            return;
+        }
+        // Mirar la mesa de un aliado no es elegirle de defensor: el motor no
+        // le deja ser atacado y solo contestaria con un "accion incorrecta".
+        if (NeoTeams.isAlly(localPlayerView(), player)) {
+            return;
+        }
+        if (CLICK_DEBUG) {
+            System.out.printf("[click] pestanya %s -> nuevo defensor%n",
+                    PlayerName.of(player));
+        }
+        respondLater(() -> getGameController().selectPlayer(player, null));
+    }
+
+    /**
+     * Si el motor esta esperando ahora mismo a que declares atacantes.
+     *
+     * <p>Se comprueba porque {@code selectPlayer} NO es inofensivo en
+     * cualquier momento: durante un lanzamiento significa "te elijo a ti de
+     * objetivo", y mirar a un rival no puede convertirse en apuntarle.
+     *
+     * <p>La clave es {@code isSelecting()}: los DOS inputs que dan sentido a
+     * elegir un jugador ({@code InputSelectTargets} y
+     * {@code InputSelectEntitiesFromList}) publican sus candidatos con
+     * {@code setSelectables}, e {@code InputAttack} no. Con eso, mas la fase y
+     * el turno, no queda ningun caso ambiguo.
+     */
+    private boolean isDeclaringAttackers() {
+        final GameView gv = getGameView();
+        if (gv == null || gv.getPhase() != PhaseType.COMBAT_DECLARE_ATTACKERS) {
+            return false;
+        }
+        return !payingMana && !isSelecting() && getSelectionMax() <= 0 && isMe(gv.getPlayerTurn());
+    }
+
+    /**
+     * El "xN" de una pila de fichas iguales. Al declarar atacantes, como en
+     * Arena, atacan todas de un clic (Discord, 17-10-2026): es lo mismo que
+     * clicarlas una a una, y el motor decide, como siempre, cual puede atacar.
+     * En cualquier otro momento es un clic en la de delante, lo de antes.
+     */
+    private void onStackCountClicked(final List<CardView> cards) {
+        if (cards == null || cards.isEmpty()) {
+            return;
+        }
+        if (isSelecting() && interactive() && !finished.get()) {
+            pickFromStack(cards);
+            return;
+        }
+        if (!isDeclaringAttackers()) {
+            onCardClicked(cards.get(0));
+            return;
+        }
+        for (final CardView card : cards) {
+            if (!card.isAttacking()) {
+                onCardClicked(card);
+            }
+        }
+    }
+
+    /**
+     * El "xN" de una pila mientras el motor pide elegir cartas: cuantas
+     * (Discord, 22-10-2026). Ver {@link forge.neo.ui.BattlefieldPane#setSelectableTest}.
+     *
+     * <p>La pila ya viene partida: o todas elegidas o todas libres, y todas
+     * elegibles o ninguna. Sobre la de elegidas las suelta todas; sobre una
+     * libre pregunta cuantas coger, sin pasar de lo que aun deja el motor
+     * ({@code getSelectionMax} menos lo ya elegido). Cada una es un clic de
+     * los de siempre, en orden, como al atacar con la pila entera.
+     */
+    private void pickFromStack(final List<CardView> cards) {
+        final List<CardView> picked = new ArrayList<>();
+        final List<CardView> free = new ArrayList<>();
+        for (final CardView c : cards) {
+            if (!isSelectable(c)) {
+                continue;
+            }
+            (isHighlighted(c) ? picked : free).add(c);
+        }
+        if (free.isEmpty()) {
+            if (picked.isEmpty()) {
+                onCardClicked(cards.get(0));
+            } else {
+                picked.forEach(this::onCardClicked);
+            }
+            return;
+        }
+        final int max = getSelectionMax();
+        final int room = max > 0 ? Math.max(0, max - countPickedSelectables()) : free.size();
+        final int most = Math.min(free.size(), room);
+        if (most <= 1 || table == null) {
+            onCardClicked(free.get(0));
+            return;
+        }
+        table.askPileCount(free.get(0), most, n -> {
+            for (final CardView c : free.subList(0, Math.min(n, free.size()))) {
+                onCardClicked(c);
+            }
+        });
+    }
+
+    private void onCardClicked(final CardView card) {
+        if (!interactive() || card == null || finished.get()) {
+            return;
+        }
+        didDetail("clicked card " + DetailLog.card(card));
+
+        // A planeswalker/battle explicitly selected for attack supersedes a player choice.
+        if (isDeclaringAttackers() && card.getCurrentState() != null
+                && (card.getCurrentState().isBattle() || (card.getCurrentState().isPlaneswalker()
+                && !isMe(card.getController())))) chosenAttackPlayer = null;
+        final PlayerView chosen = attackPlayerFor(card);
+        if (chosen != null) {
+            lastClicked = card;
+            // Revalidate when the queued input runs: a phase/turn may have changed.
+            respondInTwoSteps(() -> {
+                if (chosen.equals(attackPlayerFor(card))) {
+                    getGameController().selectPlayer(chosen, null);
+                }
+            }, () -> chosen.equals(attackPlayerFor(card))
+                    && isHighlighted(chosen), // engine rejected this defender
+                    () -> getGameController().selectCard(card, null, null));
+            return;
+        }
+
+        // Volver a clicar la fuente que acabas de tapear = deshacerlo: la carta
+        // se endereza y el mana vuelve. Es lo que espera cualquiera que haya
+        // jugado en una mesa de verdad, y es un error facil de cometer.
+        //
+        // El motor solo sabe deshacer LA ULTIMA accion, asi que esto se ofrece
+        // unicamente sobre la ultima fuente que produjo mana. Clicar otra
+        // tierra tapada no deshace nada ajeno: simplemente no hace nada.
+        //
+        // Las dos condiciones de estado son IMPRESCINDIBLES, no adorno: una
+        // carta ENDEREZADA no puede tener nada que deshacer, y sin mana
+        // flotante tampoco hay nada que devolver. Sin ellas, si la marca se
+        // quedaba pegada a una carta (por ejemplo porque el mana se vacio al
+        // cambiar de fase sin avisar), esa carta dejaba de responder al click
+        // para siempre: cada click se iba a un deshacer que no hacia nada.
+        if (canUndoClick(card) && !isSelecting()) {
+            clickTrace(card, "deshacer");
+            lastManaSource = null;
+            respondLater(() -> getGameController().undoLastAction());
+            return;
+        }
+
+        // Quitar de combate un bloqueador que para a OTRO atacante.
+        //
+        // InputBlock guarda un "atacante actual" y todo lo que clicas se
+        // entiende referido a EL: si la ficha bloquea a A y el actual es B, el
+        // click no hace nada y la ficha se queda pegada al combate para
+        // siempre. Fallo real jugando: "me deja poner mas bloqueadores y
+        // quitarlos, pero a este no hay forma de quitarlo".
+        //
+        // El arreglo es el mismo truco de orden que ya usa el arrastre: dos
+        // clicks, primero el atacante y luego el bloqueador. Ni una regla
+        // nuestra.
+        final CardView blocked = attackerToSelectFirst(card);
+        if (blocked != null) {
+            clickTrace(card, "quitar bloqueo");
+            lastClicked = card;
+            // Dos ordenes: en red, la segunda espera a la respuesta de la primera.
+            respondInTwoSteps(() -> getGameController().selectCard(blocked, null, null),
+                    () -> true,
+                    () -> getGameController().selectCard(card, null, null));
+            return;
+        }
+
+        // Lanzar el hechizo de una criatura PREPARADA clicandola a ella.
+        //
+        // Sin esto no se puede: el motor no pone la habilidad en la criatura.
+        // Lo que hace (AlterAttributeEffect, caso "Prepared") es dejar una
+        // COPIA de la carta en el exilio y darle MayPlay desde un efecto
+        // invisible del mando. O sea que el click que el motor espera es sobre
+        // esa copia, dentro del visor del exilio — un sitio al que nadie va a
+        // llegar solo cuando lo que la carta dice es "esta criatura se
+        // prepara".
+        //
+        // Aqui no se inventa nada: se manda el MISMO selectCard, solo que a la
+        // carta que el motor espera. Es el mismo truco de redireccion que ya
+        // usa el quitar un bloqueador.
+        final CardView prepared = preparedSpellToCast(card);
+        if (prepared != null) {
+            clickTrace(card, "lanzar su hechizo preparado");
+            lastClicked = card;
+            respondLater(() -> getGameController().selectCard(prepared, null, null));
+            return;
+        }
+
+        // Una tierra mientras se elige que girar para waterbend, convocar o
+        // improvisar: el motor no la acepta ahi, asi que se pasa al pago y se
+        // gira alli. Ver landPaysTheRest.
+        if (landPaysTheRest(card)) {
+            return;
+        }
+
+        // Apuntar a un permanente del rival con Ward: se pregunta antes, porque
+        // despues no se puede cambiar de objetivo (WardGuard).
+        if (askBeforeWardTarget(card)) {
+            clickTrace(card, "preguntar antes de apuntar a un ward");
+            return;
+        }
+
+        // El toque que cerraria una eleccion de "elige N", con el ajuste
+        // puesto: se pregunta antes de mandarlo (PickGuard).
+        if (askBeforeLastPick(card)) {
+            clickTrace(card, "preguntar antes de cerrar la eleccion");
+            return;
+        }
+
+        // Te atacan y aun no se declaran bloqueadores: tocar tu criatura
+        // activaria su habilidad, y casi seguro querias bloquear (BlockIntent).
+        if (askBlockOrUse(card)) {
+            clickTrace(card, "preguntar bloquear o usar");
+            return;
+        }
+
+        // El toque que activaria la habilidad de un permanente, con el ajuste
+        // puesto: se pregunta antes de mandarlo (ActivateGuard).
+        if (askBeforeActivate(card)) {
+            clickTrace(card, "preguntar antes de activar");
+            return;
+        }
+
+        clickTrace(card, "activar");
+        lastClicked = card;
+        respondLater(() -> {
+            // Si el motor no la acepta, decir POR QUE cuando se sabe (CantPlay):
+            // un permanente cuya habilidad no se puede usar no hacia nada al
+            // clicarlo (Discord, 18-10-2026, Weathered Wayfarer). Sin motivo
+            // seguro, como antes: nada.
+            if (!getGameController().selectCard(card, null, null)) {
+                final String why = CantPlay.reason(getGameController(), card);
+                if (why != null) {
+                    showWhy(why);
+                }
+            }
+        });
+    }
+
+    /**
+     * "Vas a descartar estas dos: ¿seguro?" (Discord, 11-10-2026). El motor
+     * confirma solo una eleccion de "elige N cartas" en cuanto llega a N, asi
+     * que el toque que la completaria se GUARDA y se pregunta: "Cambiar" (la
+     * marcada, la segura) lo suelta sin mandarlo, y "Confirmar" lo manda.
+     * Cuando preguntar lo decide {@link forge.neo.match.PickGuard}, que comparte
+     * Android.
+     *
+     * @return true si nos hemos quedado el toque para preguntar
+     */
+    private boolean askBeforeLastPick(final CardView card) {
+        if (table == null || !interactive() || finished.get()
+                || table.getOverlay().isShowing()
+                || !forge.neo.match.PickGuard.shouldAsk(getGameController(), this, card)) {
+            return false;
+        }
+        final StringBuilder names = new StringBuilder();
+        for (final CardView c : forge.neo.match.PickGuard.picked(this, card)) {
+            if (names.length() > 0) {
+                names.append(", ");
+            }
+            names.append(forge.neo.card.CardText.nameOf(c));
+        }
+        final String prompt = lastPrompt;
+        final AtomicBoolean answered = new AtomicBoolean();
+        final ConfirmDialog dialog = new ConfirmDialog(
+                prompt == null || prompt.isBlank() ? NeoText.get("pick.ask.title") : prompt,
+                NeoText.get("pick.ask.detail", names.toString()),
+                List.of(NeoText.get("pick.ask.change"), NeoText.get("pick.ask.confirm")),
+                0,
+                index -> {
+                    if (!answered.compareAndSet(false, true)) {
+                        return;
+                    }
+                    table.getOverlay().hide();
+                    if (index != null && index == 1) {
+                        lastClicked = card;
+                        respondLater(() -> getGameController().selectCard(card, null, null));
+                    }
+                });
+        dialog.getStyleClass().add("phase-ask");
+        // Para el piloto de pruebas, como en confirmLeavingMain: el que sigue.
+        if (dialog.option(1) != null) {
+            dialog.option(1).getStyleClass().add("phase-ask-go");
+        }
+        table.getOverlay().show(dialog);
+        table.requestLayout();
+        return true;
+    }
+
+    /**
+     * "¿Activar Merfolk Looter?" (Discord, 11-10-2026: <i>"the ability to back
+     * out of a tap effect without triggering it"</i>). El toque que activaria la
+     * unica habilidad de un permanente se GUARDA y se pregunta: "Cancelar" (la
+     * marcada, la segura) lo suelta sin mandarlo, y "Activar" lo manda. Cuando
+     * preguntar lo decide {@link forge.neo.match.ActivateGuard}, que comparte
+     * Android.
+     *
+     * @return true si nos hemos quedado el toque para preguntar
+     */
+    /**
+     * "¿Bloquear con Devoted Druid?" (Discord, 19-10-2026). Te atacan, tienes
+     * prioridad en el paso de ATACANTES y tocas tu criatura: eso activaria su
+     * habilidad, y casi seguro querias bloquear. "Bloquear" (la marcada) pasa la
+     * prioridad y la toca por ti en cuanto se abre la declaracion
+     * ({@link #pendingBlocker}); "Usar sus habilidades" hace lo de siempre.
+     * Cuando preguntar lo decide {@link forge.neo.match.BlockIntent}, que
+     * comparte Android.
+     *
+     * @return true si nos hemos quedado el toque para preguntar
+     */
+    private boolean askBlockOrUse(final CardView card) {
+        if (table == null || !interactive() || finished.get()
+                || table.getOverlay().isShowing()
+                || !forge.neo.match.BlockIntent.wouldMeanBlock(getGameController(), card)) {
+            return false;
+        }
+        final String name = forge.neo.card.CardText.nameOf(card);
+        final AtomicBoolean answered = new AtomicBoolean();
+        final ConfirmDialog dialog = new ConfirmDialog(
+                NeoText.get("blockIntent.title", name),
+                NeoText.get("blockIntent.text"),
+                List.of(NeoText.get("blockIntent.block"), NeoText.get("blockIntent.use")),
+                0,
+                index -> {
+                    if (!answered.compareAndSet(false, true)) {
+                        return;
+                    }
+                    table.getOverlay().hide();
+                    if (index == null) {
+                        return;
+                    }
+                    lastClicked = card;
+                    if (index == 0) {
+                        pendingBlocker = card;
+                        pendingBlockAttacker = null;
+                        respondLater(() -> getGameController().selectButtonOk());
+                    } else {
+                        respondLater(() -> getGameController().selectCard(card, null, null));
+                    }
+                });
+        dialog.getStyleClass().add("phase-ask");
+        if (dialog.option(0) != null) {
+            dialog.option(0).getStyleClass().add("phase-ask-go");
+        }
+        table.getOverlay().show(dialog);
+        table.requestLayout();
+        return true;
+    }
+
+    /**
+     * La criatura con la que el jugador dijo "Bloquear" en el paso de atacantes
+     * ({@link #askBlockOrUse}): se toca por el en cuanto el motor abre la
+     * declaracion de bloqueadores (ver updateButtons). Hilo de JavaFX.
+     */
+    private CardView pendingBlocker;
+
+    /**
+     * La criatura sobre la que se solto un aura de la mano: la respuesta a la
+     * primera eleccion de objetivo que llegue (ver {@link AuraDrop}). Se olvida
+     * al contestarla, si sale el menu de habilidades, al volver a tener
+     * prioridad o pasados unos segundos.
+     */
+    private volatile CardView pendingAuraTarget;
+    private volatile long pendingAuraUntil;
+    private static final long AURA_DROP_WINDOW_MS = 15_000;
+
+    /** El atacante al que bloquear, si se arrastro sobre uno; si no, el que marque el motor. */
+    private CardView pendingBlockAttacker;
+
+    /**
+     * Ver {@link WardGuard}. Una vez por carta y por objetivo que se esta
+     * eligiendo: si dices que si, el siguiente toque a la misma no vuelve a
+     * preguntar (al quitarla y volver a ponerla, por ejemplo).
+     */
+    private boolean askBeforeWardTarget(final CardView card) {
+        if (table == null || !interactive() || finished.get()
+                || table.getOverlay().isShowing()
+                || !(pendingInput(getGameController()) instanceof forge.gamemodes.match.input.InputSelectTargets in)
+                || !isSelectable(card) || isMe(card.getController())) {
+            return false;
+        }
+        final String ward = WardGuard.wardOf(card);
+        if (ward == null) {
+            return false;
+        }
+        if (wardInput != in) {
+            wardInput = in;
+            wardAccepted.clear();
+        }
+        if (wardAccepted.contains(card.getId())) {
+            return false;
+        }
+        final String name = forge.neo.card.CardText.nameOf(card);
+        final AtomicBoolean answered = new AtomicBoolean();
+        final ConfirmDialog dialog = new ConfirmDialog(
+                NeoText.get("ward.ask.title", name, ward),
+                NeoText.get("ward.ask.text", ward),
+                List.of(NeoText.get("ward.ask.cancel"), NeoText.get("ward.ask.go")),
+                0,
+                index -> {
+                    if (!answered.compareAndSet(false, true)) {
+                        return;
+                    }
+                    table.getOverlay().hide();
+                    if (index != null && index == 1) {
+                        wardAccepted.add(card.getId());
+                        lastClicked = card;
+                        respondLater(() -> getGameController().selectCard(card, null, null));
+                    }
+                });
+        dialog.getStyleClass().add("phase-ask");
+        if (dialog.option(1) != null) {
+            dialog.option(1).getStyleClass().add("phase-ask-go");
+        }
+        table.getOverlay().show(dialog);
+        table.requestLayout();
+        return true;
+    }
+
+    /**
+     * Las cartas con Ward ya aceptadas como objetivo en la pregunta
+     * {@link #wardInput}; con otra pregunta se vacia. Solo el hilo de interfaz.
+     */
+    private final java.util.Set<Integer> wardAccepted = new java.util.HashSet<>();
+    private Object wardInput;
+
+    private boolean askBeforeActivate(final CardView card) {
+        if (table == null || !interactive() || finished.get()
+                || table.getOverlay().isShowing()
+                || !forge.neo.match.ActivateGuard.shouldAsk(getGameController(), card)) {
+            return false;
+        }
+        final String what = forge.neo.match.ActivateGuard.describe(getGameController(), card);
+        // Desde la mano (ciclar sin querer, Discord 17-10-2026): se dice POR QUE
+        // no se lanza, que es lo que el jugador no espera.
+        final boolean fromHand = forge.neo.match.ActivateGuard.fromHand(getGameController(), card);
+        final String name = forge.neo.card.CardText.nameOf(card);
+        final AtomicBoolean answered = new AtomicBoolean();
+        final ConfirmDialog dialog = new ConfirmDialog(
+                fromHand ? NeoText.get("activate.hand.title", name) : NeoText.get("activate.ask.title", name),
+                fromHand ? NeoText.get("activate.hand.text", what) : what,
+                List.of(NeoText.get("activate.ask.cancel"),
+                        NeoText.get(fromHand ? "activate.hand.go" : "activate.ask.go")),
+                0,
+                index -> {
+                    if (!answered.compareAndSet(false, true)) {
+                        return;
+                    }
+                    table.getOverlay().hide();
+                    if (index != null && index == 1) {
+                        lastClicked = card;
+                        respondLater(() -> getGameController().selectCard(card, null, null));
+                    }
+                });
+        dialog.getStyleClass().add("phase-ask");
+        // Para el piloto de pruebas, como en confirmLeavingMain: el que sigue.
+        if (dialog.option(1) != null) {
+            dialog.option(1).getStyleClass().add("phase-ask-go");
+        }
+        table.getOverlay().show(dialog);
+        table.requestLayout();
+        return true;
+    }
+
+    /**
+     * El hechizo preparado que hay que lanzar al clicar esta criatura, o null.
+     *
+     * <p>Tres condiciones, y las tres hacen falta:
+     *
+     * <ol>
+     *   <li><b>Que este preparada de verdad</b>: {@code getPreparedSpell()} da
+     *       la copia del exilio, y es null si no lo esta. (Ojo con
+     *       {@code hasPreparedSpell()}, que es estructural y vale para las 54
+     *       cartas de la mecanica aunque no esten preparadas.)</li>
+     *   <li><b>Que el motor la de por jugable AHORA</b>, con lo mismo que mira
+     *       el visor de zonas: {@code PlayerView.getFlashback()}. Es lo que
+     *       tiene en cuenta el mana, el turno, la fase y el stack — y no
+     *       nosotros.</li>
+     *   <li><b>Que clicar la criatura no signifique ya otra cosa</b>:
+     *       {@code getActivateDescription} devuelve null cuando ese click no
+     *       haria nada. Es el mismo guardia del bloqueador, y es lo que deja
+     *       intactos declarar atacante, bloquear y elegirla de objetivo.</li>
+     * </ol>
+     *
+     * <p>Medido sobre las 54 cartas: <b>ninguna</b> tiene ademas una habilidad
+     * activada propia, asi que en la practica el guardia no le quita el click
+     * a nada.
+     */
+    private CardView preparedSpellToCast(final CardView card) {
+        final CardView spell = castablePreparedSpell(card);
+        if (spell == null) {
+            return null;
+        }
+        return getGameController().getActivateDescription(card) == null ? spell : null;
+    }
+
+    /**
+     * Lo mismo pero <b>sin preguntarle nada al motor</b>: solo mirando la vista.
+     *
+     * <p>Existe por el resaltado. {@code setActionable} se recalcula sobre
+     * TODOS los nodos de la mesa en cada refresco y desde el hilo de interfaz;
+     * meter ahi un {@code getActivateDescription} por carta serian decenas de
+     * llamadas al motor por refresco, desde el hilo que no es. Estas dos
+     * preguntas son lecturas de la vista y no cuestan nada.
+     */
+    private CardView castablePreparedSpell(final CardView card) {
+        if (card == null || isSelecting() || payingMana) {
+            return null;
+        }
+        final CardView spell = card.getPreparedSpell();
+        return spell != null && isPlayableOutside(spell) ? spell : null;
+    }
+
+    /**
+     * El atacante que hay que elegir ANTES de clicar este bloqueador, o null si
+     * el click ya vale tal cual.
+     *
+     * <p>Se contesta con dos datos que ya nos da el motor y ninguna deduccion:
+     *
+     * <ol>
+     *   <li><b>Que atacante esta activo:</b> {@code InputBlock} lo marca con
+     *       {@code setHighlighted}. Si no hay ninguno marcado, no estamos
+     *       declarando bloqueos y aqui no hay nada que hacer.</li>
+     *   <li><b>Que haria el click:</b> {@code getActivateDescription} pregunta
+     *       al input activo. Si devuelve null, clicar esa carta NO hace nada —
+     *       y solo entonces nos metemos. Asi se respeta el caso legitimo de la
+     *       criatura que puede bloquear a varias a la vez, donde el click SI
+     *       significa "bloquea tambien a este".</li>
+     * </ol>
+     */
+    private CardView attackerToSelectFirst(final CardView card) {
+        final GameView gv = getGameView();
+        if (gv == null || gv.getPhase() != PhaseType.COMBAT_DECLARE_BLOCKERS
+                || card == null || !isMe(card.getController()) || !card.isBlocking()
+                || isSelecting() || getSelectionMax() > 0 || payingMana) {
+            return null;
+        }
+        final forge.game.combat.CombatView combat = gv.getCombat();
+        if (combat == null || combat.getAttackers() == null) {
+            return null;
+        }
+        CardView blocked = null;
+        boolean anyHighlighted = false;
+        for (final CardView attacker : combat.getAttackers()) {
+            if (attacker == null) {
+                continue;
+            }
+            if (isHighlighted(attacker)) {
+                anyHighlighted = true;
+                if (blocks(combat, attacker, card)) {
+                    return null;   // ya es el atacante activo: el click vale
+                }
+            } else if (blocked == null && blocks(combat, attacker, card)) {
+                blocked = attacker;
+            }
+        }
+        if (!anyHighlighted || blocked == null) {
+            return null;
+        }
+        return getGameController().getActivateDescription(card) == null ? blocked : null;
+    }
+
+    private static boolean blocks(final forge.game.combat.CombatView combat,
+                                  final CardView attacker, final CardView blocker) {
+        return contains(combat.getBlockers(attacker), blocker)
+                || contains(combat.getPlannedBlockers(attacker), blocker);
+    }
+
+    private static boolean contains(final Iterable<CardView> cards, final CardView card) {
+        if (cards == null) {
+            return false;
+        }
+        for (final CardView cv : cards) {
+            if (cv != null && cv.getId() == card.getId()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Deshacer lo ultimo. Es lo mismo que hace el click sobre la fuente recien
+     * tapeada, pero con el teclado y sin tener que acertarle a la carta.
+     */
+    public void undoLast() {
+        if (!interactive() || finished.get()) {
+            return;
+        }
+        lastManaSource = null;
+        respondLater(() -> getGameController().undoLastAction());
+    }
+
+    /**
+     * <b>"Resolverlo todo"</b>: pasar la prioridad hasta que el stack se vacie
+     * (Discord, 08-10-2026, Munkster). Todo lo delicado esta en
+     * {@link ResolveAll}, que es de las dos interfaces.
+     */
+    public boolean resolveStack() {
+        if (!interactive() || finished.get()) {
+            return false;
+        }
+        final IGameController gc = getGameController();
+        final PlayerView me = getCurrentPlayer();
+        if (gc == null || me == null) {
+            return false;
+        }
+        respondLater(() -> ResolveAll.arm(gc, me));
+        return true;
+    }
+
+    /** Ver {@link ResolveAll#mirrorOff}: lo que lo apaga, tambien al sentado. */
+    @Override
+    public void applyYieldUpdate(final forge.gamemodes.match.YieldUpdate update) {
+        super.applyYieldUpdate(update);
+        ResolveAll.mirrorOff(getGameController(), update);
+    }
+
+    /**
+     * El estado de las macros del anfitrion, en una partida en red (Forge
+     * #12288): el invitado no tiene sistema de macros propio y sus botones lo
+     * leen de lo que manda el anfitrion. Como la GUI vieja, se repintan al
+     * recibirlo, sin esperar al siguiente updateButtons.
+     */
+    @Override
+    public void applyMacroState(final forge.interfaces.IMacroSystem.State state) {
+        super.applyMacroState(state);
+        runOnUi(() -> {
+            if (table != null) {
+                table.setMacroState(isMacroRecording(), hasMacro());
+            }
+        });
+    }
+
+    /** Solo pruebas: si sigue puesto en alguno de los dos controladores. */
+    public static boolean resolvingStack(final IGameController gc) {
+        return ResolveAll.isOn(gc);
+    }
+
+    /**
+     * Cuantas cosas resolveria "Resolverlo todo" ahora, o 0 si no toca: solo
+     * con la prioridad de siempre delante (el aviso rutinario, OK encendido,
+     * nada que elegir ni pagar). Ver {@link ResolveAll#count}.
+     */
+    private int resolveAllCount(final boolean okEnabled) {
+        return ResolveAll.count(getGameView(), getGameController(), okEnabled && !payingMana
+                && !isSelecting() && getSelectionMax() <= 0 && isRoutinePriorityPrompt(lastPrompt));
+    }
+
+    /**
+     * Cuantos disparos IGUALES quedan por contestar si lo que pregunta el motor
+     * es "Usar la habilidad disparada de X?" de un disparo opcional TUYO; 0 si
+     * no es eso (Discord, 23-10-2026: cincuenta Flourishing Defenses, uno a
+     * uno). La pregunta llega como un {@code InputConfirm} con Si / No en los
+     * botones, asi que se reconoce por el disparo de arriba del stack y por el
+     * texto de Forge ({@code lblUseTriggeredAbilityOf}).
+     */
+    private int yesToAllCount(final boolean okEnabled) {
+        if (!okEnabled || payingMana || isSelecting() || lastPrompt == null) {
+            return 0;
+        }
+        final StackItemView top = topOfStack();
+        if (top == null || !top.isOptionalTrigger() || !isMe(top.getActivatingPlayer())
+                || top.getKey() == null) {
+            return 0;
+        }
+        final String ask = forge.util.Localizer.getInstance().getMessage("lblUseTriggeredAbilityOf").trim();
+        if (ask.isEmpty() || !lastPrompt.contains(ask)) {
+            return 0;
+        }
+        int same = 0;
+        final GameView gv = getGameView();
+        if (gv != null && gv.getStack() != null) {
+            for (final StackItemView si : gv.getStack()) {
+                if (si != null && top.getKey().equals(si.getKey())) {
+                    same++;
+                }
+            }
+        }
+        return Math.max(1, same);
+    }
+
+    /**
+     * "Si a todo": lo mismo que la Y o "Siempre si" del menu del stack
+     * ({@link #autoYieldTop}, con su alcance y donde se deshace) y contesta Si a
+     * esta. Los que vienen detras ya no preguntan.
+     */
+    private void yesToAll() {
+        if (!interactive() || finished.get()) {
+            return;
+        }
+        didDetail("pressed yes to all");
+        final String said = autoYieldTop(true);
+        if (said != null && table != null) {
+            table.getActionBar().setWarning(said, false);
+        }
+        respondLater(() -> getGameController().selectButtonOk());
+    }
+
+    // ---- lo que piden los atajos de teclado (ver forge.neo.NeoShortcuts) ----
+
+    /**
+     * Pasar hasta el final del turno: el atajo de "pasar turno".
+     *
+     * <p>Es el "End Turn" de la GUI de Forge ({@code CDock}), que no hace otra
+     * cosa que {@code YieldController.endTurn}. Pero eso solo <b>arma</b> el
+     * pase: la prioridad que tienes delante sigue esperando, con OK apagado, y
+     * una tecla que deja la mesa esperando parece que no ha hecho nada. Asi que,
+     * si lo que hay delante es el aviso rutinario de prioridad
+     * ({@link #isRoutinePriorityPrompt}), se pulsa OK tambien — que en
+     * {@code InputPassPriority.onOk} es pasar, sin mas.
+     *
+     * <p>Si lo que hay delante es otra cosa (declarar atacantes, elegir, pagar)
+     * no se toca: un OK ahi confirmaria algo que el jugador no ha decidido. El
+     * pase ya armado se encarga del resto en cuanto conteste.
+     */
+    public boolean passTurn() {
+        if (!interactive() || finished.get()) {
+            return false;
+        }
+        didDetail("pass turn (shortcut)");
+        final IGameController gc = getGameController();
+        final PlayerView me = getCurrentPlayer();
+        if (gc == null || me == null) {
+            return false;
+        }
+        final String prompt = lastPrompt;
+        final boolean passNow = !payingMana && !isSelecting() && getSelectionMax() <= 0
+                && prompt != null && isRoutinePriorityPrompt(prompt);
+        // En tu turno, la misma pregunta que el boton.
+        if (passNow && confirmEndingTurn(() -> respondLater(() -> armPassTurn(gc, me, true)))) {
+            return true;
+        }
+        respondLater(() -> armPassTurn(gc, me, passNow));
+        return true;
+    }
+
+    /**
+     * Lo que hace "pasar turno", sin las comprobaciones de la tecla (el
+     * comprobador lo llama sin ventana: {@code YieldCheck}).
+     *
+     * <p>El "hasta final de turno" se le pone al controlador <b>sentado</b>
+     * ({@link #seated}), no al de la interfaz. Hasta el 25-09-2026 se le ponia
+     * al de la interfaz, y ahi fallaban dos cosas a la vez: el motor no lo
+     * leia — quien decide si la prioridad se pasa sola es el sentado —, asi
+     * que con algo que hacer (un instantaneo, una habilidad) te volvia a parar
+     * a la primera; y como el motor lo cancela al final de cada turno
+     * ({@code PhaseHandler} → {@code autoPassCancel}) tambien sobre el sentado,
+     * en el de la interfaz la marca se quedaba puesta para siempre.
+     *
+     * <p>El OK si va al de la interfaz: es un click, y los clicks entran por
+     * ahi. Los dos comparten el {@code InputProxy}, asi que llega al mismo aviso.
+     */
+    void armPassTurn(final IGameController gc, final PlayerView me, final boolean passNow) {
+        YieldController.endTurn(seated(gc), me);
+        if (passNow) {
+            gc.selectButtonOk();
+        }
+    }
+
+    /**
+     * Empezar a grabar una macro, o pararla.
+     *
+     * <p>Todo lo hace el motor ({@code IGameController.macros()}, que en una
+     * partida local es {@code RecordActionsMacroSystem}): graba lo que el
+     * jugador hace y, al pararla, pregunta cuantas veces repetirla — igual que
+     * el boton del Forge de escritorio. Se llama por {@code respondLater}, el
+     * mismo camino que un click, porque la reproduccion tira del input vivo.
+     *
+     * @return true si queda grabando, false si se ha parado, null si no hay partida
+     */
+    public Boolean toggleMacroRecording() {
+        if (!interactive() || finished.get()) {
+            return null;
+        }
+        final IGameController gc = getGameController();
+        if (gc == null || gc.macros() == null) {
+            return null;
+        }
+        final boolean willRecord = !gc.macros().isRecording();
+        if (willRecord) {
+            macroChoices.clear();
+        }
+        respondLater(() -> {
+            if (willRecord) {
+                holdAutoPassForMacro(gc);
+            }
+            gc.macros().setRememberedActions();
+            syncMacroAutoPass(gc);
+        });
+        return willRecord;
+    }
+
+    /** Repetir la macro grabada. El motor pregunta cuantas veces, o avisa si no hay. */
+    public boolean playMacro() {
+        if (!interactive() || finished.get()) {
+            return false;
+        }
+        final IGameController gc = getGameController();
+        if (gc == null || gc.macros() == null) {
+            return false;
+        }
+        macroChoices.rewind();
+        respondLater(() -> {
+            holdAutoPassForMacro(gc);
+            gc.macros().repeatRememberedActions();
+            syncMacroAutoPass(gc);
+        });
+        return true;
+    }
+
+    /** Las elecciones que la macro de Forge no recuerda (ver {@link MacroChoices}). */
+    private final MacroChoices macroChoices = new MacroChoices();
+
+    /** 0 nada, 1 grabando, 2 repitiendo. Desde el hilo del motor, que es el que pregunta. */
+    private int macroMode() {
+        try {
+            final IGameController gc = getGameController();
+            if (gc == null || gc.macros() == null) {
+                return 0;
+            }
+            if (gc.macros().isReplaying()) {
+                return 2;
+            }
+            return gc.macros().isRecording() ? 1 : 0;
+        } catch (final RuntimeException e) {
+            return 0;
+        }
+    }
+
+    /** La siguiente accion de la macro, una sola (Forge: Mayus+2). */
+    public boolean nextMacroAction() {
+        if (!interactive() || finished.get()) {
+            return false;
+        }
+        final IGameController gc = getGameController();
+        if (gc == null || gc.macros() == null) {
+            return false;
+        }
+        respondLater(() -> {
+            holdAutoPassForMacro(gc);
+            gc.macros().nextRememberedAction();
+            syncMacroAutoPass(gc);
+        });
+        return true;
+    }
+
+    /**
+     * El pase automatico, apagado mientras se graba o se reproduce una macro.
+     *
+     * <p>Reportado el 25-09-2026: la macro no grababa las confirmaciones del
+     * stack, y en el Forge de escritorio si. No es cosa de la macro: el motor
+     * solo apunta un pase cuando se pulsa OK de verdad
+     * ({@code InputPassPriority.passPriority}), y con
+     * {@code YIELD_AUTO_PASS_NO_ACTIONS} encendido — que en NeoForge viene de
+     * fabrica y en Forge no — los disparos en los que no tienes nada que hacer
+     * se resuelven sin pregunta ({@code chooseSpellAbilityToPlay} devuelve null
+     * sin crear el input). Un combo hecho solo de disparos se quedaba con la
+     * macro vacia o con huecos, y la reproduccion se descuadraba.
+     *
+     * <p>Asi que mientras dura la macro se juega como en Forge: cada resolucion
+     * pide su OK y queda grabada. Y al reproducir tambien, o unos pases saldrian
+     * solos y los grabados caerian sobre el disparo que no es.
+     *
+     * <p>Es el override en memoria del {@code YieldController}, el mismo de
+     * {@link #toggleFullControl}: no escribe en {@code %APPDATA%\Forge}. Lo que
+     * habia se guarda en {@link #macroAutoPassSaved} y lo devuelve
+     * {@link #syncMacroAutoPass} cuando ya no se graba ni se reproduce.
+     */
+    void holdAutoPassForMacro(final IGameController ui) {
+        final IGameController gc = seated(ui);
+        final YieldController y = gc.getYieldController();
+        if (y == null || macroAutoPassSaved != null) {
+            return;
+        }
+        // Las dos sugerencias de "no puedes responder, ¿paso solo?" tambien
+        // fuera: con el pase apagado podrian salir, y su OK ACEPTA la
+        // sugerencia (InputPassPriority.onOk), no pasa — o sea que tampoco se
+        // graba. Vienen en NEVER de fabrica, pero %APPDATA%\Forge es compartido.
+        for (final FPref scope : MACRO_SCOPES) {
+            macroScopesSaved.put(scope, y.getStringPref(scope));
+            y.setPref(scope, "NEVER");
+        }
+        macroAutoPassSaved = y.getStringPref(FPref.YIELD_AUTO_PASS_NO_ACTIONS);
+        y.setPref(FPref.YIELD_AUTO_PASS_NO_ACTIONS, "false");
+        gc.setYieldPref(FPref.YIELD_AUTO_PASS_NO_ACTIONS, "false");
+    }
+
+    private static final FPref[] MACRO_SCOPES = {
+            FPref.YIELD_DECLINE_SCOPE_STACK_YIELD, FPref.YIELD_DECLINE_SCOPE_NO_ACTIONS};
+    private final java.util.Map<FPref, String> macroScopesSaved =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Si ya no hay macro en marcha, devuelve el pase automatico como estaba.
+     *
+     * <p>Se mira al volver de cada orden de macro y en cada
+     * {@code updateButtons}: la reproduccion acaba sola, en el hilo de interfaz
+     * y sin avisar a nadie, pero al acabar llama a
+     * {@code InputQueue.updateObservers}, que vuelve a pintar el input — o sea
+     * que pasa por {@code updateButtons}. Hilo de interfaz siempre:
+     * {@code setYieldPref} puede pasar la prioridad que esta esperando, y eso es
+     * un click, no algo que se haga a mitad de montar un input.
+     */
+    void syncMacroAutoPass(final IGameController gc) {
+        if (gc == null || gc.macros() == null) {
+            return;
+        }
+        if (gc.macros().isRecording() || gc.macros().isReplaying()) {
+            // Y al reves: si algo lo devolvio antes de tiempo, se vuelve a apagar.
+            holdAutoPassForMacro(gc);
+            return;
+        }
+        final String saved = macroAutoPassSaved;
+        if (saved == null) {
+            return;
+        }
+        macroAutoPassSaved = null;
+        final IGameController engine = seated(gc);
+        final YieldController y = engine.getYieldController();
+        if (y == null) {
+            macroScopesSaved.clear();
+            return;
+        }
+        macroScopesSaved.forEach(y::setPref);
+        macroScopesSaved.clear();
+        y.setPref(FPref.YIELD_AUTO_PASS_NO_ACTIONS, saved);
+        // En local, con "true" pasa ya la prioridad que se quedo esperando;
+        // en red se lo cuenta al anfitrion.
+        engine.setYieldPref(FPref.YIELD_AUTO_PASS_NO_ACTIONS, saved);
+    }
+
+    /**
+     * El controlador al que le pregunta <b>el motor</b> por este asiento.
+     *
+     * <p>No es el que tiene la interfaz ({@code getGameController}): en
+     * {@code openView} se sienta un relevo ({@link ManaColor}) que comparte
+     * interfaz, {@code InputQueue} e {@code InputProxy}. Hasta el 15-10-2026
+     * tenia ademas SU PROPIO {@code YieldController}, y quien decide si la
+     * prioridad se pasa sola ({@code chooseSpellAbilityToPlay}) es el sentado:
+     * lo que se le cambiara al de la interfaz no lo leia nadie (visto el
+     * 25-09-2026 midiendo la macro). Ahora los dos comparten uno
+     * ({@code SafeActions.Guarded.getYieldController}), pero se sigue pasando
+     * por aqui: si alguna vez no se pudiera compartir, esto es lo que vale.
+     *
+     * <p>Lo usan la macro, "control total" y "pasar turno": todo lo que toca
+     * el estado del pase. Los clics siguen yendo al de la interfaz, que es por
+     * donde entran todos en Forge.
+     * Sin relevo (un invitado de red, un observador) devuelve el mismo.
+     */
+    static IGameController seated(final IGameController gc) {
+        if (gc instanceof forge.player.PlayerControllerHuman human && human.getPlayer() != null
+                && human.getPlayer().getController() instanceof forge.player.PlayerControllerHuman sat
+                && sat.getInputQueue() == human.getInputQueue()) {
+            return sat;
+        }
+        return gc;
+    }
+
+    /**
+     * El pase automatico de antes de la macro, o null si no hay macro en marcha.
+     * Mientras no es null, lo que manda en el controlador es "false".
+     */
+    private volatile String macroAutoPassSaved;
+
+    /** Si el motor esta grabando una macro ahora mismo. */
+    public boolean isMacroRecording() {
+        final IGameController gc = getGameController();
+        return gc != null && gc.macros() != null && gc.macros().isRecording();
+    }
+
+    /** Para no volver a entrar en updateButtons mientras se pintan los de la reproduccion. */
+    private boolean macroButtonsOverride;
+
+    /**
+     * Solo para pruebas sin ventana: mientras devuelva true, el piloto
+     * automatico no pulsa nada y la prueba puede hacer de jugador (MacroCheck
+     * graba y reproduce una macro con clics de verdad). Null lo quita.
+     */
+    private volatile java.util.function.BooleanSupplier autoPlayHold;
+
+    public void setAutoPlayHold(final java.util.function.BooleanSupplier hold) {
+        this.autoPlayHold = hold;
+    }
+
+    /** Solo pruebas: que el piloto conteste lo que este esperando al soltarlo. */
+    public void nudgeAutoPlay() {
+        pilotRespond(this::autoPressOk);
+    }
+
+    /**
+     * "Atacar con todo". Lo decide el motor ({@code alphaStrike}), que solo
+     * hace algo mientras se declaran atacantes; el resto del tiempo no pasa nada.
+     */
+    public boolean alphaStrike() {
+        if (!interactive() || finished.get()) {
+            return false;
+        }
+        final IGameController gc = getGameController();
+        if (gc == null) {
+            return false;
+        }
+        respondLater(gc::alphaStrike);
+        return true;
+    }
+
+    /**
+     * "Atacar con todo, menos las fichas". Pedido en itch.io el 22-09-2026: un
+     * alpha strike de verdad expone tu carta unica a un bloqueo que la mata,
+     * y las fichas —que se reponen solas, Landfall y compania— no se echan de
+     * menos igual. No merece la pena arriesgar la carta rara solo por no
+     * seleccionar atacante por atacante.
+     *
+     * <p>No hay tal boton en el motor, y no se inventa aqui: se hace en dos
+     * pasos. Primero el {@code alphaStrike} REAL — es quien sabe elegir
+     * defensor y cumplir los ataques obligados, y reproducir esa logica aqui
+     * seria justo la logica de reglas que este proyecto no toca. Luego se
+     * retira del combate cada ficha que haya declarado, tocando el
+     * {@code Combat} directamente: el mismo truco que ya usa
+     * {@code assignRequiredBlocks} para los bloqueos obligados. Hace falta
+     * porque {@code InputAttack} no publica un "quitar" que valga para
+     * cualquier ficha sea cual sea su defensor: un click normal solo
+     * undeclara si la carta esta atacando al defensor que tienes mirado
+     * ahora mismo, y en una mesa con varios rivales una ficha puede estar
+     * atacando a otro.
+     *
+     * <p>Si alguna ficha estaba obligada a atacar, el motor rechazara pasar
+     * prioridad hasta que se resuelva — ni un caso mas que comprobar aqui.
+     */
+    public boolean attackWithNonTokens() {
+        if (!interactive() || finished.get()) {
+            return false;
+        }
+        final IGameController gc = getGameController();
+        if (!(gc instanceof forge.player.PlayerControllerHuman human)) {
+            return false;
+        }
+        respondLater(() -> {
+            human.alphaStrike();
+            final Game game = human.getGame();
+            final forge.game.combat.Combat combat = game == null ? null : game.getCombat();
+            if (combat == null) {
+                return;
+            }
+            boolean removed = false;
+            for (final forge.game.card.Card c : new java.util.ArrayList<>(combat.getAttackers())) {
+                if (c.isToken()) {
+                    combat.removeFromCombat(c);
+                    removed = true;
+                }
+            }
+            if (removed) {
+                game.fireEvent(new forge.game.event.GameEventCombatChanged());
+            }
+        });
+        return true;
+    }
+
+    /** El menu de click derecho del stack, para lo de arriba. False si esta vacio. */
+    public boolean openTopStackMenu() {
+        final StackItemView top = topOfStack();
+        if (!interactive() || finished.get() || top == null) {
+            return false;
+        }
+        showStackMenu(top);
+        return true;
+    }
+
+    /**
+     * "No me vuelvas a parar por esto", para lo de arriba del stack: la Y y la N
+     * de Forge ({@code KeyboardShortcuts.actAutoYieldAndYes/No}).
+     *
+     * <p>Hace lo mismo que las opciones del menu del stack, con la misma regla:
+     * la respuesta fija solo se pone si es un disparo opcional <b>tuyo</b>; en
+     * cualquier otro caso es solo dejarlo pasar.
+     *
+     * @return lo que hay que decirle al jugador, o null si no hay partida. Nunca
+     *     en silencio: esto puede recordarse <b>entre partidas</b> (Ajustes,
+     *     {@code NeoSettings.AUTO_DECISION}), y una tecla pulsada
+     *     sin querer tiene que verse (y el mensaje dice donde se deshace).
+     */
+    public String autoYieldTop(final boolean yes) {
+        return autoYieldTop(Boolean.valueOf(yes));
+    }
+
+    /** Solo "pasar sola esta habilidad", sin si ni no: {@code NeoShortcuts.Action.AUTO_PASS_TOP}. */
+    public String autoPassTop() {
+        return autoYieldTop((Boolean) null);
+    }
+
+    private String autoYieldTop(final Boolean yes) {
+        if (!interactive() || finished.get()) {
+            return null;
+        }
+        final IGameController gc = getGameController();
+        final StackItemView top = topOfStack();
+        final String key = top == null ? null : top.getKey();
+        if (gc == null || top == null || !top.isAbility() || key == null || key.isEmpty()) {
+            return NeoText.get("shortcuts.autoYield.none");
+        }
+        final boolean decides = yes != null && top.isOptionalTrigger() && isMe(top.getActivatingPlayer());
+        if (decides) {
+            gc.setTriggerDecision(key, yes ? AutoYieldStore.TriggerDecision.ACCEPT
+                    : AutoYieldStore.TriggerDecision.DECLINE, abilityScope(gc));
+        }
+        gc.setShouldAutoYield(key, true, abilityScope(gc));
+        refreshYieldUi(getCurrentPlayer());
+        final String name = top.getSourceCard() == null ? ""
+                : forge.neo.card.CardText.nameOf(top.getSourceCard());
+        if (!decides) {
+            return NeoText.get("shortcuts.autoYield.pass", name);
+        }
+        return NeoText.get(yes ? "shortcuts.autoYield.yes" : "shortcuts.autoYield.no", name);
+    }
+
+    /**
+     * Control total: que la prioridad NO se pase sola.
+     *
+     * <p>El pase automatico lo enciende {@code NeoGame.applyEnginePrefs} en cada
+     * partida ({@code YIELD_AUTO_PASS_NO_ACTIONS}). Aqui se apaga y se enciende
+     * <b>solo para esta partida y en memoria</b>, con el override del
+     * {@code YieldController} de este controlador — el mismo sitio que usa
+     * {@code SafeActions}. No se usa {@code YieldController.toggleAutoPassOrStopAll},
+     * que es lo que hace la P de Forge, porque ese llama a {@code prefs.save()}
+     * y escribiria en el {@code %APPDATA%\Forge} que compartimos con la
+     * instalacion vieja.
+     *
+     * <p>{@code setYieldPref} va detras: en local solo reintenta pasar cuando se
+     * vuelve a encender (es lo que hace que no te quedes con la prioridad en la
+     * mano), y en red es lo que se lo cuenta al anfitrion.
+     *
+     * @return como ha quedado (true = control total), o null si no hay partida
+     */
+    public Boolean toggleFullControl() {
+        if (!interactive() || finished.get()) {
+            return null;
+        }
+        return flipFullControl(getGameController());
+    }
+
+    /**
+     * Lo que hace "control total", sin las comprobaciones de la tecla (el
+     * comprobador lo llama sin ventana: {@code YieldCheck}).
+     *
+     * <p>Sobre el controlador <b>sentado</b> ({@link #seated}). Hasta el
+     * 25-09-2026 se cambiaba el pase en el de la interfaz, que el motor no
+     * consulta: la tecla decia "control total" y la prioridad se seguia
+     * pasando sola igual, porque el sentado seguia leyendo el pase de
+     * {@code FModel}, encendido.
+     */
+    Boolean flipFullControl(final IGameController ui) {
+        final IGameController gc = seated(ui);
+        if (gc == null || gc.getYieldController() == null) {
+            return null;
+        }
+        final FPref pref = FPref.YIELD_AUTO_PASS_NO_ACTIONS;
+        // Con una macro en marcha el pase esta apagado a proposito
+        // (holdAutoPassForMacro): se cambia el que se devolvera al acabar.
+        final String saved = macroAutoPassSaved;
+        if (saved != null) {
+            final boolean wasOn = Boolean.parseBoolean(saved);
+            macroAutoPassSaved = String.valueOf(!wasOn);
+            return wasOn;
+        }
+        // Se pregunta al controlador y no a una marca nuestra: el pase puede
+        // venir apagado desde Ajustes (NeoSettings.AUTO_PASS), y entonces el
+        // primer toque tiene que ENCENDERLO, no volver a apagarlo.
+        final boolean on = gc.getYieldController().getBoolPref(pref);
+        final String autoPass = String.valueOf(!on);
+        respondLater(() -> {
+            gc.getYieldController().setPref(pref, autoPass);
+            if (on) {
+                gc.getYieldController().clearActiveYieldAndDispatch();
+            }
+            gc.setYieldPref(pref, autoPass);
+        });
+        return on;
+    }
+
+    /** Ultima carta que ha clicado el jugador. */
+    private volatile CardView lastClicked;
+
+    /**
+     * Ultima carta que produjo mana al clicarla.
+     *
+     * <p>Se deduce comparando el tamano de la reserva antes y despues: si al
+     * clicar una carta la reserva crece, esa carta es la fuente. Es la unica
+     * forma de saberlo sin duplicar estado del motor.
+     */
+    private volatile CardView lastManaSource;
+    private volatile int lastPoolSize;
+
+    /**
+     * Traza que ha entendido la interfaz de cada click.
+     *
+     * <p>Se enciende con {@code -Dneo.click.debug=true}. Existe porque el fallo
+     * tipico de esta parte no es que el motor rechace algo, sino que el click
+     * se lo quede la interfaz por el camino y no llegue a salir: sin ver cual
+     * de los dos pasa, se depura a ciegas.
+     */
+    private void clickTrace(final CardView card, final String action) {
+        if (!CLICK_DEBUG) {
+            return;
+        }
+        System.out.printf("[click] %s -> %s | girada=%s elegible=%s reserva=%d fuente=%s%n",
+                card, action, card.isTapped(), isSelectable(card), localPoolSize(),
+                lastManaSource);
+    }
+
+    private static final boolean CLICK_DEBUG = Boolean.getBoolean("neo.click.debug");
+
+    /** Si clicar esta carta significa "deshacer" en vez de "activar". */
+    private boolean canUndoClick(final CardView card) {
+        // Y solo si, tapada, no le queda NADA que hacer (Discord, 16-10-2026,
+        // Basalt Monolith: tapada para mana, su "{3}: Untap" se paga con ese
+        // mismo mana, y el clic deshacia el mana en vez de ofrecerlo). Si el
+        // motor la ilumina como usable, el clic es suyo; deshacer sigue en Ctrl+Z.
+        return card.equals(lastManaSource) && card.isTapped() && localPoolSize() > 0
+                && actionableStrength(card) <= 0;
+    }
+
+    /**
+     * El mismo jugador, pero el objeto VIVO de la partida.
+     *
+     * <p>Hace falta por lo mismo que en {@code TableBinder}: en el invitado de
+     * una partida en red, los {@code PlayerView} que llegan en
+     * {@code openView} son copias que el cliente deja tal cual y que la
+     * sincronizacion por deltas <b>no vuelve a tocar</b>. Preguntarle a esa
+     * copia cuanto mana tienes devuelve siempre 0, y si has perdido, siempre
+     * que no.
+     *
+     * <p>Como {@code equals} compara por id, lo de fuera sigue funcionando
+     * igual (los mapas de {@code AbstractGuiGame} aciertan con las dos); lo
+     * unico que hay que cuidar es de donde se LEEN los datos.
+     */
+    private PlayerView live(final PlayerView p) {
+        final GameView gv = getGameView();
+        if (p == null || gv == null || gv.getPlayers() == null) {
+            return p;
+        }
+        for (final PlayerView candidate : gv.getPlayers()) {
+            if (candidate != null && candidate.getId() == p.getId()) {
+                return candidate;
+            }
+        }
+        return p;
+    }
+
+    private int localPoolSize() {
+        if (!hasLocalPlayers()) {
+            return 0;
+        }
+        int total = 0;
+        for (final PlayerView seat : getLocalPlayers()) {
+            final PlayerView p = live(seat);
+            // ManaAtom, no MagicColor: ver el comentario de TableBinder. Con la
+            // codificacion equivocada el mana incoloro no se contaba, y eso
+            // ademas impedia deshacer el tapeo de una fuente incolora.
+            for (final byte type : forge.card.mana.ManaAtom.MANATYPES) {
+                total += p.getMana(type);
+            }
+        }
+        return total;
+    }
+
+    /**
+     * Soltar una carta encima de algo. El verbo principal de Arena.
+     *
+     * <p>No hay ninguna logica de reglas aqui: el arrastre se traduce a la
+     * MISMA pareja de ordenes que daria un jugador clicando, y es el input
+     * activo del motor quien decide que significan. Lo unico que aporta este
+     * metodo es el ORDEN de esos dos clicks, que es lo que la gente se
+     * equivoca al hacerlo a mano:
+     *
+     * <ul>
+     *   <li><b>Atacar:</b> primero se elige a quien atacas (jugador o
+     *       planeswalker) y despues la criatura. {@code InputAttack} guarda un
+     *       "defensor actual" y declara contra el.</li>
+     *   <li><b>Bloquear:</b> primero el atacante y luego el bloqueador, porque
+     *       {@code InputBlock} guarda un "atacante actual".</li>
+     *   <li><b>Jugar desde la mano:</b> soltar en cualquier sitio lanza la
+     *       carta. Los objetivos los pide el motor despues, como en Arena.</li>
+     * </ul>
+     */
+    private void onCardDropped(final CardView source, final boolean fromHand,
+                               final Object target) {
+        if (!interactive() || source == null || finished.get()) {
+            return;
+        }
+        if (fromHand) {
+            // UN AURA SOLTADA SOBRE UNA CRIATURA (Discord, 24-10-2026: "Dragging
+            // auras from your hand onto a creature prompts the mana cost and then
+            // attaches to that chosen creature"). Se lanza igual que siempre, y
+            // cuando el motor pida el objetivo se le contesta con esa criatura
+            // (ver updateButtons). Solo auras, y solo sobre una criatura: soltada
+            // en otro sitio, o si la criatura no vale de objetivo, como siempre.
+            pendingAuraTarget = AuraDrop.creatureTarget(source, target);
+            pendingAuraUntil = System.currentTimeMillis() + AURA_DROP_WINDOW_MS;
+            respondLater(() -> getGameController().selectCard(source, null, null));
+            return;
+        }
+        // UN PERMANENTE ARRASTRADO SOLO SIGNIFICA ALGO EN COMBATE (atacar o
+        // bloquear). Fuera de ahi, soltarlo no hace nada. Antes contaba como un
+        // click, y un click en un permanente ACTIVA su habilidad: un gesto de
+        // subir una carta de la mano que empezaba un pelo por encima, sobre una
+        // carta de la mesa, la activaba — y una habilidad de girar no se
+        // deshace (itch.io, 28-09-2026: "I tried to swipe up to play a card and
+        // hit an existing card while dragging, and it activated that instead").
+        // Principio 6: lo que no se deshace, que no pase. Clicarla sigue
+        // activandola; arrastrar el comandante desde la zona de mando sigue
+        // lanzandolo (no esta en la mesa).
+        final boolean onBattlefield = source.getZone() == ZoneType.Battlefield;
+        if (target == null) {
+            if (!onBattlefield) {
+                onCardClicked(source);
+            }
+            return;
+        }
+        final GameView gv = getGameView();
+        final boolean ownCreature = source.getZone() == ZoneType.Battlefield
+                && isMe(source.getController()) && source.getCurrentState() != null
+                && source.getCurrentState().isCreature();
+        final boolean attacking = ownCreature && isDeclaringAttackers();
+        // Arrastrarla sobre un atacante ANTES de la declaracion (paso de
+        // atacantes del rival, con prioridad): pasar y, al abrirse la
+        // declaracion, bloquear a ese atacante. Es lo que se le dice al jugador
+        // (Discord, 19-10-2026) y lo que hace "Bloquear" (askBlockOrUse).
+        if (ownCreature && target instanceof CardView attacker && gv != null && gv.getCombat() != null
+                && contains(gv.getCombat().getAttackers(), attacker)
+                && forge.neo.match.BlockIntent.wouldMeanBlock(getGameController(), source)) {
+            pendingBlocker = source;
+            pendingBlockAttacker = attacker;
+            respondLater(() -> getGameController().selectButtonOk());
+            return;
+        }
+        final boolean blocking = ownCreature && gv != null
+                && gv.getPhase() == PhaseType.COMBAT_DECLARE_BLOCKERS
+                && !payingMana && !isSelecting() && getSelectionMax() <= 0;
+        // Two inputs mean target-then-creature only during combat. Elsewhere
+        // the first could resolve a prompt and send the second to a new input.
+        if (!attacking && !blocking) {
+            if (!onBattlefield) {
+                onCardClicked(source);
+            } else {
+                trace("arrastre de %s fuera de combate: no se hace nada", source.getName());
+            }
+            return;
+        }
+        if (attacking) {
+            final boolean playerTarget = target instanceof PlayerView p && !p.getHasLost()
+                    && p.isOpponentOf(source.getController());
+            final boolean cardTarget = target instanceof CardView c && c.getZone() == ZoneType.Battlefield
+                    && c.getCurrentState() != null && (c.getCurrentState().isBattle()
+                    || (c.getCurrentState().isPlaneswalker() && c.getController() != null
+                    && c.getController().isOpponentOf(source.getController())));
+            if (!playerTarget && !cardTarget) return;
+        } else if (!(target instanceof CardView c) || gv.getCombat() == null
+                || !contains(gv.getCombat().getAttackers(), c)) {
+            return;
+        }
+        if (target instanceof PlayerView player) {
+            rememberAttackPlayer(player);
+            respondInTwoSteps(() -> getGameController().selectPlayer(player, null),
+                    () -> !attacking || isHighlighted(player),
+                    () -> getGameController().selectCard(source, null, null));
+        } else if (target instanceof CardView card && card.getId() != source.getId()) {
+            if (isDeclaringAttackers()) chosenAttackPlayer = null;
+            respondInTwoSteps(() -> getGameController().selectCard(card, null, null),
+                    () -> !attacking || isHighlighted(card),
+                    () -> getGameController().selectCard(source, null, null));
+        }
+    }
+
+    /**
+     * Empuja el estado a la mesa. El binder agrupa los avisos, asi que se puede
+     * llamar tantas veces como haga falta sin coste.
+     */
+    private void pushToTable() {
+        final TableBinder b = binder;
+        if (b != null) {
+            b.setGameView(getGameView());
+            b.requestRefresh();
+        }
+    }
+
+    /**
+     * EN RED, EL INVITADO REPINTA CON CADA PAQUETE DE CAMBIOS (Discord,
+     * 25-10-2026: flechas de ataque que no cuadran y cartas que salen vacias, solo
+     * en el invitado). Forge aplica cada paquete ({@code NetworkGuiGame.applyDelta})
+     * y luego llama a este enganche, que su comentario manda sobrescribir para
+     * refrescar. No lo haciamos: la mesa solo se repintaba cuando llegaba otra
+     * llamada (updateCards, showCombat...), y si el cambio llegaba DESPUES de la
+     * ultima — el combate declarado, una ficha nueva — se quedaba pintada la de
+     * antes hasta el siguiente aviso. {@code requestRefresh} agrupa, asi que no
+     * cuesta repintar de mas. Fuera de red no se llama nunca.
+     */
+    @Override
+    protected void afterDeltaApplied() {
+        pushToTable();
+    }
+
+    // ===============================================================
+    // Log
+    // ===============================================================
+
+    private void log(final String fmt, final Object... args) {
+        System.out.println("  " + String.format(fmt, args));
+    }
+
+    private void trace(final String fmt, final Object... args) {
+        if (verbose) {
+            System.out.println("    . " + String.format(fmt, args));
+        }
+    }
+
+    private static String nameOf(final PlayerView p) {
+        return PlayerName.of(p);
+    }
+
+    // ===============================================================
+    // Observacion: lo que el motor nos empuja
+    // ===============================================================
+
+    /**
+     * El motor avisa de cambio de turno por aqui, no por setGameView.
+     * En la fase 3 esto refrescara la cabecera de la mesa.
+     */
+    @Override
+    public void updateTurn(final PlayerView player) {
+        super.updateTurn(player);
+        dumpTable();
+        pushToTable();
+        announceTurn(player);
+    }
+
+    /**
+     * "Te toca", en grande y en el centro.
+     *
+     * <p>Salio de jugar: <i>"no me entero de cuando es mi turno, solo me guio
+     * por el texto pequenyo de la derecha"</i>. El motor avisa del cambio de
+     * turno por aqui — no por {@code setGameView} — asi que este es el sitio.
+     *
+     * <p>Corre en el hilo del MOTOR: todo lo que toque la mesa va por el hilo de
+     * interfaz.
+     */
+    private void announceTurn(final PlayerView player) {
+        final forge.neo.ui.TableScreen t = table;
+        if (t == null || player == null) {
+            return;
+        }
+        // isLocalPlayer lo trae AbstractGuiGame: sabe que asientos maneja esta
+        // interfaz. Comparar con el jugador de la barra de abajo funcionaria casi
+        // siempre y fallaria justo donde importa (espectador, varios asientos).
+        final boolean yours = isLocalPlayer(player);
+        final String who = nameOf(player);
+        final int turn = getGameView() == null ? 0 : getGameView().getTurn();
+        final int round = shownRound(getGameView());
+        runOnUi(() -> {
+            t.announceTurn(yours, who, turn, round);
+            t.getPhaseRail().setTurnOwner(yours, who);
+        });
+    }
+
+    /**
+     * Una moneda, que se ve caer: el sorteo de quien empieza y las cartas que
+     * lanzan monedas. Forge lo trajo el 10-10-2026 para su movil y lo llama su
+     * {@code FControlGameEventHandler} con el texto ya compuesto; hasta entonces
+     * esto era un metodo vacio. Ver {@link forge.neo.ui.CoinFlip}.
+     *
+     * <p>Se espera a que caiga, como hace el movil de Forge: si el motor
+     * siguiera, la moneda contaria algo que ya ha pasado varias jugadas atras.
+     * Con tope de 3 s, para que un fallo de la animacion no pare la partida.
+     * Desde el hilo de interfaz no se espera nunca (se colgaria). Con las
+     * animaciones apagadas no sale: es lo que se pidio al apagarlas.
+     */
+    @Override
+    public void showCoinFlip(final boolean heads, final String caption, final boolean waitForTap) {
+        final forge.neo.ui.TableScreen t = table;
+        log("Coin: %s (%s)", caption, heads ? "heads" : "tails");
+        if (!interactive() || t == null || !forge.neo.card.CardNode.areAnimationsEnabled()) {
+            return;
+        }
+        final forge.util.Localizer words = forge.util.Localizer.getInstance();
+        final String headsWord = words.getMessage("lblHeads");
+        final String tailsWord = words.getMessage("lblTails");
+        final java.util.concurrent.CountDownLatch landed = new java.util.concurrent.CountDownLatch(1);
+        final UiDispatcher ui = uiDispatcher();
+        final boolean onUi = javafx.application.Platform.isFxApplicationThread()
+                || (ui != null && ui.isUiThread());
+        runOnUi(() -> {
+            try {
+                t.flipCoin(heads, caption, headsWord, tailsWord, landed::countDown);
+            } catch (final RuntimeException e) {
+                landed.countDown();
+            }
+        });
+        if (onUi) {
+            return;
+        }
+        try {
+            landed.await(3, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+
+    /**
+     * <b>Los dados de una carta que los tira</b>, en el centro de la mesa
+     * ({@link forge.neo.ui.DiceRoll}). Discord, 11-10-2026: <i>"A visual dice
+     * roll (toggle?) or toast that shows us the dice roll for dice cards"</i>.
+     *
+     * <p>Lo mismo que {@link #showCoinFlip}, y por lo mismo: en una partida
+     * local el evento llega por el bus de la partida en el hilo del motor
+     * (ver {@code listenToTheEngine}), justo al tirar, y se espera a que caigan
+     * (tope de 3 s) para que lo que la carta pregunte despues — el color del
+     * mana de Mad Science Fair Project — salga detras y no delante. Al invitado
+     * de una partida en red le llega contado por el cable: se pinta y no se
+     * espera a nada.
+     *
+     * <p>De que va la tirada lo dice la carta de encima del stack, que es la que
+     * se esta resolviendo; si no hay ninguna (una tirada fuera del stack), solo
+     * el dado.
+     */
+    private void showDiceRoll(final int sides, final List<Integer> results) {
+        if (results == null || results.isEmpty()) {
+            return;
+        }
+        final StackItemView top = topOfStack();
+        final CardView source = top == null ? null : top.getSourceCard();
+        final String caption = forge.neo.match.DiceCaption.of(whoRolled(),
+                source == null ? null : forge.neo.card.CardText.nameOf(source), sides, results);
+        log("Dice: %s -> %s", caption, results);
+        animateDice(sides, results, caption);
+    }
+
+    /**
+     * <b>El dado planar</b>, pintado con los mismos dados que los numericos
+     * (Discord, 12-10-2026: <i>"Include a dice when rolling ... A normal 1d6
+     * works the same as the planechase dice"</i>). El motor no da numero, solo
+     * el resultado, asi que se pinta un d6 como en la mesa de verdad: 1 es
+     * caos, 6 es viajar, y lo demas en blanco; y debajo, escrito, que ha
+     * salido. Lo tira quien tiene el turno: es una accion de su fase principal.
+     */
+    private void showPlanarRoll(final forge.game.PlanarDice result) {
+        final GameView gv = getGameView();
+        final Game game = gv == null ? null : gv.getGame();
+        final forge.game.player.Player roller = game == null ? null : game.getPhaseHandler().getPlayerTurn();
+        final int face;
+        switch (result) {
+            case Chaos:
+                face = 1;
+                break;
+            case Planeswalk:
+                face = 6;
+                break;
+            default:
+                face = 2 + forge.util.MyRandom.getRandom().nextInt(4);
+                break;
+        }
+        final String caption = forge.neo.match.DiceCaption.planar(roller == null ? null : roller.getName(),
+                forge.neo.NeoText.get("dice.planar." + result.name().toLowerCase(java.util.Locale.ROOT)));
+        log("Planar die: %s", caption);
+        animateDice(6, List.of(face), caption);
+    }
+
+    /** Los dados en el centro de la mesa, y el motor esperando a que caigan. */
+    private void animateDice(final int sides, final List<Integer> results, final String caption) {
+        final forge.neo.ui.TableScreen t = table;
+        if (!interactive() || t == null || !forge.neo.card.CardNode.areAnimationsEnabled()) {
+            return;
+        }
+        final List<Integer> rolled = new ArrayList<>(results);
+        final java.util.concurrent.CountDownLatch landed = new java.util.concurrent.CountDownLatch(1);
+        final UiDispatcher ui = uiDispatcher();
+        final boolean onUi = javafx.application.Platform.isFxApplicationThread()
+                || (ui != null && ui.isUiThread());
+        runOnUi(() -> {
+            try {
+                t.rollDice(sides, rolled, caption, landed::countDown);
+            } catch (final RuntimeException e) {
+                landed.countDown();
+            }
+        });
+        final GameView gv = getGameView();
+        if (onUi || gv == null || gv.getGame() == null) {
+            return;
+        }
+        try {
+            landed.await(3, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Cuantas tiradas llevaba cada jugador antes de esta, por id. El evento de
+     * los dados no dice QUIEN tira, pero el motor cuenta las tiradas de cada
+     * uno ({@code Player.roll()}) entre el primer {@code GameEventRollDie} y el
+     * {@code GameEventRollDice}: el que ha subido es el que tira. Solo en una
+     * partida local, que es donde se tiene la partida delante.
+     */
+    private volatile java.util.Map<Integer, Integer> rollsBefore;
+
+    private void noteRollsBefore() {
+        final GameView gv = getGameView();
+        final Game game = gv == null ? null : gv.getGame();
+        if (game == null || rollsBefore != null) {
+            return;
+        }
+        final java.util.Map<Integer, Integer> now = new java.util.HashMap<>();
+        for (final forge.game.player.Player p : game.getPlayers()) {
+            now.put(p.getId(), p.getNumRollsThisTurn());
+        }
+        rollsBefore = now;
+    }
+
+    /** Quien acaba de tirar, o {@code null} si no se sabe. Ver {@link #rollsBefore}. */
+    private String whoRolled() {
+        final java.util.Map<Integer, Integer> before = rollsBefore;
+        rollsBefore = null;
+        final GameView gv = getGameView();
+        final Game game = gv == null ? null : gv.getGame();
+        if (before == null || game == null) {
+            return null;
+        }
+        for (final forge.game.player.Player p : game.getPlayers()) {
+            if (p.getNumRollsThisTurn() > before.getOrDefault(p.getId(), 0)) {
+                return p.getName();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Cambio de fase. En la fase 3 esto movera el indicador del rail de fases.
+     */
+    @Override
+    public void updatePhase(final boolean afterPhase) {
+        super.updatePhase(afterPhase);
+        final GameView gv = getGameView();
+        if (gv == null) {
+            return;
+        }
+        final PhaseType phase = gv.getPhase();
+        if (phase != lastPhase) {
+            lastPhase = phase;
+            trace("fase: %s", phase);
+            // -Dneo.bo3.concedeFirst=true (bo3check): rendir la PRIMERA partida
+            // del partido en el turno 3, como el boton de la pausa.
+            if (Boolean.getBoolean("neo.bo3.concedeFirst") && gv.getNumPlayedGamesInMatch() == 0 && gv.getTurn() >= 3
+                    && concededForTest.compareAndSet(false, true)) {
+                concedeGame();
+            }
+            final DetailLog d = detail;
+            if (d != null) {
+                // Si te paras aqui: las mismas listas que mira isUiSetToSkipPhase.
+                final PlayerView turnOf = gv.getPlayerTurn();
+                d.phase(gv, interactive() && phase != null
+                        ? (turnOf == null || isLocalPlayer(turnOf) ? stops : theirStops).contains(phase)
+                        : null);
+            }
+            // De paso, el turno que se ensenya en Discord. Aqui y no en un
+            // temporizador propio: es el latido que ya existe. Y no cuesta
+            // nada aunque salte mil veces — DiscordRich guarda solo el ultimo
+            // y manda como mucho uno cada cinco segundos.
+            updateDiscord();
+            // El mana flotante se vacia al acabar cada paso, y de eso no
+            // siempre llega aviso. Olvidar aqui la fuente evita que la marca
+            // se quede pegada a una carta que ya no tiene nada que deshacer.
+            lastManaSource = null;
+            lastClicked = null;
+            lastPoolSize = localPoolSize();
+        }
+        pushToTable();
+    }
+
+    /**
+     * Le cuenta a Discord en que partida estas.
+     *
+     * <p>Envuelto en su propio {@code try}: la presencia es un adorno y no
+     * puede tirar una partida. Esto corre en el hilo del MOTOR (llega desde
+     * {@code handleGameEvent}), asi que una excepcion suelta aqui no seria un
+     * icono que no sale — seria la partida muerta.
+     */
+    private void updateDiscord() {
+        try {
+            forge.neo.discord.DiscordStatus.game(getGameView(), discordSeats, isNetGame());
+        } catch (final RuntimeException e) {
+            trace("Discord: %s", e);
+        }
+    }
+
+    /** Estado de la mesa: exactamente los datos que pintara la fase 3. */
+    private void dumpTable() {
+        final GameView gv = getGameView();
+        if (gv == null) {
+            return;
+        }
+        final int turn = gv.getTurn();
+        if (turn == lastTurn) {
+            return;
+        }
+        lastTurn = turn;
+
+        final StringBuilder sb = new StringBuilder();
+        sb.append(String.format("%n-- Turn %d . round %d . %s to play", turn, rounds.round(gv),
+                nameOf(gv.getPlayerTurn())));
+        for (final PlayerView p : gv.getPlayers()) {
+            sb.append(String.format("%n     %-14s %3d life | hand %2d | field %2d | graveyard %2d | library %2d",
+                    nameOf(p), p.getLife(),
+                    p.getZoneSize(ZoneType.Hand),
+                    p.getZoneSize(ZoneType.Battlefield),
+                    p.getZoneSize(ZoneType.Graveyard),
+                    p.getZoneSize(ZoneType.Library)));
+        }
+        System.out.println(sb);
+    }
+
+    @Override
+    public void handleGameEvent(final GameEvent event) {
+        if (event == null) {
+            return;
+        }
+        // Lo ha provocado una pregunta nuestra, no la partida. Ver probing.
+        if (probing == Thread.currentThread()) {
+            return;
+        }
+        // EL PRIMERO, y a proposito. Lo que viene detras puede tardar mucho
+        // (watchForThingsThatAffectMe llega a PARAR el hilo del motor hasta que
+        // pulsas "Entendido") y puede reventar, y en los dos casos el aviso se
+        // perderia. Quien escucha aqui — hoy el tutorial — da un paso por bueno
+        // cuando el motor cuenta algo, asi que un aviso perdido es un paso que
+        // no se cierra NUNCA: no falla, se queda ahi. Avisar cuesta un
+        // Platform.runLater; ser el ultimo de la cola costaba una leccion.
+        tellTheSpy(event);
+        feedGuestLog(event);
+        playGuestSound(event);
+        rememberPlotted(event);
+        // Y aqui se para, si el jugador esta leyendo una carta o tiene el menu
+        // puesto: ANTES de tocar la mesa, para que lo que venga detras se vea
+        // entrar cuando vuelva a mirar. Ver holdWhileReading.
+        holdWhileReading();
+        // Cada evento del motor (carta jugada, criatura muerta, dano...) puede
+        // cambiar lo que se ve. El binder agrupa, asi que esto es barato.
+        pushToTable();
+        final DetailLog detailLog = detail;
+        if (detailLog != null) {
+            detailLog.sync(getGameView());
+        }
+        refreshCentralPrompt();
+        offerEndWhenOut();
+        flushStrandedViewChanges();
+        final boolean stopped = watchForThingsThatAffectMe(event);
+        // Si la partida acaba de pararse a contarte algo, ya has tenido tu
+        // tiempo: frenar ademas por el reloj seria esperar dos veces.
+        if (!stopped) {
+            slowTheAiDown(event);
+        }
+        animateEvent(event);
+        if (event instanceof forge.game.event.GameEventRollDie die && die.planar() != null) {
+            showPlanarRoll(die.planar());
+        } else if (event instanceof forge.game.event.GameEventRollDie die && die.planar() == null) {
+            noteRollsBefore();
+        } else if (event instanceof forge.game.event.GameEventRollDice roll) {
+            showDiceRoll(roll.sides(), roll.results());
+        }
+        trace("evento: %s", event.getClass().getSimpleName());
+        finishIfGuest(event);
+    }
+
+    /**
+     * <b>El invitado de una partida en red se entera aqui de que se acabo.</b>
+     *
+     * <p>El anfitrion NO le llama a {@code finishGame}: a un
+     * {@code RemoteClientGuiGame} le reenvia los eventos
+     * ({@code HostedMatch}, la rama del {@code GameEventForwarder}) y cuenta con
+     * que el cliente los pase por {@code AbstractGuiGame.handleGameEvent}, cuyo
+     * {@code FControlGameEventHandler} convierte {@code GameEventGameFinished}
+     * en {@code finishGame()}. Las dos GUIs oficiales no sobrescriben
+     * {@code handleGameEvent} y les llega solo; nosotros si, y sin
+     * {@code super}. Resultado: el invitado no veia NUNCA la pantalla de
+     * victoria o derrota. Con un anfitrion de Forge salia de la mesa cuando el
+     * otro volvia a la sala ({@code afterGameEnd}); con un servidor que espera
+     * la respuesta de los jugadores se quedaba mirando la mesa hasta rendirse
+     * (itch.io, 28-09-2026: <i>"the win screen in multiplayer doesn't pop
+     * up"</i>, con el registro del servidor en {@code PLAYING -> POSTGAME}).
+     *
+     * <p>Solo esa parte del manejador de Forge, y en el hilo de interfaz como
+     * alli: el resto de la mesa del invitado ya se mueve por los deltas.
+     * Invitado = la vista no trae la partida ({@code getGame()} es
+     * {@code transient}; ver {@link #listenToTheEngine}).
+     */
+    /**
+     * <b>El registro del invitado de una partida en red.</b>
+     *
+     * <p>La misma trampa que {@link #finishIfGuest}: al invitado el anfitrion
+     * no le manda el registro, le manda los EVENTOS, y cada cliente se lo
+     * escribe con {@code gameLog.getEventVisitor().recieve(event)} — dentro de
+     * {@code AbstractGuiGame.handleGameEvent}, que nosotros sobrescribimos sin
+     * {@code super}. El registro lo crea {@code GameClientHandler}
+     * ({@code initGameLog}); solo faltaba llenarlo. Sintoma (itch.io,
+     * 29-09-2026): varios turnos de partida en red y "Nothing has happened
+     * yet". En una partida local el registro lo escribe el motor y aqui no se
+     * toca: invitado = la vista no trae la partida.
+     */
+    private void feedGuestLog(final GameEvent event) {
+        final GameView gv = getGameView();
+        if (gv == null || gv.getGame() != null) {
+            return;
+        }
+        final forge.game.GameLog log = gv.getGameLog();
+        if (log == null) {
+            return;
+        }
+        try {
+            log.getEventVisitor().recieve(event);
+        } catch (final RuntimeException e) {
+            trace("registro del invitado: %s", e);
+        }
+    }
+
+    /**
+     * Y los <b>sonidos</b> del invitado, por la misma razon: en local los
+     * dispara el {@code SoundSystem} que {@code HostedMatch} suscribe al bus
+     * de la partida; el invitado no tiene partida, y su
+     * {@code FControlGameEventHandler.receiveGameEvent} — el que llama a
+     * {@code SoundSystem.instance.receiveEvent} — tambien vive en el
+     * {@code super} que no llamamos. O sea que en red el invitado jugaba sin
+     * un solo efecto de sonido.
+     */
+    private void playGuestSound(final GameEvent event) {
+        final GameView gv = getGameView();
+        if (gv == null || gv.getGame() != null) {
+            return;
+        }
+        try {
+            forge.sound.SoundSystem.instance.receiveEvent(event);
+        } catch (final RuntimeException e) {
+            trace("sonido del invitado: %s", e);
+        }
+    }
+
+    /**
+     * EN RED, EL "ESPERANDO A..." QUE PISA TU TURNO (Discord, 13-10-2026:
+     * <i>"constantly says its waiting on other people, when its not ... if the
+     * person tries to interact with a card ... it realises its wrong"</i>).
+     *
+     * <p>Al pasar la prioridad, el anfitrion le manda al invitado
+     * {@code awaitNextInput}, y el invitado se pinta el "esperando" a los 250 ms
+     * por su cuenta ({@code AbstractGuiGame.awaitNextInput}). Lo que lo anula es
+     * {@code cancelAwaitNextInput}, que el motor llama al ensenyar la pregunta
+     * siguiente... en el anfitrion: es {@code final} y no viaja por el cable. Asi
+     * que si la prioridad te vuelve antes de esos 250 ms (el stack resuelve, el
+     * rival pasa), la pregunta de verdad llega y el temporizador la pisa despues:
+     * OK y Cancelar apagados, sin cartas marcadas, y la partida esperandote a ti.
+     * Hasta que clicas algo y el anfitrion te la vuelve a mandar.
+     *
+     * <p>Lo que se hace es lo que haria el anfitrion: una pregunta que llega
+     * anula el "esperando" pendiente. Llamarlo desde el propio temporizador
+     * (que tambien pasa por aqui) no hace nada: la tarea ya esta corriendo.
+     * En una partida local no se toca: ahi el motor ya lo cancela solo.
+     */
+    private void cancelStaleAwaitIfGuest() {
+        final GameView gv = getGameView();
+        if (gv != null && gv.getGame() == null) {
+            cancelAwaitNextInput();
+        }
+    }
+
+    /**
+     * EL "ESPERANDO A..." PEDIDO DESDE DOS HILOS A LA VEZ (Android, 28-10-2026:
+     * <i>"IllegalStateException: Task already scheduled or cancelled"</i>, al
+     * empezar la partida 3 de un Bo3, y la partida muerta).
+     *
+     * <p>{@code AbstractGuiGame.awaitNextInput} guarda la tarea en un campo y
+     * luego programa <b>el campo</b>, sin cerrojo. Y lo llaman dos hilos: el de
+     * interfaz al terminar una pregunta ({@code InputBase.setFinished}: el clic en
+     * "Quedarse la mano") y el de la partida, que en cuanto se suelta pasa solo
+     * las fases ({@code chooseSpellAbilityToPlay}). Si se cruzan, los dos
+     * programan la misma tarea, el {@code Timer} se niega y la excepcion se lleva
+     * el hilo de la partida. Uno detras de otro no pasa nada: el segundo deja el
+     * primer aviso pendiente y gana el suyo, que dice lo mismo.
+     */
+    private final Object awaitLock = new Object();
+
+    @Override
+    public void awaitNextInput() {
+        synchronized (awaitLock) {
+            super.awaitNextInput();
+        }
+    }
+
+    private void finishIfGuest(final GameEvent event) {
+        if (!(event instanceof forge.game.event.GameEventGameFinished)) {
+            return;
+        }
+        final GameView gv = getGameView();
+        if (gv == null || gv.getGame() != null || finished.get()) {
+            return;
+        }
+        log("game over received from the network");
+        forge.gui.GuiBase.getInterface().invokeInEdtLater(this::finishGame);
+    }
+
+    /**
+     * Pausa base entre carta y carta de la IA, en milisegundos.
+     *
+     * <p>Tres segundos es lo que se pidio jugando y es lo que dura leer el
+     * nombre de una carta y ver donde cae. El ajuste la multiplica:
+     * x2 la deja en 1,5 s, x0,5 en 6 s.
+     */
+    private static final long AI_STEP_MS = 3_000;
+
+    /** El multiplicador del ajuste, en centesimas. 0 = sin pausa. */
+    private volatile int aiSpeed =
+            forge.neo.NeoSettings.getInt(forge.neo.NeoSettings.AI_SPEED, 100);
+
+    public void setAiSpeed(final int hundredths) {
+        this.aiSpeed = hundredths;
+    }
+
+    /**
+     * <b>Frena a la IA para que se pueda ver lo que hace.</b>
+     *
+     * <p>Sale de jugar, y es el principio 9 de las notas de diseño llevado al reloj: la
+     * IA no tiene manos. Resuelve un turno entero en uno o dos segundos, asi
+     * que te bajan tres criaturas, te matan una y te enteras al mirar el
+     * marcador. La pausa por aviso ("Pararse en el turno del rival") lo cuenta,
+     * pero solo lo que te afecta y a cambio de un OK; esto es lo otro que hacia
+     * falta: <b>ritmo</b>.
+     *
+     * <p>Se frena en lo que un jugador de verdad tarda en hacer: poner una
+     * tierra y lanzar algo. No en cada evento — un solo hechizo dispara diez —
+     * ni en lo que hace el jugador local, que ya sabe lo que esta haciendo.
+     *
+     * <p><b>Duerme el hilo del MOTOR</b>, que es justo lo que se quiere: la
+     * partida se frena de verdad, no solo la pantalla. Este metodo se llama
+     * desde {@code handleGameEvent}, que corre ahi. Nunca desde el de interfaz:
+     * eso seria congelar la ventana.
+     */
+    private void slowTheAiDown(final GameEvent event) {
+        final int speed = aiSpeed;
+        if (speed <= 0 || !interactive()) {
+            return;
+        }
+        if (isNetGame() && !runsTheEngine()) {
+            // El invitado: los eventos le llegan por el cable, y dormir aqui
+            // seria dormir la CONEXION y acumular retraso. Quien frena es el
+            // anfitrion, que es donde corre el motor.
+            return;
+        }
+        // Seguro de vida: dormir el hilo de interfaz congela la ventana.
+        final UiDispatcher ui = uiDispatcher();
+        if (ui != null && ui.isUiThread()) {
+            return;
+        }
+        if (!isSomebodyElsePlayingACard(event)) {
+            return;
+        }
+        try {
+            Thread.sleep(AI_STEP_MS * 100 / speed);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Tope duro de la pausa por lectura, en milisegundos.
+     *
+     * <p>No es un temporizador de lectura: es el seguro de que un fallo
+     * nuestro no pueda dejar la partida congelada para siempre. Cinco minutos
+     * mirando una carta no los hace nadie; un espejo que se quedara encendido
+     * si. Si salta, se dice por consola y la partida sigue, que es exactamente
+     * lo que hacia antes de existir este ajuste.
+     */
+    private static final long READING_CAP_DEFAULT_MS = 5 * 60 * 1000L;
+
+    /** El tope, con {@code -Dneo.readingCapMs=N} para poder probarlo (la guía de pruebas). */
+    private static long readingCapMs() {
+        return Long.getLong("neo.readingCapMs", READING_CAP_DEFAULT_MS);
+    }
+
+    /**
+     * Quien sabe si el jugador ha parado la partida para leer.
+     *
+     * <p>Normalmente es la mesa (carta ampliada o menu de pausa). Se puede
+     * sustituir para probar la pausa <b>sin ventana</b>, que es lo que hace
+     * {@code run.cmd readingcheck}: montar un JavaFX entero para comprobar que
+     * el motor se para seria pagar una ventana por una espera.
+     */
+    private volatile java.util.function.BooleanSupplier readingProbe;
+
+    public void setReadingProbe(final java.util.function.BooleanSupplier probe) {
+        this.readingProbe = probe;
+    }
+
+    private boolean playerIsReading() {
+        final java.util.function.BooleanSupplier probe = readingProbe;
+        if (probe != null) {
+            return probe.getAsBoolean();
+        }
+        final forge.neo.ui.TableScreen t = table;
+        return t != null && t.isPlayerReading();
+    }
+
+    /**
+     * <b>Para la partida mientras el jugador esta leyendo.</b>
+     *
+     * <p>Pedido el 20-09-2026 en itch.io: <i>"un ajuste para pausar la partida
+     * al ampliar una carta dejaria leerla a los jugadores nuevos o lentos sin
+     * perderse nada de lo que pasa"</i>. Ampliar una carta es justo lo que
+     * hace quien no va sobrado, y era el unico gesto de la mesa que no paraba
+     * nada: la IA seguia jugando detras de la carta. El menu de pausa tampoco
+     * paraba, que es peor porque se llama asi.
+     *
+     * <p><b>Duerme el hilo del MOTOR</b>, como {@link #slowTheAiDown}: la
+     * partida se detiene de verdad, no solo la pantalla. Y va <b>antes</b> de
+     * {@code pushToTable}, que es lo que hace que sirva de algo — asi la mesa
+     * de debajo ni se entera, y al cerrar la carta ves la jugada ENTRAR, con
+     * su animacion, en vez de encontrartela ya hecha.
+     *
+     * <p>No mira el modo de la partida: lo que la enciende es que alguien
+     * diga que esta leyendo, y eso solo lo dice una mesa de verdad — sin
+     * ventana no hay quien amplie una carta, asi que los comprobadores ni se
+     * enteran. Las guardias son las de {@code slowTheAiDown} y una mas:
+     * <ul>
+     *   <li>en <b>red</b>, nada: el invitado no tiene motor que parar, y el
+     *       anfitrion parandolo congelaria a los demas;</li>
+     *   <li>nunca desde el <b>hilo de interfaz</b> — ahi entra cuando el
+     *       propio jugador toca una carta y el motor vuelve por el mismo hilo
+     *       (las notas de diseño seccion 5), y dormirlo seria congelar la ventana y no
+     *       poder ni cerrar la carta: un cuelgue del que no se sale;</li>
+     *   <li>y se suelta si se esta <b>saliendo</b> de la partida. "Salir" y
+     *       "Reiniciar" ocultan el menu antes de pedirselo al motor, asi que
+     *       ya se soltaria sola; esto es el tirante del cinturon, porque lo
+     *       que hay al otro lado es una partida que no se puede abandonar.</li>
+     * </ul>
+     */
+    private void holdWhileReading() {
+        if (isNetGame() || !playerIsReading()) {
+            return;
+        }
+        if (!forge.neo.NeoSettings.pauseWhileReading()) {
+            return;
+        }
+        // Seguro de vida: dormir el hilo de interfaz congela la ventana.
+        final UiDispatcher ui = uiDispatcher();
+        if (ui != null && ui.isUiThread()) {
+            return;
+        }
+        final long cap = readingCapMs();
+        final long until = System.currentTimeMillis() + cap;
+        while (playerIsReading() && exitAction == null && !finished.get()) {
+            if (System.currentTimeMillis() > until) {
+                System.out.println("[neo] la pausa por lectura lleva " + cap
+                        + " ms: se sigue igual");
+                return;
+            }
+            try {
+                // Se pregunta en vez de esperar un aviso: quien cierra la
+                // carta es el hilo de interfaz y un aviso perdido aqui seria
+                // la partida parada para siempre. Dos decimas de retraso al
+                // reanudar no las nota nadie; 50 ms tampoco cuestan nada.
+                Thread.sleep(50L);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
+    /** ¿Este evento es "un rival acaba de jugar una carta"? */
+    private boolean isSomebodyElsePlayingACard(final GameEvent event) {
+        final PlayerView me = localPlayer();
+        if (me == null) {
+            return false;
+        }
+        PlayerView who = null;
+        if (event instanceof GameEventSpellAbilityCast e) {
+            final StackItemView si = e.si();
+            who = si == null ? null : si.getActivatingPlayer();
+        } else if (event instanceof GameEventLandPlayed e) {
+            who = e.player();
+        }
+        if (who == null || me.equals(who)) {
+            return false;
+        }
+        // En red, solo las IAs de la sala: un amigo ya ha tardado lo suyo en
+        // decidirse, y frenarle encima seria hacer esperar a todos dos veces.
+        // Antes no se frenaba nada en red — y en la sala se pueden sentar
+        // IAs, que resolvian su turno en un parpadeo (principio 9).
+        return !isNetGame() || who.isAI();
+    }
+
+    /** Si el motor de esta partida corre en ESTE proceso (local, o anfitrion en red). */
+    private boolean runsTheEngine() {
+        final GameView gv = getGameView();
+        return gv != null && gv.getGame() != null;
+    }
+
+    /**
+     * Quien mas quiere enterarse de lo que cuenta el motor.
+     *
+     * <p>Hoy solo el tutorial, que da un paso por bueno cuando el jugador HACE
+     * lo que se le pedia — jugar una tierra, declarar atacantes, activar una
+     * habilidad — y quien sabe si ha pasado de verdad es el motor. Va aqui, que
+     * es por donde pasan todos los eventos de cualquier partida (principio 8),
+     * y no en quien monta el tutorial.
+     */
+    private volatile java.util.function.Consumer<GameEvent> eventSpy;
+
+    public void setEventSpy(final java.util.function.Consumer<GameEvent> spy) {
+        this.eventSpy = spy;
+    }
+
+    private void tellTheSpy(final GameEvent event) {
+        final java.util.function.Consumer<GameEvent> spy = eventSpy;
+        if (spy == null) {
+            return;
+        }
+        // Corre en el hilo del MOTOR: quien escucha pinta, asi que se cruza al
+        // hilo de interfaz aqui y no en cada oyente.
+        runOnUi(() -> {
+            try {
+                spy.accept(event);
+            } catch (final RuntimeException e) {
+                // Un fallo del tutorial no puede llevarse la partida por
+                // delante: aqui estamos en el hilo de interfaz, y una excepcion
+                // que se lleve ese hilo se ve como un cuelgue.
+                System.out.println("[neo] el tutorial ha fallado al mirar un evento: " + e);
+            }
+        });
+    }
+
+    /**
+     * Las animaciones que explican un cambio concreto.
+     *
+     * <p>La regla de la seccion 10b vale aqui igual: <b>si no explica nada, no
+     * esta</b>. Lo que entra y lo que se va de la mesa ya lo anima
+     * {@code BattlefieldPane} al aparecer y desaparecer los nodos; lo que
+     * faltaba es lo que cambia <i>dentro</i> de una carta que sigue donde
+     * estaba, porque eso la mesa lo repinta en silencio:
+     *
+     * <ul>
+     *   <li><b>Dano</b> — un destello rojo en la que lo recibe. Sale de una
+     *       queja concreta jugando: <i>"me han matado una criatura y no se ni
+     *       como"</i>.</li>
+     *   <li><b>Contadores</b> — un golpe de escala cuando suben o bajan: los
+     *       +1/+1, la lealtad de un planeswalker, las cargas.</li>
+     * </ul>
+     *
+     * <p>Corre en el hilo del MOTOR, asi que todo va por el hilo de interfaz.
+     */
+    private void animateEvent(final GameEvent event) {
+        final forge.neo.ui.TableScreen t = table;
+        if (t == null || !forge.neo.card.CardNode.areAnimationsEnabled()) {
+            return;
+        }
+        // La carta que entra en la mesa vuela desde donde estaba (Discord,
+        // 26-10-2026): de donde la soltaste, del stack, de tu mano o del
+        // retrato del rival. Va con las animaciones, sin ajuste propio (Ana).
+        if (event instanceof GameEventCardChangeZone move && move.card() != null && move.from() != null
+                && move.to() != null && move.to().zoneType() == ZoneType.Battlefield
+                && (move.from().zoneType() == ZoneType.Hand || move.from().zoneType() == ZoneType.Stack)) {
+            final CardView card = move.card();
+            final boolean fromStack = move.from().zoneType() == ZoneType.Stack;
+            final boolean mine = isMine(card);
+            final PlayerView owner = card.getController() != null ? card.getController() : card.getOwner();
+            runOnUi(() -> t.flyIn(card, fromStack, mine, owner));
+        }
+        // Lo que robas vuela de la biblioteca a la mano (Discord, 04-11-2026,
+        // "just like arena"). Solo lo tuyo: lo del rival no se ve.
+        if (event instanceof GameEventCardChangeZone draw && draw.card() != null && draw.from() != null
+                && draw.to() != null && draw.from().zoneType() == ZoneType.Library
+                && draw.to().zoneType() == ZoneType.Hand && isMine(draw.card())) {
+            final CardView card = draw.card();
+            runOnUi(() -> t.flyDraw(card));
+        }
+        // Juntas, nunca una tarea por aviso: ver CardPulses (una cascada de
+        // contadores dejo el juego sin memoria).
+        if (event instanceof forge.game.event.GameEventCardDamaged e && e.amount() > 0) {
+            // El golpe del combate: quien hace el dano se lanza hacia su victima.
+            final boolean combat = e.source() != null && (e.source().isAttacking() || e.source().isBlocking());
+            // El golpe va con los efectos, como en Android: apagados, como antes.
+            if (combat && forge.neo.ui.ImpactLayer.isEnabled()) {
+                final CardView src = e.source();
+                final CardView dst = e.card();
+                runOnUi(() -> t.strike(src, dst));
+            }
+            if (forge.neo.ui.ImpactLayer.isEnabled()) {
+                // El numero del dano, y el destello cuando llega el golpe.
+                final CardView dst = e.card();
+                final int amount = e.amount();
+                final boolean poison = e.type() == forge.game.event.GameEventCardDamaged.DamageType.M1M1Counters;
+                runOnUi(() -> t.damagePop(dst, amount, combat, poison));
+            } else {
+                pulsesFor(t).hit(e.card());
+            }
+        } else if (event instanceof forge.game.event.GameEventPlayerDamaged e && e.amount() > 0) {
+            final PlayerView dst = e.target();
+            if (e.combat() && e.source() != null && forge.neo.ui.ImpactLayer.isEnabled()) {
+                final CardView src = e.source();
+                runOnUi(() -> t.strike(src, dst));
+            }
+            if (forge.neo.ui.ImpactLayer.isEnabled()) {
+                final int amount = e.amount();
+                final boolean combat = e.combat();
+                final boolean poison = e.infect();
+                runOnUi(() -> t.damagePop(dst, amount, combat, poison));
+            }
+        } else if (event instanceof forge.game.event.GameEventCardCounters e
+                && e.oldValue() != e.newValue()) {
+            pulsesFor(t).bump(e.card());
+        } else if (event instanceof forge.game.event.GameEventSpellResolved e && !e.hasFizzled()
+                && forge.neo.ui.ImpactLayer.isEnabled()) {
+            noteImpacts(t, e);
+            noteSpellBlast(t, e);
+        } else if (event instanceof forge.game.event.GameEventCardChangeZone e
+                && forge.neo.ui.ImpactLayer.isEntranceEnabled()) {
+            noteCommanderEntrance(t, e);
+        }
+    }
+
+    /**
+     * <b>Tu comandante acaba de entrar en la mesa</b>: lanzado desde la zona de
+     * mando o de cualquier otra forma (parpadeo, reanimar). Solo el tuyo — el
+     * del rival ya lo cuentan el registro y el aviso. Ver
+     * {@link forge.neo.ui.CommanderEntrance}.
+     */
+    private void noteCommanderEntrance(final forge.neo.ui.TableScreen t,
+            final forge.game.event.GameEventCardChangeZone e) {
+        final CardView card = e.card();
+        // De TODOS, no solo el tuyo (Ana, 18-10-2026: "que te enteres cuando
+        // saca el comandante el rival tambien").
+        if (card == null || e.to() == null || e.to().zoneType() != forge.game.zone.ZoneType.Battlefield
+                || (e.from() != null && e.from().zoneType() == forge.game.zone.ZoneType.Battlefield)
+                || !card.isCommander()) {
+            return;
+        }
+        final PlayerView owner = card.getController() != null ? card.getController() : card.getOwner();
+        final String subtitle = isMine(card) || owner == null
+                ? NeoText.get("entrance.commander")
+                : NeoText.get("entrance.commanderOf", nameOf(owner));
+        final CardView.CardStateView state = card.getCurrentState();
+        final List<javafx.scene.paint.Color> colors = forge.neo.ui.ImpactLayer.colorsOf(
+                state == null ? null : state.getColors());
+        // Los famosos llevan firma (CommanderSignature); alguna, solo si es tuyo.
+        final CommanderSignature signature = CommanderSignature.of(card, isMine(card));
+        if (Boolean.getBoolean("neo.impact.log")) {
+            System.out.println("[entrada] " + card + (signature == CommanderSignature.NONE ? "" : " firma " + signature));
+        }
+        runOnUi(() -> t.commanderEntrance(card, colors, subtitle, signature));
+    }
+
+    /**
+     * <b>Los destellos de lo que se acaba de resolver</b> (Discord, 17-10-2026):
+     * chispas del color del hechizo sobre cada objetivo — cartas y jugadores —
+     * y un remolino bajo el permanente que entra lanzado. Lo que se ha golpeado
+     * lo lee {@link SpellImpact} (el mismo para Android), aqui en el hilo del
+     * motor y en el momento del aviso, que es el unico en que se puede. Se
+     * pinta en {@link forge.neo.ui.ImpactLayer}.
+     *
+     * <p>Al invitado de red no le sale: no tiene la partida, solo vistas.
+     */
+    private void noteImpacts(final forge.neo.ui.TableScreen t,
+            final forge.game.event.GameEventSpellResolved e) {
+        final GameView view = getGameView();
+        final SpellImpact impact = SpellImpact.read(view == null ? null : view.getGame(), e);
+        if (impact == null) {
+            return;
+        }
+        // -Dneo.impact.log=true: lo que se ha leido, para probarlo sin mirar.
+        if (Boolean.getBoolean("neo.impact.log")) {
+            System.out.println("[destellos] " + e.spell().getHostCard() + ": " + impact);
+        }
+        // Juntas, como CardPulses: en la cola de la interfaz hay como mucho UNA
+        // tarea, y lo que pase del tope no se apunta (no cabria en pantalla).
+        if (pendingImpacts.size() < 24) {
+            pendingImpacts.add(new Object[] {t, impact});
+        }
+        if (impactsScheduled.compareAndSet(false, true)) {
+            runOnUi(this::flushImpacts);
+        }
+    }
+
+    /**
+     * <b>Un hechizo famoso acaba de resolverse</b> ({@link SpellSignature}):
+     * el meteorito de Blasphemous Act, el fogonazo de Wrath of God... Solo los
+     * hechizos (no las habilidades) y solo si resuelven: este aviso no llega si
+     * se contrarrestan, y {@code hasFizzled} lo quita si se quedo sin objetivo.
+     * Las quitadas necesitan su objetivo, que solo se puede leer aqui y ahora
+     * ({@link SpellImpact}).
+     */
+    private void noteSpellBlast(final forge.neo.ui.TableScreen t,
+            final forge.game.event.GameEventSpellResolved e) {
+        try {
+            final GameView view = getGameView();
+            final forge.game.Game game = view == null ? null : view.getGame();
+            final String resolving = SpellImpact.resolvingSpellName(game, e);
+            if (Boolean.getBoolean("neo.impact.log")) {
+                System.out.println("[hechizo] resuelve: " + resolving);
+            }
+            final SpellSignature sig = SpellSignature.of(resolving);
+            if (sig == SpellSignature.NONE) {
+                return;
+            }
+            Object target = null;
+            if (sig.atTarget) {
+                final SpellImpact impact = SpellImpact.read(game, e);
+                if (impact == null || impact.targets.isEmpty()) {
+                    return;
+                }
+                target = impact.targets.get(0);
+            }
+            if (Boolean.getBoolean("neo.impact.log")) {
+                System.out.println("[hechizo] " + sig + (target == null ? "" : " sobre " + target));
+            }
+            final Object on = target;
+            runOnUi(() -> t.spellBlast(sig, on));
+        } catch (final RuntimeException ex) {
+            // Un efecto que falla no puede tocar la partida.
+        }
+    }
+
+    private final java.util.concurrent.ConcurrentLinkedQueue<Object[]> pendingImpacts =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private final java.util.concurrent.atomic.AtomicBoolean impactsScheduled =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** En el hilo de interfaz. */
+    private void flushImpacts() {
+        // Antes de vaciar: lo que llegue mientras tanto encola otra ronda.
+        impactsScheduled.set(false);
+        Object[] next;
+        while ((next = pendingImpacts.poll()) != null) {
+            final forge.neo.ui.TableScreen t = (forge.neo.ui.TableScreen) next[0];
+            final SpellImpact impact = (SpellImpact) next[1];
+            final List<javafx.scene.paint.Color> colors = forge.neo.ui.ImpactLayer.colorsOf(impact.colors);
+            for (final Object o : impact.targets) {
+                t.impactHit(o, colors, impact.source);
+            }
+            // Un comandante ya tiene su entrada de cine: la otra sobraria.
+            if (impact.arrived != null && !(impact.arrived.isCommander()
+                    && forge.neo.ui.ImpactLayer.isEntranceEnabled())) {
+                t.impactArrive(impact.arrived, colors);
+            }
+        }
+    }
+
+    private volatile CardPulses pulses;
+
+    private CardPulses pulsesFor(final forge.neo.ui.TableScreen t) {
+        CardPulses p = pulses;
+        if (p == null || !p.isFor(t)) {
+            p = new CardPulses(t, this::runOnUi);
+            pulses = p;
+        }
+        return p;
+    }
+
+    /**
+     * Manda algo al hilo de interfaz, venga de donde venga.
+     *
+     * <p>Se pasa por el {@link UiDispatcher} y no por {@code Platform.runLater}
+     * a secas. La diferencia sale en cuanto no hay ventana: los comprobadores
+     * ({@code tutorialcheck}, {@code questcheck}…) corren sin toolkit de
+     * JavaFX, y ahi {@code Platform.runLater} lanza
+     * {@code IllegalStateException: Toolkit not initialized}. Antes no se
+     * notaba porque en local no llegaba un solo evento; en cuanto empezaron a
+     * llegar, el comprobador del tutorial se llenaba de fallos. El dispatcher
+     * ya sabe donde vive el hilo de interfaz en cada montaje — y si no hay
+     * ninguno, esto se hace aqui mismo, que es lo correcto sin pantalla.
+     */
+    private void runOnUi(final Runnable task) {
+        if (javafx.application.Platform.isFxApplicationThread()) {
+            task.run();
+            return;
+        }
+        final UiDispatcher ui = uiDispatcher();
+        if (ui != null) {
+            ui.runLater(task);
+        } else {
+            task.run();
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Enterarse de lo que hace el rival
+    // ---------------------------------------------------------------
+
+    /**
+     * Lo que le ha pasado a lo tuyo desde la ultima vez que miraste.
+     *
+     * <p>Feedback real jugando: <i>"los turnos de la IA van a toda hostia y no
+     * me entero; de repente me han matado una criatura y no se ni como"</i>.
+     * Cuando el rival hace algo a lo que no puedes responder, el motor ni te da
+     * prioridad: la mesa cambia sola.
+     */
+    private final List<String> pendingNews = new ArrayList<>();
+
+    /**
+     * Cuanto hay que frenar el turno del rival.
+     *
+     * <p>Salio jugando: <i>"la IA juega muy rapido, sacan algo y dura un
+     * segundo, no me da tiempo a leerlo"</i>. La IA no tiene manos, asi que
+     * resuelve su turno entero en milisegundos y te lo pierdes.
+     *
+     * <ul>
+     *   <li>{@code 0} — <b>nunca</b>. El ritmo seguido.</li>
+     *   <li>{@code 1} — <b>si me afecta</b>: pierdes un permanente, recibes
+     *       dano. Se acumula y se suelta al cambiar de paso.</li>
+     *   <li>{@code 2} — <b>lo que va al stack</b>: cada hechizo, habilidad
+     *       activada o disparo de un rival. Es el punto medio, y el que casi
+     *       siempre se quiere: <b>todo lo que puede cambiar la partida pasa por
+     *       el stack</b>, y las habilidades de mana — que son la mayor parte del
+     *       ruido de un turno — no pasan por ahi.</li>
+     *   <li>{@code 3} — <b>en todo</b>: ademas las tierras que juegan y las
+     *       fichas que crean. El mas lento.</li>
+     * </ul>
+     *
+     * <p>El {@code 2} se apoya en un detalle del motor que conviene saber:
+     * {@code GameEventSpellAbilityCast} se dispara desde {@code MagicStack.add},
+     * o sea <b>solo cuando algo entra de verdad al stack</b>. No hay que filtrar
+     * nada a mano.
+     */
+    private volatile int pauseMode =
+            forge.neo.NeoSettings.getInt(forge.neo.NeoSettings.PAUSE_MODE, 2);
+
+    public void setPauseMode(final int mode) {
+        this.pauseMode = mode;
+    }
+
+    public int getPauseMode() {
+        return pauseMode;
+    }
+
+    /**
+     * Anota lo que te afecta y, en un punto natural, para y te lo cuenta.
+     *
+     * <p>La pausa <b>no salta en cada evento</b>: eso daria cinco "OK" seguidos
+     * por un solo Wrath of God. Se acumula lo que va pasando y se suelta todo
+     * junto al cambiar de paso, que es el primer momento tranquilo. Asi sale un
+     * aviso por tanda, con el resumen completo.
+     *
+     * <p>Solo se mira cuando <b>no es tu turno</b>: en el tuyo eres tu quien
+     * actua y ya estas viendo lo que haces.
+     */
+    private boolean watchForThingsThatAffectMe(final GameEvent event) {
+        if (!interactive() || pauseMode <= 0 || localPlayer() == null) {
+            return false;
+        }
+
+        final String note = describeIfItAffectsMe(event);
+        if (note != null) {
+            synchronized (pendingNews) {
+                if (!pendingNews.contains(note)) {
+                    pendingNews.add(note);
+                }
+            }
+            uiRunLater(() -> table.markLogUnread());
+
+            // Del nivel 2 en adelante se suelta en el acto: lo que se quiere es
+            // seguir la jugada del rival segun la hace, no un resumen al final.
+            if (pauseMode >= 2) {
+                return flushNews();
+            }
+        }
+
+        // Punto natural para soltar el resumen: el motor cambia de paso. Asi un
+        // Wrath of God que se lleva cinco criaturas es UN aviso con las cinco, y
+        // no cinco "OK" seguidos.
+        if (event instanceof GameEventTurnPhase) {
+            return flushNews();
+        }
+        return false;
+    }
+
+    /**
+     * Para la partida y ensenya lo acumulado, si hay algo.
+     *
+     * @return si de verdad ha parado (lo mira el ritmo de la IA)
+     */
+    private boolean flushNews() {
+        final List<String> news;
+        synchronized (pendingNews) {
+            if (pendingNews.isEmpty()) {
+                return false;
+            }
+            news = new ArrayList<>(pendingNews);
+            pendingNews.clear();
+        }
+        if (table == null) {
+            return false;
+        }
+
+        final String text = String.join(System.lineSeparator(), news);
+        // De fabrica, en la esquina y sin parar (pedido en r/forgeMTG el
+        // 15-09-2026: un click por cada cosa del rival cansa). Se devuelve
+        // false para que la pausa entre carta y carta de la IA siga dando el
+        // tiempo de leerlo.
+        // En una repeticion, siempre en la esquina: parar aqui era parar la
+        // reproduccion entera hasta pulsar "Entendido".
+        if (forge.neo.NeoSettings.getInt(forge.neo.NeoSettings.NEWS_STYLE, 0) == 0 || isReplay()) {
+            final forge.neo.ui.TableScreen t = table;
+            uiRunLater(() -> t.showNotice(text));
+            return false;
+        }
+        // askUser bloquea el hilo del MOTOR hasta que se pulsa OK, que es
+        // justamente lo que se quiere: la partida se detiene de verdad.
+        askUser(done -> {
+            table.getPromptBanner().showAlert(text, NeoText.get("banner.understood"), () -> {
+                table.getPromptBanner().hide();
+                done.accept(Boolean.TRUE);
+            }, forge.neo.NeoSettings.getInt(forge.neo.NeoSettings.NEWS_AUTOCLOSE, 0));
+            table.requestLayout();
+        }, Boolean.TRUE);
+        return true;
+    }
+
+    /**
+     * Traduce un evento a una linea, o null si no te afecta.
+     *
+     * <p>Se cuentan solo las cosas que cambian TU posicion: pierdes un
+     * permanente, recibes dano, pierdes vidas o descartas. Que el rival juegue
+     * una tierra o se busque una carta no para la partida — pararia siempre.
+     */
+    private String describeIfItAffectsMe(final GameEvent event) {
+        final PlayerView me = localPlayer();
+
+        // Desde el nivel 2: todo lo que un rival mete en el stack, aunque no te
+        // apunte. Es lo que te deja seguir su turno.
+        if (pauseMode >= 2 && event instanceof GameEventSpellAbilityCast e) {
+            final StackItemView si = e.si();
+            if (si != null && si.getActivatingPlayer() != null
+                    && !me.equals(si.getActivatingPlayer())) {
+                return NeoText.get("alert.casts",
+                        PlayerName.of(si.getActivatingPlayer()),
+                        si.getText() == null || si.getText().isBlank()
+                            ? NeoText.get("alert.aSpell") : si.getText());
+            }
+            return null;
+        }
+
+        // Nivel 3: lo que NO pasa por el stack. Jugar una tierra no se puede
+        // responder y casi nunca cambia nada, por eso va aparte.
+        if (pauseMode >= 3 && event instanceof GameEventLandPlayed e) {
+            if (e.player() != null && !me.equals(e.player())) {
+                return NeoText.get("alert.playsLand",
+                        PlayerName.of(e.player()), nameOfCard(e.land()));
+            }
+            return null;
+        }
+
+        if (event instanceof GameEventCardChangeZone e) {
+            final CardView card = e.card();
+            if (card == null || e.from() == null || e.to() == null || !isMine(card)) {
+                return null;
+            }
+            if (e.from().zoneType() != ZoneType.Battlefield) {
+                return null;
+            }
+            switch (e.to().zoneType()) {
+                case Graveyard:
+                    return NeoText.get("alert.died", nameOfCard(card));
+                case Exile:
+                    return NeoText.get("alert.exiled", nameOfCard(card));
+                case Hand:
+                    return NeoText.get("alert.toHand", nameOfCard(card));
+                case Library:
+                    return NeoText.get("alert.toLibrary", nameOfCard(card));
+                default:
+                    return null;
+            }
+        }
+
+        if (event instanceof GameEventPlayerDamaged e) {
+            if (!me.equals(e.target()) || e.amount() <= 0) {
+                return null;
+            }
+            return e.source() == null
+                    ? NeoText.get("alert.damaged", e.amount())
+                    : NeoText.get("alert.damagedBy", e.amount(), nameOfCard(e.source()));
+        }
+
+        return null;
+    }
+
+    private boolean isMine(final CardView card) {
+        final PlayerView me = localPlayer();
+        return me != null
+                && (me.equals(card.getController()) || me.equals(card.getOwner()));
+    }
+
+    private static String nameOfCard(final CardView card) {
+        if (card == null) {
+            return NeoText.get("alert.aCard");
+        }
+        final String n = forge.neo.card.CardText.nameOf(card);
+        return n == null || n.isBlank() ? NeoText.get("alert.aCard") : n;
+    }
+
+    /**
+     * Decide que ensenyar en el centro de la mesa, al estilo de Arena.
+     *
+     * <p>Tres casos, por orden:
+     *
+     * <ol>
+     *   <li><b>Hay algo en el stack.</b> Es lo que Arena pone en mitad de la
+     *       pantalla: la carta del hechizo o del disparo que esta esperando, a
+     *       tamanyo de lectura, con su texto. Cuando el juego te para, lo
+     *       primero que necesitas saber es de que carta viene.</li>
+     *   <li><b>El motor pregunta algo concreto</b> ("elige una criatura para
+     *       sacrificar"). Se ensenya la pregunta, con la carta que el motor haya
+     *       marcado con {@code setCard} si la hay.</li>
+     *   <li><b>Prioridad rutinaria y stack vacio.</b> No pasa nada: fuera el
+     *       cartel. Antes salia igualmente y se quedaba plantado en mitad de la
+     *       mesa todo tu turno.</li>
+     * </ol>
+     */
+    private void showCentralPrompt(final String okLabel, final String cancelLabel,
+                                   final boolean okEnabled, final boolean cancelEnabled) {
+        final PromptBanner banner = table.getPromptBanner();
+
+        // El aviso de "esto te acaba de pasar" MANDA sobre el espejo del stack.
+        // Mientras esta puesto, el hilo del motor esta parado esperando su
+        // boton: repintar aqui se lo lleva por delante y la partida se queda
+        // muerta para siempre. Se vio en cuanto los eventos empezaron a llegar
+        // en local — con la pausa en nivel 2 el turno 2 no pasaba de ahi.
+        if (banner.isAlerting()) {
+            return;
+        }
+
+        // Quitado en Ajustes (itch.io, 04-10-2026): el stack de la derecha ya
+        // lo dice. Va DESPUES del aviso de arriba, que no se quita nunca.
+        if (!forge.neo.NeoSettings.stackBanner()) {
+            banner.hide();
+            return;
+        }
+
+        // ---- EL CARTEL CENTRAL ES UN ESPEJO DEL STACK. NADA MAS. ----
+        //
+        // Antes tambien repetia aqui el prompt del motor, y de ahi salieron
+        // tres fallos seguidos jugando: se quedaba puesto un "Waiting for
+        // IA-2..." que no se iba, tapaba las criaturas justo cuando habia que
+        // declarar atacantes, y tapaba lo que el motor te estaba ensenyando.
+        //
+        // El problema de fondo era que dependia de cuando llegaba cada aviso y
+        // de acertar con un monton de condiciones. Un espejo del stack no tiene
+        // ese problema: hay algo en el stack -> se ve; se vacia -> desaparece.
+        // Es ademas lo que se pidio ("la carta en grande para saber que pasa") y
+        // lo que hace Arena.
+        //
+        // El prompt del motor vive en la barra de la derecha, que es su sitio y
+        // donde siempre ha funcionado.
+        final StackItemView top = topOfStack();
+
+        // Con una seleccion en curso hay que ver la mesa para poder clicarla,
+        // asi que ni siquiera el stack se pinta encima.
+        if (top == null || isSelecting() || table.isModalShowing()) {
+            banner.hide();
+            return;
+        }
+
+        // Si el jugador ya lo ha apartado para esto que hay en el stack, no se
+        // le vuelve a poner delante. Con lo siguiente que entre, si.
+        final String key = String.valueOf(top.getKey());
+        if (key.equals(dismissedStackKey)) {
+            banner.hide();
+            return;
+        }
+
+        banner.setOnDismiss(() -> dismissedStackKey = key);
+        banner.showInfo(top.getSourceCard(), stackText(top));
+        table.requestLayout();
+
+        // SOLO UN MOMENTO (NeoSettings.stackBannerBrief): se ve, y al rato se
+        // va volando al stack y no vuelve con lo mismo. Con lo siguiente que
+        // entre, otra vez. El reloj se arma UNA vez por entrada: este metodo se
+        // llama con cada evento y no puede alargarlo.
+        if (forge.neo.NeoSettings.stackBannerBrief() && !key.equals(briefKey)) {
+            briefKey = key;
+            if (briefTimer != null) {
+                briefTimer.stop();
+            }
+            final javafx.animation.PauseTransition wait =
+                    new javafx.animation.PauseTransition(javafx.util.Duration.millis(BRIEF_MS));
+            wait.setOnFinished(e -> {
+                final StackItemView now = topOfStack();
+                if (now != null && key.equals(String.valueOf(now.getKey())) && !banner.isAlerting()
+                        && banner.isVisible()) {
+                    dismissedStackKey = key;
+                    table.flyBannerToStack();
+                }
+            });
+            briefTimer = wait;
+            wait.play();
+        }
+    }
+
+    /** Cuanto se queda el cartel en el modo "un momento": lo justo para leer de que carta es. */
+    private static final double BRIEF_MS = Double.parseDouble(System.getProperty("neo.stackBannerBriefMs", "1300"));
+    private String briefKey;
+    private javafx.animation.PauseTransition briefTimer;
+
+    /** Lo que el jugador ha apartado del centro, para no repetirselo. */
+    private volatile String dismissedStackKey;
+
+    /**
+     * Repinta el cartel central con lo que haya ahora.
+     *
+     * <p>Hace falta porque el stack cambia con los eventos de partida, no solo
+     * cuando el motor te pide algo: sin esto, un hechizo que se resuelve solo
+     * dejaba su carta puesta en mitad de la mesa hasta la siguiente pregunta.
+     */
+    private final java.util.concurrent.atomic.AtomicBoolean promptPending =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    private void refreshCentralPrompt() {
+        final UiDispatcher ui = uiDispatcher();
+        if (ui == null || table == null || !interactive()) {
+            return;
+        }
+        // Se agrupa, como hace el binder con la mesa. Un turno de la IA suelta
+        // cientos de eventos en unos milisegundos: uno por evento serian
+        // cientos de repintados del cartel, todos leyendo el mismo stack. El
+        // que quede pendiente lee el estado de cuando le toque correr, asi que
+        // agrupar no pierde nada.
+        if (!promptPending.compareAndSet(false, true)) {
+            return;
+        }
+        ui.runLater(() -> {
+            promptPending.set(false);
+            showCentralPrompt(null, null, false, false);
+        });
+    }
+
+    /** Lo que hay encima del stack, o null si esta vacio. */
+    private StackItemView topOfStack() {
+        final GameView gv = getGameView();
+        if (gv == null || gv.getStack() == null) {
+            return null;
+        }
+        for (final StackItemView item : gv.getStack()) {
+            return item;
+        }
+        return null;
+    }
+
+    /**
+     * El texto de lo que hay en el stack, una cosa por linea: de quien es (en
+     * una partida a cuatro, saber si el disparo lo ha puesto el de enfrente o
+     * tu mismo cambia todo), que carta, que hace y a quien apunta. Ver
+     * {@link TableScreen#bannerText}.
+     */
+    private String stackText(final StackItemView item) {
+        // Con los disparos iguales juntos (StackGroups), el cartel dice
+        // cuantos hay seguidos, como la fila del stack.
+        int count = 1;
+        final GameView gv = getGameView();
+        final StackItemView top = topOfStack();
+        if (item != null && top != null && top.getId() == item.getId() && gv != null
+                && forge.neo.NeoSettings.groupStack()) {
+            count = StackGroups.topRun(gv.getStack());
+        }
+        return TableScreen.bannerText(item, localPlayerView(), count, gv == null ? null : gv.getGame());
+    }
+
+    /**
+     * Si esto es el aviso de "la IA no puede jugar bien estas cartas".
+     *
+     * <p>Forge lo suelta al empezar cada partida
+     * ({@code GameAction.revealUnplayableByAI}) y llega como un <i>reveal</i>,
+     * asi que se come una pantalla antes de cada partida. Es util la primera
+     * vez y molesto a partir de la segunda, por eso se puede silenciar en
+     * Ajustes.
+     *
+     * <p>Se reconoce por su etiqueta, pedida al mismo {@code Localizer} que la
+     * genera para que siga valiendo en cualquier idioma.
+     */
+    private static boolean isSilencedAiDeckWarning(final String message) {
+        if (message == null || message.isBlank()) {
+            return false;
+        }
+        if (!forge.neo.NeoSettings.getBool(forge.neo.NeoSettings.HIDE_AI_WARNING, false)) {
+            return false;
+        }
+        return forge.neo.EnginePhrase.contains(message, "lblAICantPlayCards");
+    }
+
+    /**
+     * Si el prompt es el rutinario de "tienes prioridad".
+     *
+     * <p>Forge lo compone en {@code InputBase.getTurnPhasePriorityMessage}: es
+     * el volcado de estado ("Priority: X / Turn: 6 / Phase: ... / Stack: Empty")
+     * que sale continuamente mientras juegas tu turno. <b>No es una pregunta</b>,
+     * asi que no puede levantar el cartel central: se quedaba plantado en mitad
+     * de la mesa todo el rato.
+     *
+     * <p>Se reconoce por como empieza, y la etiqueta se pide al mismo
+     * {@code Localizer} que la genera para que siga valiendo en cualquier
+     * idioma.
+     */
+    private static boolean isRoutinePriorityPrompt(final String prompt) {
+        if (prompt == null || prompt.isBlank()) {
+            return true;
+        }
+        return forge.neo.EnginePhrase.startsWith(prompt, "lblPriority", ": ");
+    }
+
+    /**
+     * Deja el boton del registro conectado.
+     *
+     * <p>El registro sale del {@code GameView}, que solo tiene la interfaz de
+     * partida, asi que el cable se pone aqui y no en la mesa.
+     */
+    public void wireGameLogButton() {
+        if (table == null) {
+            return;
+        }
+        table.getLogButton().setOnAction(e -> {
+            final GameView gv = getGameView();
+            if (gv != null) {
+                table.showGameLog(gv.getGameLog(), localPlayer(), LogCardLinks.lookupIn(gv));
+            }
+        });
+        // Lo que lleva cada jugador este turno (Discord, 18-10-2026). Lee la
+        // partida de este ordenador; en una repeticion no hay ninguna.
+        if (!isReplay()) {
+            table.enableTurnStats(() -> TurnStats.read(this, localPlayer()));
+        }
+        // Las macros, tambien con el raton. Mismo camino que su tecla.
+        table.getMacroRecordButton().setOnAction(e -> pressMacroRecord());
+        // En una repeticion no hay nada que grabar: no hay motor que la repita.
+        table.getMacroRecordButton().setVisible(!isReplay());
+        table.getMacroPlayButton().setOnAction(e -> pressMacroPlay());
+    }
+
+    /**
+     * Grabar o parar la macro, desde la tecla o desde el boton de la mesa.
+     * En el hilo de interfaz. Devuelve false si ahora no se puede.
+     */
+    public boolean pressMacroRecord() {
+        if (table == null || isReplay() || table.isModalShowing()) {
+            return false;
+        }
+        final Boolean recording = toggleMacroRecording();
+        if (recording == null) {
+            return false;
+        }
+        // Al parar, "Repetir" sale ya: el motor apunta la macro por detras
+        // (respondLater) y el siguiente repintado lo corrige si no habia nada.
+        table.setMacroState(recording, !recording || hasMacro());
+        table.getActionBar().setWarning(forge.neo.NeoText.get(recording
+                ? "macro.recording" : "macro.stopped"), false);
+        return true;
+    }
+
+    /** Repetir la macro, desde la tecla o desde el boton. */
+    public boolean pressMacroPlay() {
+        if (table == null || isReplay() || table.isModalShowing() || !playMacro()) {
+            return false;
+        }
+        table.setMacroRecording(false);
+        return true;
+    }
+
+    /** Si hay una macro grabada que repetir. */
+    public boolean hasMacro() {
+        final IGameController gc = getGameController();
+        return gc != null && gc.macros() != null && gc.macros().hasRememberedActions();
+    }
+
+    /**
+     * El jugador de abajo, el que maneja la persona.
+     *
+     * <p>{@code getLocalPlayers()} puede traer varios en modos raros; para esto
+     * el primero es el correcto.
+     */
+    private PlayerView localPlayer() {
+        // Con varias personas (hot seat), el que tiene la mesa delante.
+        final PlayerView f = front;
+        if (f != null && hotSeat()) {
+            return live(f);
+        }
+        for (final PlayerView p : getLocalPlayers()) {
+            return live(p);
+        }
+        return null;
+    }
+
+    // ---------------------------------------------------------------
+    // HOT SEAT: varias personas en el mismo aparato (itch.io, 04-10-2026)
+    // ---------------------------------------------------------------
+    //
+    // "Forge allows for setting up all players in a match to human ... This hot
+    // seat mode has been helpful in testing decks and strategies." El motor ya
+    // sabe: una interfaz para todos los asientos humanos (NeoGame.play), y
+    // InputProxy le dice en cada pregunta de quien es (setCurrentPlayer). Lo
+    // que faltaba era nuestro: la mesa daba por hecho UN jugador local, siempre
+    // abajo. Ahora abajo esta "el de delante", que sigue a quien decide, y al
+    // cambiar sale una cortina para no verle la mano al otro.
+
+    /** El asiento que tiene la mesa delante. Null fuera de un hot seat. */
+    private volatile PlayerView front;
+
+    /** Cada cambio de asiento pedido: el que llega tarde no pisa al nuevo. */
+    private final java.util.concurrent.atomic.AtomicInteger frontAsk =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /** Si hay varias personas jugando en este aparato. */
+    boolean hotSeat() {
+        return mode == Mode.HUMAN && getLocalPlayers().size() > 1;
+    }
+
+    /**
+     * Si de verdad hay VARIAS PERSONAS, y no solo varios asientos tuyos.
+     *
+     * <p>{@link #hotSeat} tambien es cierto mientras controlas el turno de otro
+     * (Worst Fears, Mindslaver): Forge lo registra como jugador local
+     * ({@code setGameController}) y la mesa gira hacia el, que es lo util —
+     * juegas con su mano. Pero la cortina de "pasa el ordenador a Abby" ahi
+     * sobra: Abby eres tu (Discord, 22-10-2026). Esto mira los asientos de
+     * INICIO ({@code setOriginalGameController}), que el control no cambia.
+     */
+    private boolean manyPeople() {
+        return mode == Mode.HUMAN && getOriginalGameControllers().size() > 1;
+    }
+
+    /**
+     * Cuando se acaba el control de otro jugador, la mesa VUELVE a ti en el
+     * acto (Discord, 22-10-2026, Worst Fears: <i>"when its supposed to be my
+     * turn nothing happens im still looking at the bots hand and board"</i>).
+     * El giro normal va con 300 ms de retraso y solo en hot seat; al quitar
+     * Forge al controlado, ya no hay hot seat y la mesa se quedaba mirandole.
+     */
+    @Override
+    public void setGameController(final PlayerView player, final IGameController gameController) {
+        super.setGameController(player, gameController);
+        final PlayerView f = front;
+        if (gameController == null && f != null && !isLocalPlayer(f)) {
+            PlayerView back = getCurrentPlayer();
+            if (back == null || !isLocalPlayer(back)) {
+                back = null;
+                for (final PlayerView p : getLocalPlayers()) {
+                    back = p;
+                    break;
+                }
+            }
+            if (back != null) {
+                trace("control de %s acabado: la mesa vuelve a %s", nameOf(f), nameOf(back));
+                frontAsk.incrementAndGet();
+                switchFront(back);
+            }
+        }
+    }
+
+    /**
+     * Si este jugador es "el que juega ahora". Fuera de un hot seat es
+     * exactamente {@code isLocalPlayer}; dentro, solo el de delante. Es la
+     * pregunta que hacen atacar, bloquear, lanzar desde el cementerio, equipar
+     * o el "te toca": con dos personas, "mio" es del que tiene el turno de
+     * decidir, no de cualquiera de las dos.
+     */
+    private boolean isMe(final PlayerView p) {
+        if (p == null) {
+            return false;
+        }
+        if (!hotSeat()) {
+            return isLocalPlayer(p);
+        }
+        final PlayerView f = front;
+        return f != null && f.getId() == p.getId();
+    }
+
+    /**
+     * Gira la mesa hacia este asiento, con su cortina. Lo llama la interfaz de
+     * cada asiento ({@link HotSeatGui}) antes de preguntarle algo, desde el
+     * hilo del motor; el cambio en pantalla va por el hilo de la interfaz.
+     */
+    void bringToFront(final PlayerView seat) {
+        if (seat == null || !hotSeat()) {
+            return;
+        }
+        final PlayerView f = front;
+        if (f != null && f.getId() == seat.getId()) {
+            return;
+        }
+        frontAsk.incrementAndGet();
+        switchFront(seat);
+    }
+
+    private void switchFront(final PlayerView seat) {
+        front = seat;
+        final PlayerView who = live(seat);
+        trace("hot seat: delante %s", nameOf(who));
+        forge.neo.ui.CardZoom.setLocalViewers(java.util.Collections.singletonList(who));
+        final TableBinder b = binder;
+        if (b != null) {
+            b.setSelf(who);
+        }
+        // La cortina solo con varias personas: controlando el turno de otro
+        // (Worst Fears) eres tu el que sigue delante. Ver manyPeople.
+        if (interactive() && manyPeople()) {
+            final String name = nameOf(who);
+            uiRunLater(() -> table.showCurtain(name));
+        }
+        pushToTable();
+        // El "Te toca / Juega X" se escribio al llegar la pregunta, 300 ms
+        // ANTES de girar la mesa: con el de antes delante. Se rehace.
+        refreshHighlights();
+    }
+
+    /**
+     * La parada de fase vista desde el asiento que pregunta (la manda
+     * {@link HotSeatGui}). Con varias personas cada una usa las paradas de "mi
+     * turno" en el suyo y las del rival en el de las demas; con una sola, es lo
+     * de siempre.
+     */
+    boolean isUiSetToSkipPhaseFor(final PlayerView asking, final PlayerView turn,
+                                  final PhaseType phase) {
+        if (phase == null) {
+            return false;
+        }
+        if (!hotSeat() || asking == null) {
+            return isUiSetToSkipPhase(turn, phase);
+        }
+        final boolean mine = turn == null || turn.getId() == asking.getId();
+        return !(mine ? stops : theirStops).contains(phase);
+    }
+
+    /**
+     * La {@link NeoMatchUI} que hay detras de una interfaz: ella misma, o la de
+     * un asiento de hot seat ({@link HotSeatGui}). Para quien antes preguntaba
+     * {@code getGui() instanceof NeoMatchUI}.
+     */
+    public static NeoMatchUI of(final Object gui) {
+        if (gui instanceof NeoMatchUI ui) {
+            return ui;
+        }
+        return HotSeatGui.unwrap(gui) instanceof NeoMatchUI ui ? ui : null;
+    }
+
+    /** Lo que {@link HotSeatGui} le pide a esta interfaz. */
+    private final HotSeatGui.Host hotSeatHost = new HotSeatGui.Host() {
+        @Override
+        public void bringToFront(final PlayerView seat) {
+            NeoMatchUI.this.bringToFront(seat);
+        }
+
+        @Override
+        public boolean isUiSetToSkipPhaseFor(final PlayerView asking, final PlayerView turn,
+                                             final PhaseType phase) {
+            return NeoMatchUI.this.isUiSetToSkipPhaseFor(asking, turn, phase);
+        }
+    };
+
+    /**
+     * Lo que se ve de una carta: con varias personas, solo lo que puede ver el
+     * de delante (sin esto el morfo de B o la carta de arriba de su biblioteca
+     * se le ensenyaban a A, porque los dos son "locales").
+     */
+    @Override
+    public boolean mayView(final CardView c) {
+        if (libraryOpenAfterGame(c)) {
+            return true;
+        }
+        final PlayerView f = front;
+        // LA MANO DE TU ALIADO, a la vista (Discord, 24-10-2026, en red: "The
+        // ability to view your ally's hand"). Por equipos se juega asi en la
+        // mesa: el companyero te ensenya lo que lleva. El motor solo se la deja
+        // ver a su duenyo (CardView.canBeShownTo), pero la vista ya llega entera
+        // -tambien al invitado en red, que la recibe sin filtrar y la tapa la
+        // interfaz-, asi que es solo no taparla. Solo la mano, solo aliados de
+        // verdad (NeoTeams.isAlly pregunta al motor): en todos contra todos no
+        // cambia nada.
+        if (c != null && c.getZone() == forge.game.zone.ZoneType.Hand) {
+            final PlayerView me = f != null && hotSeat() ? live(f) : localPlayerView();
+            if (NeoTeams.isAlly(me, c.getController())) {
+                return true;
+            }
+        }
+        if (f == null || !hotSeat() || c == null) {
+            return super.mayView(c);
+        }
+        final IGameController gc = getGameController();
+        if (gc != null && gc.mayLookAtAllCards()) {
+            return true;
+        }
+        return c.canBeShownToAny(java.util.Collections.singletonList(live(f)));
+    }
+
+    /**
+     * <b>Tu biblioteca, boca arriba al acabar</b> (Discord, 30-10-2026: <i>"View
+     * Library after the game is over by going to View Battlefield and clicking
+     * your Library (Just to see what you'd draw next)"</i>). Con la partida
+     * terminada ya no es informacion oculta: «Ver la mesa» y clic en tu
+     * biblioteca, en orden, la de arriba primero. Solo la tuya, y no en red
+     * de invitado: ahi el motor no te manda sus cartas.
+     */
+    private boolean libraryOpenAfterGame(final CardView c) {
+        if (c == null) {
+            return false;
+        }
+        final GameView gv = getGameView();
+        if (gv == null || !gv.isGameOver() || isNetGuest()) {
+            return false;
+        }
+        final PlayerView me = localPlayerView();
+        if (me == null || !me.equals(c.getOwner())) {
+            return false;
+        }
+        if (c.getZone() == forge.game.zone.ZoneType.Library) {
+            return true;
+        }
+        // La que se enseña de antes de perder: esas cartas ya no estan en
+        // ninguna zona (ver libraryToShow).
+        return showsLibraryBeforeLoss(me) && libraryBeforeLoss instanceof java.util.Collection<?> col
+                && col.contains(c);
+    }
+
+    // ------------------------------------------------------------------
+    // TU BIBLIOTECA, AUNQUE PIERDAS (Discord, 07-11-2026: "Viewing post-game
+    // deck also applies if you lose"). A varios, quien pierde SE VA de la
+    // partida con todas sus cartas (regla 800.4a): al acabar, su biblioteca
+    // ya no existe y no hay nada que abrir.
+    //
+    // Sin coste: el motor crea una lista NUEVA cada vez que tu biblioteca
+    // cambia (PlayerView.updateZone -> CardView.getCollection), asi que basta
+    // con quedarse con la ultima que se vio mientras seguias vivo. Es guardar
+    // una referencia en cada refresco de la mesa, nada de copiar cartas.
+    // ------------------------------------------------------------------
+
+    private volatile Iterable<CardView> libraryBeforeLoss;
+
+    /** Lo llama la mesa en cada refresco de TU asiento. Una asignacion. */
+    void noteLibrary(final PlayerView p) {
+        if (p == null || p.getHasLost() || isNetGuest()) {
+            return;
+        }
+        final GameView gv = getGameView();
+        if (gv != null && gv.isGameOver()) {
+            return;
+        }
+        final Iterable<CardView> lib = p.getCards(forge.game.zone.ZoneType.Library);
+        if (lib != null) {
+            libraryBeforeLoss = lib;
+        }
+    }
+
+    /** Si de esta biblioteca se ensenya la de antes de perder. */
+    private boolean showsLibraryBeforeLoss(final PlayerView p) {
+        if (p == null || libraryBeforeLoss == null || p.getZoneSize(forge.game.zone.ZoneType.Library) > 0) {
+            return false;
+        }
+        final GameView gv = getGameView();
+        return gv != null && gv.isGameOver() && !isNetGuest() && p.equals(localPlayerView());
+    }
+
+    /** La biblioteca que se ensenya de ese jugador: la de ahora, o la de antes de perder. */
+    public Iterable<CardView> libraryToShow(final PlayerView p) {
+        return showsLibraryBeforeLoss(p) ? libraryBeforeLoss : p == null ? null
+                : p.getCards(forge.game.zone.ZoneType.Library);
+    }
+
+    /** Cuantas cartas tiene la biblioteca que se ensenya. */
+    public int librarySizeToShow(final PlayerView p) {
+        if (!showsLibraryBeforeLoss(p)) {
+            return p == null ? 0 : p.getZoneSize(forge.game.zone.ZoneType.Library);
+        }
+        int n = 0;
+        for (final CardView ignored : libraryBeforeLoss) {
+            n++;
+        }
+        return n;
+    }
+
+    @Override
+    public boolean mayFlip(final CardView cv) {
+        final boolean any = super.mayFlip(cv);
+        final PlayerView f = front;
+        if (!any || f == null || !hotSeat() || cv == null || !cv.isFaceDown()) {
+            return any;
+        }
+        return cv.canFaceDownBeShownToAny(java.util.Collections.singletonList(live(f)));
+    }
+
+    /** El mismo, para quien lo necesite desde fuera ({@code TableBinder}). */
+    public PlayerView localPlayerView() {
+        return localPlayer();
+    }
+
+    /**
+     * Se puede LANZAR esta carta desde donde esta (cementerio, exilio, mando,
+     * biblioteca o banda)?
+     *
+     * <p>Lo contesta el motor entero, sin una sola deduccion nuestra:
+     * {@code ZoneType.Flashback} es una zona de mentira que Forge calcula en
+     * {@code Player.getCardsActivatableInExternalZones} y publica en
+     * {@code PlayerView.getFlashback()}. Ahi caen la aventura exiliada
+     * ({@code isOnAdventure}), lo presagiado ({@code isForetold}), el
+     * flashback, la evasion, alterar, perturbar, empezar de nuevo... y todo lo
+     * que venga despues. Enumerar aqui esa lista seria firmar que se queda
+     * corta la proxima vez que Card-Forge anyada un mecanismo.
+     *
+     * <p>Sin esto, la carta se ve en el visor de la zona y <b>no hay forma de
+     * jugarla</b>: el motor no pide nada ni marca nada, simplemente espera un
+     * click sobre ella igual que sobre una de la mano
+     * ({@code InputPassPriority.onCardSelected} llama a
+     * {@code getAllPossibleAbilities}, que ya sabe de esas zonas).
+     */
+    public boolean isPlayableOutside(final CardView card) {
+        if (card == null || !interactive() || finished.get()) {
+            return false;
+        }
+        final PlayerView me = localPlayer();
+        final var flash = me == null ? null : me.getFlashback();
+        if (flash != null) {
+            for (final CardView cv : flash) {
+                // Por id: los CardView que llegan por la red son copias, y la
+                // identidad de objeto no vale (ver las trampas conocidas).
+                if (cv != null && cv.getId() == card.getId()) {
+                    return castableNow(card);
+                }
+            }
+        }
+        // Lo que esa lista se deja: lo planeado (ver plotted), el caos y
+        // armonizar.
+        return isPlottedCastable(card) || isMayhemCastable(card);
+    }
+
+    /**
+     * Si una carta de fuera se puede INTENTAR jugar aunque no brille: la tuya,
+     * boca arriba, en tu exilio o tu cementerio, con la partida en marcha.
+     * Decide el motor al clicar (ZoneViewer.letTry; Discord, 31-10-2026).
+     */
+    public boolean mayTryOutside(final CardView card) {
+        if (card == null || !interactive() || finished.get()) {
+            return false;
+        }
+        final forge.game.zone.ZoneType zone = card.getZone();
+        if (zone != forge.game.zone.ZoneType.Exile && zone != forge.game.zone.ZoneType.Graveyard) {
+            return false;
+        }
+        final PlayerView me = localPlayer();
+        // LO QUE EL MOTOR DICE QUE PUEDES JUGAR desde fuera, aunque sea del rival
+        // y este boca abajo: lo robado por Gonti o Black Cat (Discord,
+        // 11-11-2026: «al clicarla no pasaba nada»). La lista es la del motor,
+        // asi que no se deja intentar nada que no te haya dado permiso.
+        if (me != null && me.getFlashback() != null) {
+            for (final CardView cv : me.getFlashback()) {
+                if (cv != null && cv.getId() == card.getId()) {
+                    return true;
+                }
+            }
+        }
+        if (card.isFaceDown()) {
+            return false;
+        }
+        final boolean mine = me != null && card.getOwner() != null && card.getOwner().getId() == me.getId();
+        if (mine && !isPlayableOutside(card)) {
+            explainNotPlayable(card, me);
+        }
+        return mine;
+    }
+
+    /**
+     * Por que una carta tuya de fuera no brilla, al registro: para el dia que
+     * vuelva a pasar lo de "ya no puedo jugar nada del exilio" (Discord,
+     * 31-10-2026), que aqui no se ha reproducido.
+     */
+    private void explainNotPlayable(final CardView card, final PlayerView me) {
+        try {
+            boolean listed = false;
+            final var flash = me.getFlashback();
+            if (flash != null) {
+                for (final CardView cv : flash) {
+                    listed |= cv != null && cv.getId() == card.getId();
+                }
+            }
+            final IGameController gc = getGameController();
+            final Object input = gc instanceof forge.player.PlayerControllerHuman h
+                    ? h.getInputQueue().getInput() : null;
+            log("fuera, sin brillo: %s en %s | en la lista del motor: %s | el motor espera: %s",
+                    card.getName(), card.getZone(), listed,
+                    input == null ? "-" : input.getClass().getSimpleName());
+        } catch (final RuntimeException e) {
+            // Es solo el registro.
+        }
+    }
+
+    /**
+     * Si esta carta del cementerio se puede lanzar ya con <b>Caos</b> (Mayhem,
+     * de SPM): <i>"puedes lanzarla desde tu cementerio si la descartaste este
+     * turno"</i> — o con <b>Armonizar</b> (Harmonize, TDM) o "Beam me up", que
+     * el filtro del motor tambien se deja (30-09-2026, Nature's Rhythm: el
+     * visor decia "25 cartas se pueden lanzar desde aqui" y justo esa no).
+     * Las condiciones son {@link OutsideCasts#fromGraveyard}.
+     *
+     * <p>El mismo olvido que lo planeado: el motor sabe lanzarla
+     * ({@code GameActionUtil}, rama "Mayhem") pero el filtro de
+     * {@code PlayerView.getFlashback()} ({@code PlayerZone.OwnCardsActivationFilter})
+     * conoce flashback, retrace, jump-start, escape y disturb, y <b>no el
+     * caos</b>. La carta se veia en el cementerio y no habia forma de jugarla
+     * (itch.io, 28-09-2026: <i>"I don't see an option when looking at the
+     * graveyard. It is definitely the same turn it was discarded"</i>).
+     *
+     * <p>Que se descarto no lo publica ni el {@code CardView} ni ningun
+     * evento, asi que se pregunta a la carta del motor con las mismas tres
+     * condiciones que {@code GameActionUtil} ({@link OutsideCasts#mayhem},
+     * que es lo que usa tambien Android). Por eso solo vale en partida
+     * local: el invitado en red no tiene {@code Game} (igual que lo
+     * planeado). Es solo para marcarla y dejarla clicar: quien decide de
+     * verdad, al clicar, es el motor.
+     */
+    /**
+     * Si esta carta de la lista de {@code getFlashback()} se puede lanzar
+     * <b>ahora mismo</b>.
+     *
+     * <p>Esa lista dice "desde esta zona SE PUEDE lanzar", sin mirar cuando.
+     * Con Ninja Teen el cementerio entero salia marcado en cualquier fase,
+     * aunque el sneak solo vale en el paso de declarar bloqueadores (itch.io,
+     * 04-10-2026: <i>"I was not able to cast the creatures. The strange part is
+     * that the system is reflecting that I have casteable creatures in my
+     * graveyard"</i>, con la captura en la segunda fase principal). Pasa igual
+     * con un flashback de conjuro en el turno del rival.
+     *
+     * <p>Lo contesta lo resaltado del motor, que sale de lo MISMO que usa al
+     * clicar ({@code Card.getAllPossibleAbilities(jugador, true)}) pero
+     * calculado en su hilo, y solo cuenta con el motor esperando que pases
+     * prioridad: fuera de ahi no se puede lanzar nada de todas formas. En red
+     * el invitado no tiene {@code Game}: se queda lo de antes, la lista sola.
+     *
+     * <p>Y desde el 01-11-2026, <b>si llega el mana</b>: la fase sola dejaba
+     * el retrospectivo marcado sin mana para pagarlo (Discord). Clicarla sigue
+     * dejando intentarlo ({@link #mayTryOutside}).
+     */
+    private boolean castableNow(final CardView card) {
+        final GameView gv = getGameView();
+        final Game game = gv == null ? null : gv.getGame();
+        if (game == null) {
+            return true;
+        }
+        if (!(getGameController() instanceof forge.player.PlayerControllerHuman human)
+                || !(human.getInputQueue().getInput()
+                        instanceof forge.gamemodes.match.input.InputPassPriority)) {
+            recheckOutsideLater();
+            return false;
+        }
+        // ⚠️ SIN PREGUNTARLE AL MOTOR (Discord, 03-11-2026): esto corre en el
+        // hilo de interfaz, al repintar. Hasta la 1.0.43 se llamaba aqui a
+        // getAllPossibleAbilities, que acaba en checkStaticAbilities y reescribe
+        // el mapa de estaticas; si la partida seguia justo entonces (acabas de
+        // lanzar algo), los dos hilos se cruzaban y la partida moria con un
+        // ConcurrentModificationException en StaticEffects.clearStaticEffects.
+        // La respuesta ya la tiene el motor, calculada en SU hilo: lo resaltado
+        // (AvailableActions recorre esta misma zona con el mismo
+        // getAllPossibleAbilities, mira el momento y el mana) y lo que se paga
+        // girando o filtrando (overlookedIds, de SafeActions.Guarded).
+        try {
+            return getActionableStrength(card) > 0 || overlookedIds.contains(card.getId());
+        } catch (final RuntimeException e) {
+            // Ante la duda, lo de siempre: marcarla. Quien decide al clicar es
+            // el motor.
+            return true;
+        }
+    }
+
+    /**
+     * El hilo que esta preguntando al motor por su cuenta ({@link #castableNow}),
+     * o null. Lo que el motor avise DESDE ESE HILO mientras tanto lo ha
+     * provocado la pregunta, no la partida, y {@link #handleGameEvent} lo tira.
+     *
+     * <p>Preguntar no es gratis: para mirar una carta boca abajo del exilio
+     * (las de Gonti, las de Predators' Hour) el motor le da la vuelta y la
+     * vuelve a tapar ({@code Spell.getAlternateHost} → {@code forceTurnFaceUp}),
+     * y cada vuelta avisa ({@code GameEventCardStatsChanged}). El aviso
+     * repintaba la mesa, el repintado volvia a preguntar... unos 200 repintados
+     * por segundo mientras tuvieras la prioridad, y cada uno saca y vuelve a
+     * meter las cartas de la mesa: un clic cae siempre entre dos y se pierde.
+     * Discord, 14-10-2026: <i>"no puedo activar nada de la mesa, ni las
+     * basicas"</i> en cuanto habia una carta exiliada boca abajo, con el
+     * arrastre (que no es un clic) funcionando.
+     */
+    private volatile Thread probing;
+
+    /**
+     * UN REPASO MAS DEL BRILLO, por si la prioridad llega despues de pintar
+     * (Discord, 31-10-2026: <i>"after playing another card the lotus is actually
+     * shown correctly"</i>, una carta de Meria en el exilio que no brillaba).
+     * El repintado va agrupado y se hace luego, en el hilo de interfaz: si justo
+     * entonces el motor aun no esta en {@code InputPassPriority} (resolviendo los
+     * disparos de una tormenta de artefactos), {@link #castableNow} dice que no y
+     * nada vuelve a preguntar hasta la siguiente accion. Se mira otra vez a los
+     * 400 ms, y solo se repinta si ya tienes la prioridad: asi no hay bucle
+     * (repintar con la prioridad no vuelve a programar nada) y en el turno del
+     * rival el repaso se tira sin repintar.
+     */
+    private void recheckOutsideLater() {
+        if (recheckPending) {
+            return;
+        }
+        recheckPending = true;
+        java.util.concurrent.CompletableFuture.delayedExecutor(400, java.util.concurrent.TimeUnit.MILLISECONDS)
+                .execute(() -> {
+                    recheckPending = false;
+                    if (!finished.get() && getGameController() instanceof forge.player.PlayerControllerHuman h
+                            && h.getInputQueue().getInput()
+                                    instanceof forge.gamemodes.match.input.InputPassPriority) {
+                        pushToTable();
+                    }
+                });
+    }
+
+    private volatile boolean recheckPending;
+
+    boolean isMayhemCastable(final CardView card) {
+        final GameView gv = getGameView();
+        if (gv == null || card.getZone() != ZoneType.Graveyard
+                || !isMe(card.getOwner()) || isSelecting() || payingMana) {
+            return false;
+        }
+        final Game game = gv.getGame();
+        if (game == null) {
+            return false;
+        }
+        try {
+            final forge.game.player.Player owner = game.getPlayer(card.getOwner());
+            if (owner == null) {
+                return false;
+            }
+            forge.game.card.Card c = null;
+            for (final forge.game.card.Card g : owner.getCardsIn(ZoneType.Graveyard)) {
+                if (g.getId() == card.getId()) {
+                    c = g;
+                    break;
+                }
+            }
+            if (!OutsideCasts.fromGraveyard(c)) {
+                return false;
+            }
+            // "Timing rules still apply": un instantaneo (o con destello)
+            // cuando sea; lo demas, a velocidad de conjuro.
+            if (c.isInstant() || c.hasKeyword(forge.game.keyword.Keyword.FLASH)) {
+                return true;
+            }
+            final PhaseType phase = gv.getPhase();
+            return isMe(gv.getPlayerTurn()) && phase != null && phase.isMain()
+                    && (gv.getStack() == null || gv.getStack().isEmpty());
+        } catch (final RuntimeException e) {
+            // Se lee el motor desde el hilo de interfaz: si justo esta moviendo
+            // el cementerio, se contesta que no y el siguiente refresco lo arregla.
+            return false;
+        }
+    }
+
+    /**
+     * <b>Las cartas planeadas</b> (Plot, de OTJ): id de la carta → turno en
+     * que se planeo. Solo las del juego {@link #plottedGame}.
+     *
+     * <p>Existe por un olvido del motor. Lanzar una carta planeada lo sabe
+     * hacer ({@code GameActionUtil}: "Plotted", sin coste, a velocidad de
+     * conjuro, en un turno posterior), pero la lista de "se puede lanzar
+     * desde fuera de la mano" que publica — {@code PlayerView.getFlashback()},
+     * que sale de {@code PlayerZone.OwnCardsActivationFilter} — conoce el
+     * presagio y la aventura y <b>no lo planeado</b>. Como el visor del exilio
+     * solo deja clicar lo que esta en esa lista, la carta se veia y no habia
+     * forma de jugarla (itch.io, 27-09-2026: Sunbird's Invocation planeada con
+     * Make Your Own Luck). Regla de oro: no se toca el filtro, se completa
+     * desde aqui — y si lo arreglan rio arriba, esto deja de hacer falta solo.
+     *
+     * <p>El {@code CardView} no dice si una carta esta planeada, asi que se
+     * apunta al vuelo con {@code GameEventCardPlotted}. En red el invitado no
+     * recibe eventos: ahi sigue sin marcarse (ver las trampas conocidas).
+     */
+    private final Map<Integer, Integer> plotted = new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile int plottedGame = Integer.MIN_VALUE;
+
+    private void rememberPlotted(final GameEvent event) {
+        // Al SALIR del exilio deja de estar planeada: la carta nueva que hace
+        // el motor al cambiar de zona no hereda la marca, pero si el id. Sin
+        // esto, si mas tarde volvia a acabar exiliada salia lanzable para
+        // siempre y el click no hacia nada.
+        if (event instanceof GameEventCardChangeZone move && move.card() != null
+                && move.from() != null && move.from().zoneType() == ZoneType.Exile) {
+            plotted.remove(move.card().getId());
+            return;
+        }
+        if (!(event instanceof forge.game.event.GameEventCardPlotted ev) || ev.card() == null) {
+            return;
+        }
+        final GameView gv = getGameView();
+        if (gv == null) {
+            return;
+        }
+        if (gv.getId() != plottedGame) {
+            plotted.clear();
+            plottedGame = gv.getId();
+        }
+        plotted.put(ev.card().getId(), gv.getTurn());
+    }
+
+    /**
+     * Si esta carta planeada se puede lanzar ya, leyendo solo la vista.
+     *
+     * <p>Son las condiciones del motor ({@code GameActionUtil}, rama
+     * "Plotted") traducidas a lo que se ve: tuya, en el exilio, planeada en un
+     * turno ANTERIOR y a velocidad de conjuro (tu turno, fase principal, stack
+     * vacio). Es solo para marcarla y dejarla clicar: el click manda el
+     * {@code selectCard} de siempre y quien decide de verdad es el motor.
+     */
+    boolean isPlottedCastable(final CardView card) {
+        final GameView gv = getGameView();
+        if (gv == null || gv.getId() != plottedGame || plotted.isEmpty()
+                || card.getZone() != ZoneType.Exile || !isMe(card.getOwner())
+                || isSelecting() || payingMana) {
+            return false;
+        }
+        final Integer turn = plotted.get(card.getId());
+        final PhaseType phase = gv.getPhase();
+        return turn != null && gv.getTurn() > turn
+                && isMe(gv.getPlayerTurn())
+                && phase != null && phase.isMain()
+                && (gv.getStack() == null || gv.getStack().isEmpty());
+    }
+
+    /** Atajo: correr algo en el hilo de interfaz si lo hay. */
+    private void uiRunLater(final Runnable r) {
+        final UiDispatcher ui = uiDispatcher();
+        if (ui != null && table != null) {
+            ui.runLater(r);
+        }
+    }
+
+
+    /**
+     * La reserva de mana ha cambiado.
+     *
+     * <p>Es un aviso APARTE de los eventos de partida: sin escucharlo, los pips
+     * de mana de la barra solo se refrescaban de rebote, cuando pasaba
+     * cualquier otra cosa. Tapabas una tierra y no se veia el mana.
+     */
+    /** Traza la reserva con las DOS codificaciones. -Dneo.mana.debug=true */
+    private static final boolean MANA_DEBUG = Boolean.getBoolean("neo.mana.debug");
+
+    @Override
+    public void updateManaPool(final Iterable<PlayerView> players) {
+        if (MANA_DEBUG && players != null) {
+            for (final PlayerView p : players) {
+                System.out.printf(
+                        "[mana] %s  W=%d U=%d B=%d R=%d G=%d | incoloro: ManaAtom(32)=%d "
+                                + "MagicColor(0)=%d%n",
+                        PlayerName.of(p),
+                        p.getMana((byte) forge.card.mana.ManaAtom.WHITE),
+                        p.getMana((byte) forge.card.mana.ManaAtom.BLUE),
+                        p.getMana((byte) forge.card.mana.ManaAtom.BLACK),
+                        p.getMana((byte) forge.card.mana.ManaAtom.RED),
+                        p.getMana((byte) forge.card.mana.ManaAtom.GREEN),
+                        p.getMana((byte) forge.card.mana.ManaAtom.COLORLESS),
+                        p.getMana(forge.card.MagicColor.COLORLESS));
+            }
+        }
+        final int now = localPoolSize();
+        if (now > lastPoolSize) {
+            lastManaSource = lastClicked;
+        } else if (now == 0) {
+            lastManaSource = null;
+        }
+        lastPoolSize = now;
+        pushToTable();
+    }
+
+    /**
+     * Cartas reveladas, hasta {@link #hideRevealedCards}. Desde Forge #12503
+     * (30-10-2026) llega en CADA revelacion, y es por donde se apuntan al
+     * registro: {@link RevealLog} (Discord, 20-10-2026: "show the reveal card
+     * in the log"; antes iba por {@code updateRevealedCards}, que ya no existe).
+     *
+     * <p>En la mesa se ensenyan para la pregunta en curso (la mano de otro, que
+     * se contesta con el OK): ver {@code TableScreen.showRevealed}; sin esto, en
+     * red salia el OK de "has visto las cartas" sin ninguna carta. Si detras
+     * viene el dialogo de siempre ({@link #reveal}), las quita el: si no, la
+     * misma revelacion saldria dos veces.
+     */
+    @Override
+    public void showRevealedCards(final Iterable<CardView> cards) {
+        if (cards == null) {
+            return;
+        }
+        final List<CardView> list = new ArrayList<>();
+        for (final CardView c : cards) {
+            list.add(c);
+        }
+        final GameView gv = getGameView();
+        if (gv != null && !list.isEmpty()) {
+            RevealLog.note(gv.getGameLog(), list);
+        }
+        if (!interactive() || list.isEmpty()) {
+            return;
+        }
+        final PlayerView owner = list.get(0).getOwner();
+        trace("revelado sin dialogo: %d cartas de %s", list.size(), nameOf(owner));
+        uiRunLater(() -> table.showRevealed(owner, list));
+    }
+
+    /** El dialogo de "mira lo revelado": se lleva lo que {@link #showRevealedCards} puso en la mesa. */
+    @Override
+    public <T> void reveal(final String message, final List<T> items) {
+        hideRevealedCards();
+        super.reveal(message, items);
+    }
+
+    @Override
+    public void hideRevealedCards() {
+        if (interactive()) {
+            uiRunLater(() -> table.hideRevealed());
+        }
+    }
+
+    @Override
+    public void updateCurrentPlayer(final PlayerView player) {
+        trace("jugador actual: %s", nameOf(player));
+        // HOT SEAT: se gira la mesa hacia quien decide, pero no en el acto. El
+        // pase automatico contesta en milisegundos cuando no tienes nada que
+        // hacer, y girar en cada pase haria saltar la cortina sin parar. Si a
+        // los 300 ms sigue siendo el, es que de verdad le toca.
+        final PlayerView f = front;
+        if (player != null && hotSeat() && (f == null || f.getId() != player.getId())) {
+            final int ask = frontAsk.incrementAndGet();
+            uiRunLater(() -> {
+                final javafx.animation.PauseTransition wait =
+                        new javafx.animation.PauseTransition(javafx.util.Duration.millis(300));
+                wait.setOnFinished(e -> {
+                    final PlayerView now = getCurrentPlayer();
+                    final PlayerView before = front;
+                    if (ask == frontAsk.get() && now != null && now.getId() == player.getId()
+                            && (before == null || before.getId() != player.getId())) {
+                        switchFront(player);
+                    }
+                });
+                wait.play();
+            });
+        }
+        pushToTable();
+    }
+
+    /** Solo pruebas: cuantas partidas se han abierto en este proceso. */
+    private static final java.util.concurrent.atomic.AtomicInteger OPENED_VIEWS =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    public static int openedViewsForTest() {
+        return OPENED_VIEWS.get();
+    }
+
+    @Override
+    public void openView(final TrackableCollection<PlayerView> myPlayers) {
+        OPENED_VIEWS.incrementAndGet();
+        // Los ajustes que el motor necesita para que esta interfaz funcione,
+        // AQUI, que es por donde pasan TODAS las partidas.
+        //
+        // Antes se aplicaban en NeoGame.play y en NeoGame.playPuzzle, y el
+        // duelo de la aventura no pasa por ninguno de los dos: lo monta
+        // QuestUtil.finishStartingGame(). Consecuencia real, reportada jugando:
+        // en un duelo de la aventura, buscar una tierra en la biblioteca dejaba
+        // la partida clavada — con UI_SELECT_FROM_CARD_DISPLAYS en true (que es
+        // como viene) el motor espera que la GUI tenga la biblioteca PINTADA
+        // como un panel, y nuestra mesa no la pinta: ni se abria nada, ni se
+        // podia clicar nada, ni se activaba OK.
+        //
+        // openView lo llama el motor al empezar cada partida, en cualquier
+        // modo, asi que un camino nuevo no puede olvidarse de esto. Y las
+        // preferencias se leen en vivo (YieldController.getStringPref cae a
+        // FModel.getPreferences()), asi que llegar aqui no es tarde.
+        // Las estadisticas del final (GameStats, Discord 17-10-2026): tambien
+        // aqui, por lo mismo. Una repeticion no se cuenta.
+        if (ending != Ending.REPLAY && getGameView() != null) {
+            GameStats.attach(getGameView().getGame());
+            // Y tu mano en el registro cada turno, si lo pides (HandLog).
+            HandLog.attach(getGameView().getGame());
+        }
+        // "Le afecta" en la ampliacion y al pasar el raton (Discord,
+        // 23-10-2026): se lee de ESTA partida (null en el invitado en red).
+        forge.neo.card.AffectedBy.setGame(getGameView() == null ? null : getGameView().getGame());
+        // Los colores de Cryptic Spires, que el motor solo le pregunta a la IA
+        // (itch.io, 27-10-2026). Ver CircledColors.
+        if (ending != Ending.REPLAY && getGameView() != null) {
+            CircledColors.watch(getGameView().getGame());
+            // La IA atascada pensando (Discord, 11-11-2026, Teval): se apunta
+            // en que se queda y se avisa en la mesa. Ver AiStallWatch.
+            final forge.game.Game watched = getGameView().getGame();
+            final forge.neo.ui.TableScreen t = table;
+            AiStallWatch.watch(() -> AiStallWatch.gameLine(watched), report -> {
+                if (t != null) {
+                    uiRunLater(() -> t.showNotice(NeoText.get("match.aiStalled")));
+                }
+            });
+        }
+        // En una mesa de cuatro de Ascenso, si caes se acaba la partida: Forge
+        // la seguiria entre las IA. Ver AscentTableEnd. Y en las de la Quest
+        // (el Coliseo y el campeonato de Commander), donde caer ya es perder y
+        // mirar a las IA no da nada (Discord, 30-10-2026: "when I got 3rd place I
+        // don't want to sit there and watch the bots playing").
+        if ((ending == Ending.ASCENT || ending == Ending.QUEST) && getGameView() != null) {
+            forge.neo.ascent.AscentTableEnd.watch(getGameView().getGame());
+        }
+        if (mode == Mode.HUMAN) {
+            // Una repeticion no es una partida: ni preferencias del motor ni
+            // registro detallado (abrirlo rota detailed-game.log y se llevaba
+            // por delante el de la ultima partida de verdad, que es el que se
+            // manda cuando algo falla).
+            if (ending != Ending.REPLAY) {
+                NeoGame.applyEnginePrefs();
+                detail = DetailLog.start(getGameView());
+            }
+            rounds = new RoundCounter();
+            // "Has caido" se pregunta una vez POR PARTIDA (un al mejor de N reusa esto).
+            outOffered.set(false);
+            // Un nodo de Ascenso, con London siempre: con semillas, todos con las
+            // mismas reglas (FriendlyMulligan.ASCENT_RULE).
+            if (ending == Ending.ASCENT) {
+                forge.StaticData.instance().setMulliganRule(
+                        FriendlyMulligan.apply(FriendlyMulligan.ASCENT_RULE));
+                log("Ascent: mulligan %s (the setting says %s)", FriendlyMulligan.ASCENT_RULE,
+                        forge.neo.NeoSettings.get(forge.neo.NeoSettings.MULLIGAN_RULE,
+                                forge.neo.NeoSettings.MULLIGAN_RULE_DEFAULT));
+            }
+            // applyEnginePrefs acaba de encender los resaltados: la marca de
+            // setActionableScans tiene que decir lo mismo, o la proxima vez que
+            // haya que apagarlos se creera que ya estan apagados.
+            actionableScans.set(true);
+        }
+        // Con "Otra partida" el mismo NeoMatchUI conduce una partida nueva. Si
+        // no se limpiara la marca de terminada, los clicks se seguirian
+        // descartando y la segunda partida naceria muerta.
+        finished.set(false);
+        closeNotified.set(false);
+        // Una macro a medias de la partida anterior apago el pase en SU
+        // controlador; el de esta nace con el de siempre.
+        macroAutoPassSaved = null;
+        macroScopesSaved.clear();
+        // "Otra partida" reusa este NeoMatchUI: una pregunta pendiente de la
+        // anterior seria un dialogo fantasma sobre la mesa nueva.
+        uiRunLater(() -> table.forgetEngineDialogs());
+        gameOverShowing = false;
+        // Y el "he pedido salir" de la anterior (Discord, 14-11-2026: en red,
+        // el invitado solo veia el resultado de la PRIMERA partida). El
+        // invitado usa UN NeoMatchUI para toda la sesion (el cliente de Forge
+        // lo crea una vez); al dar "Volver" en la pantalla de fin quedaba
+        // exitAction = MENU, y en la partida siguiente finishGame lo tomaba
+        // por "ya se ha ido" y cerraba sin ensenyar nada. Al anfitrion no le
+        // pasa: NetHostedMatch le hace uno nuevo en cada partida.
+        exitAction = null;
+        // El reloj de la partida (Discord, 14-11-2026), desde cero en cada una.
+        // En una repeticion no: seria el tiempo que llevas mirandola.
+        final boolean clockOn = !isReplay() && forge.neo.NeoSettings.gameClock();
+        uiRunLater(() -> table.getPhaseRail().startClock(clockOn));
+        closeDeferred = false;
+        // El aviso de "el motor se ha muerto" es de un solo uso: si no se
+        // rearma aqui, la segunda partida se rompe en silencio.
+        forge.neo.platform.NeoGuiBase.clearEngineCrash();
+        // Las repeticiones de Forge cuelgan un forwarder de la cola del humano
+        // que no se puede vaciar desde el hilo de interfaz (ForwarderGuard).
+        if (myPlayers != null) {
+            for (final PlayerView pv : myPlayers) {
+                if (getGameController(pv) instanceof forge.player.PlayerControllerHuman human) {
+                    ForwarderGuard.guard(human.getInputQueue());
+                }
+            }
+        }
+        lastPhase = null;
+        lastTurn = -1;
+        log("Game opened. Local seats: %s",
+                myPlayers == null ? "(none, watching)" : myPlayers.toString());
+        final TableBinder b = binder;
+        if (b != null && myPlayers != null && !myPlayers.isEmpty()) {
+            // Nuestro asiento va abajo, como en cualquier juego de cartas.
+            b.setSelf(myPlayers.iterator().next());
+        }
+        // HOT SEAT: empieza delante el primero de los asientos (el tuyo).
+        front = null;
+        if (myPlayers != null && myPlayers.size() > 1 && mode == Mode.HUMAN) {
+            front = myPlayers.iterator().next();
+            log("Hot seat: %d people on this device", myPlayers.size());
+        }
+        // Quien somos, para que el click derecho no ensenye el morfo del
+        // rival. Ver el porque en forge.neo.ui.CardZoom.localViewers.
+        forge.neo.ui.CardZoom.setLocalViewers(front != null
+                ? java.util.Collections.singletonList(front) : getLocalPlayers());
+        // Si ampliar una carta va a parar la partida de verdad, la mesa lo
+        // dice al ampliarla. Aqui, que es por donde pasan TODAS las partidas
+        // (principio 8): en red no para nadie, y una maqueta no tiene motor.
+        if (table != null) {
+            table.setEnginePausable(!isNetGame());
+        }
+        pushToTable();
+
+        // Que una tierra de dos colores pregunte cual da, en vez de decidirlo
+        // ella. Va AQUI por lo mismo que los ajustes de arriba: el duelo de la
+        // aventura no pasa por NeoGame. Ver ManaColor.
+        if (myPlayers != null) {
+            for (final PlayerView seat : myPlayers) {
+                if (ManaColor.install(getGameController(seat))) {
+                    log("Dual lands: will ask for the color (%s)",
+                            PlayerName.of(seat));
+                }
+            }
+            // HOT SEAT: cada asiento con su propia interfaz, para que las
+            // preguntas por dialogo giren la mesa hacia quien las contesta.
+            // En el controlador SENTADO, que es por donde salen. Ver HotSeatGui.
+            if (front != null) {
+                for (final PlayerView seat : myPlayers) {
+                    if (getGameController(seat) instanceof forge.player.PlayerControllerHuman pch
+                            && pch.getPlayer() != null
+                            && pch.getPlayer().getController() instanceof forge.player.PlayerControllerHuman seated) {
+                        seated.setGui(HotSeatGui.wrap(this, hotSeatHost, seat));
+                    }
+                }
+            }
+        }
+        // Y los asientos de los INVITADOS, desde el anfitrion. Su controlador
+        // vive aqui (un PlayerControllerHuman con la interfaz remota), no en
+        // su ordenador: instalandolo solo para los asientos locales, al
+        // invitado su dual le elegia el color sola — justo el fallo que esto
+        // arregla. La pregunta viaja por el protocolo como cualquier otra.
+        if (isNetGame()) {
+            installForRemoteSeats();
+        }
+
+        // Y a partir de aqui, enterarnos de lo que pasa. Ver listenToTheEngine:
+        // en una partida local nadie nos cuenta nada si no lo pedimos.
+        listenToTheEngine();
+
+        // Discord, si el jugador lo quiere. AQUI por el principio 8: es el
+        // punto por el que pasan TODAS las partidas, asi que un modo nuevo —o
+        // el duelo de la aventura, que lo monta QuestUtil— aparece solo.
+        discordSeats = myPlayers == null ? 0 : myPlayers.size();
+        updateDiscord();
+
+        // ---- decirle al anfitrion como juego YO ----
+        //
+        // Solo tiene efecto en el invitado, y es facil de pasar por alto: el
+        // motor corre en el ANFITRION, asi que quien decide si a este jugador
+        // se le pasa turno solo o se le resaltan las cartas jugables es el
+        // YieldController que el anfitrion tiene de nosotros. Ese controlador
+        // lee sus propias preferencias... salvo que el cliente le mande las
+        // suyas, que es justo lo que hace esto (SYNCED_PREFS incluye
+        // YIELD_AUTO_PASS_NO_ACTIONS y UI_SHOW_ACTIONABLE_HIGHLIGHTS).
+        //
+        // Sin esta llamada funcionaba igual, pero POR CASUALIDAD: el anfitrion
+        // caia a sus propias preferencias, que son las que aplica
+        // applyEnginePrefs mas arriba. En cuanto el anfitrion fuera otra cosa,
+        // o el invitado cambiara sus ajustes, se acababa la casualidad. Y las
+        // paradas de fase del invitado no llegaban nunca.
+        //
+        // Las dos GUIs oficiales lo llaman en el mismo momento (CMatchUI y
+        // MatchController, al acabar de montar la partida). En el anfitrion es
+        // inofensivo: solo hace algo si hay NetGameController, que solo existe
+        // en el lado del cliente.
+        if (isNetGame() && getGameView() != null) {
+            try {
+                seedYieldStateOnHost();
+            } catch (final Exception e) {
+                // Que esto falle no puede llevarse la partida por delante:
+                // como mucho se juega con los ajustes del anfitrion.
+                System.out.println("[neo] no se han podido enviar mis ajustes al anfitrion: " + e);
+            }
+        }
+
+        // "Ya empieza: enseña la mesa."
+        //
+        // Va AQUI y no en quien monta la partida porque este es el punto por el
+        // que pasan todas (principio 8). En una partida en red hace ademas
+        // falta de verdad: el lobby no avisa — onGameStarted() esta vacio en
+        // las dos implementaciones de Forge — y en el invitado no hay ningun
+        // codigo nuestro arrancando nada, la partida simplemente LLEGA por el
+        // cable.
+        final Runnable opened = onOpened;
+        if (opened != null) {
+            opened.run();
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Oir al motor
+    // ---------------------------------------------------------------
+
+    /**
+     * Engancha esta interfaz al bus de eventos de la partida.
+     *
+     * <p><b>Sin esto, en una partida local {@code handleGameEvent} no se llama
+     * NUNCA.</b> Forge suscribe al bus su propio {@code FControlGameEventHandler}
+     * ({@code HostedMatch}, la rama del {@code else}), y ese llama a
+     * {@code updateCards}, {@code updateLives}, {@code handleLandPlayed}… pero
+     * jamas a {@code handleGameEvent}. La unica ruta que lo llamaba era la de
+     * RED. O sea que todo lo que cuelga de ahi — las animaciones por evento, el
+     * aviso de "esto te acaba de pasar", "pararse en el turno del rival" y el
+     * espia del tutorial — estaba muerto jugando en local, y sin dar un aviso:
+     * {@code run.cmd play -v} jugaba 21 turnos sin imprimir una sola linea
+     * {@code evento:}.
+     *
+     * <p>Va en {@code openView} por el principio 8: es el punto por el que
+     * pasan TODAS las partidas, las monte quien las monte — nosotros, el lobby
+     * de red o {@code QuestUtil} en un duelo de la aventura.
+     *
+     * <p>Y no hay doble entrega: al <b>invitado</b> de una partida en red los
+     * eventos ya le llegan por el cable ({@code handleGameEvents}), y ahi
+     * {@code GameView.getGame()} es {@code null} — el campo es {@code transient}
+     * y esa vista viaja serializada. La condicion no es un apanyo: es
+     * exactamente "¿tengo la partida delante o me la estan contando?".
+     */
+    private void installForRemoteSeats() {
+        final GameView gv = getGameView();
+        final Game game = gv == null ? null : gv.getGame();
+        if (game == null) {
+            return;
+        }
+        for (final forge.game.player.Player p : game.getPlayers()) {
+            if (p.getController() instanceof forge.player.PlayerControllerHuman pch
+                    && pch.getGui() instanceof forge.gamemodes.net.server.RemoteClientGuiGame
+                    && ManaColor.install(pch)) {
+                log("Dual lands: will ask for the color (%s, online)", p.getName());
+            }
+        }
+    }
+
+    private void listenToTheEngine() {
+        final GameView view = getGameView();
+        final Game game = view == null ? null : view.getGame();
+        // Null: invitado de red. Igual: segunda llamada a openView sobre la
+        // misma partida, y suscribirse dos veces al mismo bus duplica TODO.
+        if (game == null || game == subscribedTo) {
+            return;
+        }
+        subscribedTo = game;
+        game.subscribeToEvents(new EngineEars(this));
+        trace("enganchado al bus de la partida");
+    }
+
+    /** La partida a cuyo bus ya estamos enganchados. */
+    private volatile Game subscribedTo;
+
+    /**
+     * El oyente. Guava reparte por el tipo del parametro, asi que pedir
+     * {@code GameEvent} los trae todos — es lo mismo que hacen el
+     * {@code GameEventForwarder} y el {@code FControlGameEventHandler} de Forge.
+     *
+     * <p>Corre en el hilo del MOTOR y sin red debajo: Guava se traga las
+     * excepciones de un oyente, pero se las traga <b>en silencio</b>, y un
+     * evento perdido aqui es una animacion que no sale o un paso del tutorial
+     * que no se cierra. Mejor que se vea.
+     */
+    private static final class EngineEars {
+        private final NeoMatchUI ui;
+
+        EngineEars(final NeoMatchUI ui) {
+            this.ui = ui;
+        }
+
+        @com.google.common.eventbus.Subscribe
+        public void receive(final GameEvent event) {
+            try {
+                ui.handleGameEvent(event);
+            } catch (final RuntimeException e) {
+                System.out.println("[neo] fallo atendiendo un evento del motor: " + e);
+                e.printStackTrace();
+            }
+        }
+    }
+
+    /** Aviso de "la partida ya esta abierta". Lo usa la pantalla para enseñar la mesa. */
+    private volatile Runnable onOpened;
+
+    public void setOnOpened(final Runnable action) {
+        this.onOpened = action;
+    }
+
+    /** Aviso de "la partida se ha acabado del todo". Ver {@link #afterGameEnd()}. */
+    private volatile Runnable onClosed;
+
+    public void setOnClosed(final Runnable action) {
+        this.onClosed = action;
+    }
+
+    /**
+     * La partida se ha terminado y hay que quitar la mesa de en medio.
+     *
+     * <p><b>Este es el aviso que cierra la pantalla, y es el par de
+     * {@code openView}</b>: uno la abre y el otro la cierra. Las dos GUIs
+     * oficiales hacen exactamente eso aqui — la Swing cierra la pestanya de la
+     * partida y la de movil llama a {@code Forge.back(true)} — y nosotros no lo
+     * teniamos implementado.
+     *
+     * <p>En una partida local no se notaba, porque ahi el que cierra es
+     * {@code HostedMatch.setOnMatchOver}, que {@code NeoGame} si escucha. Pero
+     * <b>el invitado de una partida en red no tiene HostedMatch</b>: el motor
+     * corre en el ordenador del anfitrion. Su unico aviso viaja por el cable, y
+     * es este.
+     *
+     * <p>Sintoma real, reportado jugando: le das a Escape → Salir, la interfaz
+     * concede de verdad ({@code AbstractGuiGame.concede} manda el paquete y se
+     * aparta a proposito — "que el servidor lleve el final de partida"), el
+     * anfitrion termina la partida y vuelve a la sala... y el invitado se queda
+     * mirando una mesa muerta, sin forma de salir. En el registro se ve
+     * clavado: "Client sent concede" y cinco segundos despues
+     * "Received: afterGameEnd", que no escuchaba nadie.
+     *
+     * <p>Se avisa una sola vez: {@code finishGame} y esto pueden llegar los
+     * dos, y volver al menu dos veces se ve como un parpadeo.
+     */
+    @Override
+    public void afterGameEnd() {
+        super.afterGameEnd();
+        finished.set(true);
+        AiStallWatch.stop();
+        // La marca se pone SIEMPRE, aunque nadie escuche: es tambien lo que
+        // mira el vigilante de "salir" para saber si la partida se cerro de
+        // verdad.
+        final boolean first = closeNotified.compareAndSet(false, true);
+        if (Boolean.getBoolean("neo.trace.choices")) {
+            System.out.println("[red] afterGameEnd: primero=" + first + " pantalla final=" + gameOverShowing
+                    + " finishGame=" + finishGameCalled);
+        }
+        if (first && (ending == Ending.NET || ending == Ending.REPLAY) && gameOverShowing) {
+            // En red la partida la cierra el PRIMERO que contesta: si el
+            // anfitrion pulsa "volver a la sala" al momento, al invitado se le
+            // iba la pantalla de victoria o derrota antes de leerla. Se espera
+            // a su click. Y ese click ya NO se manda al anfitrion: la partida
+            // esta cerrada, y si el anfitrion hubiera empezado otra, un QUIT
+            // atrasado le llegaria a la nueva y la cerraria.
+            closeDeferred = true;
+            return;
+        }
+        final Runnable closed = onClosed;
+        if (closed != null && first) {
+            closed.run();
+        }
+    }
+
+    /** La pantalla de victoria/derrota esta puesta y sin contestar. */
+    private volatile boolean gameOverShowing;
+
+    /** Llego el cierre mientras se leia esa pantalla: se cierra al contestarla. */
+    private volatile boolean closeDeferred;
+
+    /** Para no avisar dos veces de que la partida se acabo. */
+    private final AtomicBoolean closeNotified = new AtomicBoolean(false);
+
+    /** Si ha llegado {@code finishGame}. Lo mira {@code LobbyGuest}: ver {@link #finishIfGuest}. */
+    private volatile boolean finishGameCalled;
+
+    public boolean finishGameCalled() {
+        return finishGameCalled;
+    }
+
+    @Override
+    public void finishGame() {
+        finishGameCalled = true;
+        finished.set(true);
+        final DetailLog detailLog = detail;
+        detail = null;
+        if (detailLog != null) {
+            detailLog.end(getGameView());
+        }
+        // Se acabo: lo que el motor estuviera esperando ya no lo espera nadie.
+        // Sin esto, el vigilante de la mesa podria reponer una pregunta muerta
+        // ENCIMA de la pantalla de victoria. Ver TableScreen.markEngineDialog.
+        uiRunLater(() -> table.forgetEngineDialogs());
+        final GameView gv = getGameView();
+        System.out.println();
+        if (gv != null && gv.isGameOver()) {
+            log("GAME OVER - winner: %s", gv.getWinningPlayerName());
+        } else {
+            log("GAME OVER");
+        }
+        // Quien es "tu" y si ha perdido, al lado de quien dice el motor que
+        // gana: "gane y me dijo HAS PERDIDO" al mejor de tres (Discord,
+        // 12-10 y 23-10-2026) no se podia mirar en ningun registro.
+        if (gv != null && hasLocalPlayers()) {
+            final StringBuilder seats = new StringBuilder();
+            for (final PlayerView p : getLocalPlayers()) {
+                final PlayerView now = live(p);
+                seats.append(' ').append(p.getId()).append('=').append(nameOf(now))
+                        .append(now.getHasLost() ? " (lost)" : "").append(now == p ? "" : " [live]");
+            }
+            log("local seats:%s | local won: %s (by the game: %s) | game %d", seats, localPlayerWon(),
+                    localWonFromGame(), gv.getNumPlayedGamesInMatch() + 1);
+        }
+        // -Dneo.over.library=true: al acabar, abre tu biblioteca (en
+        // cualquier modo, tambien el piloto automatico), que al
+        // acabar ya se ve boca arriba (libraryOpenAfterGame). Para capturarlo.
+        if (Boolean.getBoolean("neo.over.library")) {
+            final PlayerView me = localPlayerView();
+            final var library = me == null ? null : libraryToShow(me);
+            if (library != null) {
+                int n = 0;
+                for (final CardView cv : library) {
+                    if (n++ == 5) {
+                        break;
+                    }
+                    System.out.println("[over.library] " + n + ": " + cv.getName() + " | visible=" + mayView(cv));
+                }
+            }
+            javafx.application.Platform.runLater(() -> {
+                table.getOverlay().setPeeking(true);
+                table.showZone(me, forge.game.zone.ZoneType.Library);
+            });
+        }
+
+        // Al acabar la partida, Forge espera a que el jugador decida que hacer
+        // (revancha o salir). Mientras no conteste, el match NO se cierra y
+        // setOnMatchOver no dispara nunca.
+        // Si el jugador ha pedido salir o reiniciar desde el menu de pausa, no
+        // tiene sentido ensenyarle una pantalla de derrota: ya sabe lo que ha
+        // hecho. Se cierra el match y NeoApp decide a donde ir.
+        //
+        // Con UNA excepcion, y es la aventura: ahi salirse de un duelo no es
+        // "cerrar una ventana", es RENDIRSE. Cuenta como derrota — la anota el
+        // motor al conceder, igual que si te hubieran matado — y el marcador
+        // del cuartel general se mueve. Callarselo seria esconder la unica
+        // consecuencia que tiene el boton. Asi que se dice, con la misma
+        // pantalla de siempre, y de ahi al cuartel.
+        if (exitAction != null) {
+            if (ending == Ending.QUEST && exitAction == Exit.MENU && showGameOverScreen(false)) {
+                return;
+            }
+            respondLater(() -> getGameController().nextGameDecision(NextGameDecision.QUIT));
+            return;
+        }
+
+        if (showGameOverScreen(hotSeat() ? anyLocalPlayerWon() : localPlayerWon())) {
+            return;
+        }
+        // Aqui NUNCA hay un Bo3 de verdad esperando "siguiente partida": el
+        // unico camino que arranca uno (NeoApp.playDraftMatch) usa
+        // Mode.HUMAN con mesa, y eso ya se ha ido por showGameOverScreen de
+        // arriba. Esto es AUTO_PLAY/OBSERVE — comprobadores sin ventana, y
+        // el INVITADO de una partida en red (LobbyGuest, siempre AUTO_PLAY).
+        // Justo ese ultimo caso es por lo que NO se puede mirar aqui
+        // gv.isMatchOver(): en el invitado es una copia sincronizada por
+        // deltas, y el aviso de "partida terminada" puede llegarle antes que
+        // el delta con MatchOver=true — una carrera de red, no de partida.
+        // Seguir cerrando siempre en QUIT es lo unico seguro en los dos casos
+        // hasta que exista un AUTO_PLAY de Bo3 de verdad que lo necesite.
+        if (mode != Mode.OBSERVE) {
+            // Solo pruebas: la autoprueba de la Aventura juega un Bo3 ENTERO
+            // sin manos (-Dneo.adventure.auto), que es como se reproduce lo que
+            // pasa al acabar un evento. Fuera de esa bandera, QUIT como siempre.
+            final GameView now = getGameView();
+            // Y -Dneo.bo3.auto: lo mismo para bo3check (un Bo3 de Estandar o
+            // de Commander jugado entero sin ventana).
+            if ((Boolean.getBoolean("neo.adventure.auto") && ending == Ending.QUEST
+                    || Boolean.getBoolean("neo.bo3.auto"))
+                    && now != null && !now.isMatchOver()) {
+                respondLater(() -> getGameController().nextGameDecision(NextGameDecision.CONTINUE));
+                return;
+            }
+            respondLater(() -> getGameController().nextGameDecision(NextGameDecision.QUIT));
+        }
+    }
+
+    /**
+     * Ensenya la pantalla de victoria/derrota, si hay donde ensenyarla.
+     *
+     * <p>Y es ademas lo que cierra el match: hasta que no se conteste,
+     * {@code setOnMatchOver} no dispara.
+     *
+     * <p>En un Bo3 (la auditoría del motor, apartado C5) esto puede llamarse una vez por cada
+     * partida del partido, no solo al final: {@code GameView.isMatchOver()}
+     * dice si esta era la ultima. Si no lo era, la pantalla no ofrece "otra
+     * partida" ni "volver al menu" — esos botones mienten a mitad de un Bo3
+     * — sino "siguiente partida" (sigue el MISMO partido, el motor pide el
+     * banquillo el solo antes de empezarla) o "rendir el partido".
+     *
+     * @return si se ha ensenyado (si no, quien llama tiene que cerrar el match)
+     */
+    /** El cuadro de fin, como empate si lo es. Ver {@link GameOverScreen#asDraw}. */
+    private static GameOverScreen withDraw(final GameOverScreen screen, final boolean draw) {
+        return draw ? screen.asDraw() : screen;
+    }
+
+    private boolean showGameOverScreen(final boolean won) {
+        if (mode != Mode.HUMAN || table == null) {
+            return false;
+        }
+        final UiDispatcher ui = uiDispatcher();
+        if (ui == null) {
+            return false;
+        }
+        final GameView gv = getGameView();
+        // Por equipos gana un EQUIPO, no un jugador: se dice "Equipo 2", con la
+        // palabra de Forge (lblTeam) y el numero como en el desplegable.
+        final int winningTeam = NeoTeams.winningTeam(gv);
+        final String winner = gv == null ? null
+                : winningTeam >= 0
+                        ? forge.util.Localizer.getInstance().getMessage("lblTeam")
+                                + " " + (winningTeam + 1)
+                        : gv.getWinningPlayerName();
+        final int turns = gv == null ? 0 : gv.getTurn();
+        // EMPATE: la misma regla que Forge (ViewWinLose.composeTitle): sin
+        // ganador ni equipo ganador. Vale tambien en el invitado, que solo tiene
+        // la GameView.
+        final boolean draw = gv != null && winningTeam < 0
+                && (gv.getWinningPlayerName() == null || gv.getWinningPlayerName().isBlank());
+        // En red siempre es la ultima: NetHostedMatch juega partidas sueltas.
+        // Y en el invitado isMatchOver() es una copia por deltas que puede
+        // llegar DESPUES del final (ver finishGame): fiarse de ella ofreceria
+        // "siguiente partida" en una partida que ya no tiene siguiente.
+        final boolean matchOver = ending == Ending.NET || ending == Ending.REPLAY
+                || gv == null || gv.isMatchOver();
+        final int totalGames = gv == null ? 0 : gv.getNumGamesInMatch();
+        // NumPlayedGamesInMatch se congela al construir esta GameView (antes
+        // de que ESTA partida empezara), asi que +1 es la que se acaba de
+        // jugar — nunca la que viene.
+        final int gameNumber = gv == null ? 0 : gv.getNumPlayedGamesInMatch() + 1;
+        gameOverShowing = true;
+        final boolean hotSeatOver = hotSeat();
+        // UN RESPIRO ANTES DEL CUADRO (Discord, metior, 28-10-2026: *"lingering on
+        // the life total for a second or 2 before fading in the 'You win' like in
+        // MTG Arena"*): el ultimo golpe y la vida a 0 se ven, y el cuadro entra
+        // fundido. Sin camara lenta ni temblor: las animaciones de la mesa son
+        // cortas y explican algo. -Dneo.gameOver.breathMs=0 lo quita (capturas).
+        ui.runLater(() -> later(GAME_OVER_BREATH_MS, () -> showFaded(lookButtons(gv, withDraw(new GameOverScreen(
+                won, winner, turns, ending, matchOver, gameNumber, totalGames, hotSeatOver,
+                decision -> {
+                    table.getOverlay().hide();
+                    gameOverShowing = false;
+                    // Que se pulso, en el registro: "gane y me lo dio por
+                    // perdido" (Discord, 12-10-2026, un evento de la Aventura
+                    // al mejor de tres) no se podia distinguir de un "rendir
+                    // el partido" pulsado sin querer.
+                    log("End of game %d of %d (%s): the player chooses %s", gameNumber, totalGames,
+                            won ? "won" : "lost", decision);
+                    if (closeDeferred) {
+                        // El anfitrion ya cerro la partida mientras leiamos
+                        // esto: no se contesta nada (ver afterGameEnd) y se
+                        // vuelve a la sala ahora, que es cuando se ha pedido.
+                        closeDeferred = false;
+                        final Runnable closed = onClosed;
+                        if (closed != null) {
+                            closed.run();
+                        }
+                        return;
+                    }
+                    if (decision == NextGameDecision.CONTINUE) {
+                        // Sigue el MISMO partido: NO se toca exitAction (eso
+                        // es solo para "salir de verdad"), y el motor llama a
+                        // sideboard() el solo antes de la proxima partida.
+                        respondLater(() ->
+                                getGameController().nextGameDecision(NextGameDecision.CONTINUE));
+                        return;
+                    }
+                    // Una partida nueva se monta desde cero (NeoApp) en
+                    // vez de con NextGameDecision.NEW: asi no se
+                    // reaprovecha nada de la anterior y no hay estado
+                    // viejo que se cuele en la siguiente.
+                    exitAction = decision == NextGameDecision.NEW
+                            ? Exit.RESTART : Exit.MENU;
+                    respondLater(() ->
+                            getGameController().nextGameDecision(NextGameDecision.QUIT));
+                }), draw)))));
+        return true;
+    }
+
+    /** Lo que se queda la mesa a la vista antes del cuadro de fin de partida. */
+    private static final long GAME_OVER_BREATH_MS = Long.getLong("neo.gameOver.breathMs", 1500L);
+
+    /** Ejecuta eso dentro de {@code ms} en el hilo de JavaFX (ya en el); 0 = ahora. */
+    private static void later(final long ms, final Runnable what) {
+        if (ms <= 0) {
+            what.run();
+            return;
+        }
+        final javafx.animation.PauseTransition wait =
+                new javafx.animation.PauseTransition(javafx.util.Duration.millis(ms));
+        wait.setOnFinished(e -> what.run());
+        wait.play();
+    }
+
+    /** El cuadro del final, entrando fundido (250 ms). */
+    private void showFaded(final GameOverScreen screen) {
+        table.getOverlay().show(screen);
+        screen.setOpacity(0);
+        final javafx.animation.FadeTransition fade =
+                new javafx.animation.FadeTransition(javafx.util.Duration.millis(250), screen);
+        fade.setToValue(1);
+        fade.play();
+    }
+
+    /**
+     * "Registro" y "Ver la mesa" en el cuadro del final (Discord, 10-10-2026:
+     * ganar sin saber que te habia dado la victoria). Ver
+     * {@link GameOverScreen#addLookButtons}.
+     */
+    private GameOverScreen lookButtons(final GameView gv, final GameOverScreen screen) {
+        // Al mejor de 3, el marcador del partido (null en una partida suelta).
+        screen.withScore(BestOf.score(gv));
+        // Y por que ha acabado: el dano de comandante, el veneno o una carta
+        // no dejan rastro en el registro (EndReason).
+        screen.withReason(gv == null ? null : EndReason.text(gv.getGame()));
+        screen.addLookButtons(
+                gv == null || gv.getGameLog() == null ? null
+                        : () -> table.showGameLog(gv.getGameLog(), localPlayer(), LogCardLinks.lookupIn(gv)),
+                () -> table.getOverlay().setPeeking(true));
+        // "Estadisticas", al lado del registro (GameStats).
+        final GameStats stats = gv == null ? null : GameStats.of(gv.getGame());
+        final Runnable openStats = stats == null ? null : () -> {
+            final forge.neo.ui.Overlay menu = table.getMenuOverlay();
+            menu.setOnBackgroundClick(menu::hide);
+            menu.show(new forge.neo.ui.GameStatsView(stats.summary(localPlayer()), menu::hide));
+        };
+        screen.addStatsButton(openStats);
+        // -Dneo.stats.open=true: se abren solas al acabar (para capturarlas),
+        // y las frases salen tambien por la consola.
+        if (openStats != null && Boolean.getBoolean("neo.stats.open")) {
+            stats.summary(localPlayer()).forEach(l -> System.out.println("[stats] " + l));
+            openStats.run();
+        }
+        return screen;
+    }
+
+    /**
+     * Si ha ganado el jugador de esta interfaz.
+     *
+     * <p>Se mira por jugador y no por el nombre del ganador: en una partida a
+     * cuatro puede ganar un tercero, y comparar nombres se rompe en cuanto dos
+     * asientos se llaman igual.
+     */
+    /** Hot seat: si ha ganado alguna de las personas (y no una IA). */
+    /**
+     * Si un asiento de esta pantalla ha ganado, segun la partida misma; null si
+     * no se puede saber (invitado en red: la partida no esta aqui).
+     */
+    private Boolean localWonFromGame() {
+        final GameView gv = getGameView();
+        final forge.game.Game game = gv == null ? null : gv.getGame();
+        if (game == null) {
+            return null;
+        }
+        boolean any = false;
+        for (final forge.game.player.Player p : game.getRegisteredPlayers()) {
+            if (p.getController() instanceof forge.player.PlayerControllerHuman h && h.getGui() == this) {
+                any = true;
+                if (!p.hasLost()) {
+                    return Boolean.TRUE;
+                }
+            }
+        }
+        return any ? Boolean.FALSE : null;
+    }
+
+    private boolean anyLocalPlayerWon() {
+        final GameView gv = getGameView();
+        final String winner = gv == null ? null : gv.getWinningPlayerName();
+        if (winner == null) {
+            return false;
+        }
+        for (final PlayerView p : getLocalPlayers()) {
+            if (winner.equals(live(p).getName())) {
+                return true;
+            }
+        }
+        return localPlayerWon();
+    }
+
+    private boolean localPlayerWon() {
+        // Con la partida en esta maquina, se le pregunta a ELLA: los asientos
+        // cuyo controlador humano pinta en esta pantalla, y si alguno sigue en
+        // pie. Al mejor de tres de la Aventura salia "HAS PERDIDO" habiendo
+        // ganado (Discord, 12-10 y 23-10-2026: "Grace wins" debajo de "YOU
+        // LOST"), y lo de abajo depende de la lista de asientos de la GUI.
+        // Por equipos sigue mandando lo de abajo (gana tu aliado).
+        final Boolean fromGame = localWonFromGame();
+        if (fromGame != null && (fromGame || NeoTeams.winningTeam(getGameView()) < 0)) {
+            return fromGame;
+        }
+        if (!hasLocalPlayers()) {
+            return false;
+        }
+        // El INVITADO en red no tiene la partida (fromGame null), y el "ha
+        // perdido" de su asiento le llega por deltas, a veces DESPUES del final:
+        // perdia y le salia "HAS GANADO" con "gana Ana" debajo. El nombre del
+        // ganador si llega a tiempo (es lo que pinta esa misma pantalla), asi
+        // que se le pregunta a el. Por equipos sigue mandando lo de abajo.
+        final GameView over = getGameView();
+        final String winnerName = over == null ? null : over.getWinningPlayerName();
+        if (fromGame == null && winnerName != null && NeoTeams.winningTeam(over) < 0) {
+            for (final PlayerView p : getLocalPlayers()) {
+                if (winnerName.equals(live(p).getName())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        for (final PlayerView p : getLocalPlayers()) {
+            if (!live(p).getHasLost()) {
+                return true;
+            }
+        }
+        // Por equipos se gana en equipo: si te han matado pero tu aliado
+        // sigue en pie cuando se acaba, la partida la ha ganado tu lado
+        // (GameEndReason.AllOpposingTeamsLost). En todos contra todos nadie
+        // es aliado de nadie y esto no cambia nada.
+        final GameView gv = getGameView();
+        if (NeoTeams.winningTeam(gv) >= 0) {
+            for (final PlayerView p : getLocalPlayers()) {
+                for (final PlayerView other : gv.getPlayers()) {
+                    if (NeoTeams.isAlly(live(p), other) && !other.getHasLost()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Los botones de una repeticion: Pausa / Seguir y Velocidad, tal cual.
+     *
+     * <p>Nada de lo que vigila el OK de una partida (el aviso de dejar tu fase
+     * principal, el de no bloquear, el de fin de turno, el OK en rafaga) tiene
+     * sentido aqui, y alguno estorbaba: la fase que se ve es la GRABADA, y
+     * pulsar Pausa en tu fase principal preguntaba si querias ir al combate.
+     */
+    private void replayButtons(final String okLabel, final String cancelLabel,
+                               final boolean okEnabled, final boolean cancelEnabled) {
+        final UiDispatcher ui = uiDispatcher();
+        if (ui == null) {
+            return;
+        }
+        final boolean showCancel = cancelLabel != null && !cancelLabel.isBlank();
+        ui.runLater(() -> {
+            table.getActionBar().setAwaitingHighlight(false);
+            table.getActionBar().setButtons(ReplayText.label(okLabel),
+                    showCancel ? ReplayText.label(cancelLabel) : " ", okEnabled, cancelEnabled && showCancel);
+            table.getActionBar().setPlayerChoices(null);
+            table.getActionBar().setResolveAll(null, null, null);
+            table.getMacroRecordButton().setVisible(false);
+            table.getActionBar().setOnOk(() -> respondLater(() -> getGameController().selectButtonOk()));
+            table.getActionBar().setOnCancel(() -> respondLater(() -> getGameController().selectButtonCancel()));
+        });
+    }
+
+    @Override
+    public void showPromptMessage(final PlayerView playerView, final String message, final CardView card) {
+        trace("prompt[%s]: %s", nameOf(playerView), message);
+        if (isReplay()) {
+            // Lo unico que llega es lo que pone ReplayPlayer ("Replaying Speed
+            // 2x."), en ingles: se traduce y no se busca nada mas en el.
+            final TableBinder rb = binder;
+            if (rb != null) {
+                rb.setPrompt(ReplayText.prompt(message));
+            }
+            return;
+        }
+        cancelStaleAwaitIfGuest();
+        // El aviso con "null" dentro que suelta el motor al cerrar el ataque.
+        // Se tira: ver isStaleAttackPrompt.
+        if (isStaleAttackPrompt(message)) {
+            trace("prompt descartado (el 'null' de declarar atacantes)");
+            return;
+        }
+        lastPrompt = message == null ? "" : message;
+        lastPreparedPrompt = null;
+        final DetailLog detailLog = detail;
+        if (detailLog != null) {
+            detailLog.sync(getGameView());
+            detailLog.prompt(playerView, message, card);
+        }
+        tapToPayStep = TapToPayStep.parse(message);
+        // CR 903.9a: el comandante que se ha ido al cementerio o al exilio. El
+        // motor lo pregunta como un si/no cualquiera y asi se pasa de largo.
+        // Ver offerCommanderZone: es una decision que NO se puede deshacer.
+        if (interactive() && offerCommanderZone(message)) {
+            final TableBinder cb = binder;
+            if (cb != null) {
+                cb.setPrompt(NeoText.get("commander.leftGame"));
+            }
+            return;
+        }
+        // CR 903.9b: el que va a tu mano o a tu biblioteca. Ver offerCommanderReturn.
+        if (interactive() && offerCommanderReturn(message)) {
+            return;
+        }
+        // Adivinar y vigilar de UNA carta. Tambien llegan como un si/no
+        // cualquiera y tambien hay que sacarlas fuera. Ver offerTopOrBottom.
+        if (interactive() && offerTopOrBottom(message, card)) {
+            return;
+        }
+        final TableBinder b = binder;
+        if (b != null) {
+            // El volcado rutinario de prioridad se cambia por uno en castellano
+            // que EMPIEZA por lo que se pregunta el jugador. El del motor
+            // ("Priority: Wak'dern / Turn: 9 (Wak'dern) / Phase: Main phase,
+            // precombat / Stack: Empty") tiene la respuesta escondida entre
+            // cuatro renglones en ingles, y era la unica forma de saber de quien
+            // era el turno.
+            // Y lo ultimo: traducir lo que el motor escribio en ingles a la
+            // fuerza (el "Select target creature you control" del TgtPrompt$ de
+            // la carta). Va AQUI, al final, y no antes: todo lo de arriba
+            // RECONOCE el mensaje del motor - el aviso roto de ataque, la
+            // pregunta del comandante, el prompt rutinario -, y reconocer sobre
+            // un texto que ya hemos reescrito seria reconocer lo nuestro. Ver
+            // EngineText, que no es EnginePhrase.
+            // Girar para pagar (waterbend, convocar, improvisar): el texto del
+            // motor no dice que OK lleva al pago con mana. Ver tapToPayPrompt.
+            // Y el "Chooser:" de "un rival elige una pila" con varios rivales:
+            // el motor espera que elijas a CUAL y no lo dice. Ver PlayerPick.
+            // Los botones solo salen si el motor es el de esta maquina: el
+            // invitado de una partida en red no los tiene, y prometerselos
+            // seria un texto que habla de un control que no existe.
+            final String asked = PlayerPick.explainChooser(message, NeoText.get(
+                    getGameController() instanceof forge.player.PlayerControllerHuman
+                            ? "pick.chooser" : "pick.chooser.portrait"));
+            final String tapToPay = tapToPayPrompt(tapToPayStep);
+            final String prepared = forge.neo.EngineText.prompt(
+                    isRoutinePriorityPrompt(message) ? routinePrompt() : frontLoadInstruction(asked))
+                    + proliferateHint(message) + sleightHint(message);
+            lastPreparedPrompt = isRoutinePriorityPrompt(message) ? null : prepared;
+            final String shown = tapToPay != null ? tapToPay : prepared + pickedSuffix();
+            if (!shown.equals(message)) {
+                trace("prompt reordenado: %s", shown.replace(System.lineSeparator(), " | "));
+            }
+            b.setPrompt(shown);
+        }
+        refreshCentralPrompt();
+    }
+
+    /**
+     * Sleight of Hand, la mejora del bazar de la Quest: la carta de mas llega
+     * DESPUES de devolver las del mulligan, y sin esto parecia no funcionar.
+     * Ver {@link forge.neo.quest.QuestSleight}.
+     */
+    private String sleightHint(final String message) {
+        final String note = forge.neo.quest.QuestSleight.note(message, getGameView());
+        return note == null ? "" : System.lineSeparator() + note;
+    }
+
+    /**
+     * Proliferar (Discord, 08-10-2026, Atraxa: <i>"I can't select the opponents
+     * permanents"</i>). El motor solo ofrece lo que YA tiene contadores — de
+     * cualquiera, rivales incluidos — y no lo dice; y su segundo boton ("Mine",
+     * luego "All", luego "Clear all") no se explica solo. Una linea debajo de
+     * la pregunta. Se reconoce por el texto del motor, en el idioma que sea.
+     */
+    private static String proliferateHint(final String message) {
+        return isProliferatePrompt(message) ? System.lineSeparator() + NeoText.get("prolif.hint") : "";
+    }
+
+    /**
+     * Si es la pregunta de proliferar. Tambien la usa Android (decision 273).
+     * Con {@code contains} y no {@code startsWith}: con la descripcion
+     * detallada encendida el motor pone DELANTE la carta y su habilidad, y la
+     * pregunta va detras (la que la sube al principio es frontLoadInstruction).
+     */
+    public static boolean isProliferatePrompt(final String message) {
+        if (message == null) {
+            return false;
+        }
+        final String asked = forge.util.Localizer.getInstance().getMessage("lblChooseProliferateTarget");
+        return asked != null && !asked.isEmpty() && message.contains(asked);
+    }
+
+    /**
+     * "Te toca" y por donde va el turno, en dos renglones.
+     *
+     * <p>Se compone del {@code GameView}, que ya tiene todo: de quien es el
+     * turno, en que fase va y que hay en la pila. La fase se traduce con la
+     * misma tabla que el rail ({@code PhaseRail.nameOf}), para que las dos
+     * digan siempre lo mismo.
+     */
+    private String routinePrompt() {
+        final forge.game.GameView gv = getGameView();
+        if (gv == null) {
+            return "";
+        }
+        final PlayerView active = gv.getPlayerTurn();
+        final boolean mine = active != null && isMe(active);
+
+        final StringBuilder sb = new StringBuilder();
+        sb.append(mine ? NeoText.get("turn.yours")
+                : NeoText.get("prompt.plays", nameOf(active)));
+        sb.append(System.lineSeparator());
+        sb.append(forge.neo.ui.TurnBanner.turnText(gv.getTurn(), shownRound(gv)));
+        final String phase = forge.neo.ui.PhaseRail.nameOf(gv.getPhase());
+        if (!phase.isEmpty()) {
+            sb.append("  ·  ").append(phase);
+        }
+        final int onStack = gv.getStack() == null ? 0 : gv.getStack().size();
+        if (onStack > 0) {
+            sb.append(System.lineSeparator())
+              .append(NeoText.get("prompt.onStack", onStack));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * La marca de la pregunta de CR 903.9a, tal y como la escribe
+     * {@code GameAction.stateBasedAction_Commander}.
+     *
+     * <p>En el motor es una cadena literal sin traducir, asi que reconocerla es
+     * estable. Y si algun dia cambiara, lo unico que pasaria es que la pregunta
+     * volveria a salir como el si/no generico de la barra: no se rompe nada.
+     */
+    private static final String COMMANDER_ZONE_MARK = ": If a commander is in a graveyard or in exile";
+
+    /**
+     * "Tu comandante ha muerto (o lo han exiliado): a donde va?"
+     *
+     * <p>Regla 903.9a: cuando un comandante va a parar al cementerio o al
+     * exilio, su duenyo <b>puede</b> ponerlo en la zona de mando. El motor la
+     * tiene implementada y nos la pregunta — pero llega como un si/no mas, con
+     * el texto de reglas en ingles metido en el prompt de la barra lateral y los
+     * botones puestos en "Yes"/"No". Jugando eso es invisible: se pasa de largo
+     * y el comandante se queda donde esta.
+     *
+     * <p>Y es una decision que <b>no se puede deshacer</b>: el motor pone
+     * {@code setMoveToCommandZone(false)} ANTES de preguntar, o sea que solo
+     * pregunta una vez. Contestar que no por descuido deja el comandante fuera
+     * de la partida para siempre. Es el principio 6 de las notas de diseño: lo que no
+     * tiene vuelta atras hay que evitar que pase, no remediarlo despues.
+     *
+     * <p>Por eso se saca a un dialogo con la carta delante y las dos respuestas
+     * escritas en cristiano, impuesto de comandante incluido (+2 genericos por
+     * cada vez que ya se haya lanzado desde la zona de mando).
+     *
+     * @return true si nos hemos hecho cargo de la pregunta
+     */
+    private boolean offerCommanderZone(final String message) {
+        if (message == null || table == null) {
+            return false;
+        }
+        final int at = message.indexOf(COMMANDER_ZONE_MARK);
+        if (at < 0) {
+            return false;
+        }
+        final String name = message.substring(0, at).trim();
+        final CardView commander = findCommanderAway(name);
+        trace("comandante fuera de la partida: %s -> %s", name,
+                commander == null ? "(NO ENCONTRADO)"
+                        : commander.getName() + " en " + commander.getZone());
+        final ZoneType zone = commander == null ? null : commander.getZone();
+        final String where = NeoText.get(zone == ZoneType.Graveyard
+                ? "commander.inGraveyard" : "commander.inExile");
+
+        final UiDispatcher ui = uiDispatcher();
+        if (ui == null) {
+            return false;
+        }
+        final AtomicBoolean answered = new AtomicBoolean();
+        ui.runLater(() -> {
+            final CardPromptDialog dialog = new CardPromptDialog(
+                    commander,
+                    name.isEmpty() ? NeoText.get("commander.yours") : name,
+                    NeoText.get("commander.ask", where),
+                    List.of(NeoText.get("commander.toZone"),
+                            NeoText.get("commander.leaveIt", where)),
+                    0,
+                    table.zoomCardWidth() * 0.62,
+                    index -> {
+                        // Contestar dos veces liberaria dos veces al motor.
+                        if (!answered.compareAndSet(false, true)) {
+                            return;
+                        }
+                        table.getOverlay().hide();
+                        final boolean toCommand = index != null && index == 0;
+                        respondLater(() -> {
+                            if (toCommand) {
+                                getGameController().selectButtonOk();
+                            } else {
+                                getGameController().selectButtonCancel();
+                            }
+                        });
+                    });
+            // El cartel del stack no puede quedarse por encima de una pregunta.
+            table.getPromptBanner().hide();
+            table.getOverlay().show(dialog);
+            table.requestLayout();
+        });
+        return true;
+    }
+
+    /**
+     * La marca de la pregunta de CR 903.9b, la descripcion del reemplazo que
+     * monta {@code Player.createCommanderEffect}. Literal y sin traducir, como
+     * la de arriba; la frase de alrededor ("Apply replacement effect of...")
+     * si va en el idioma del motor, y por eso no se mira.
+     */
+    private static final String COMMANDER_RETURN_MARK = "would be put into its owner's hand or library";
+
+    /** Ya hay un dialogo de 903.9b puesto: el motor repite el aviso mientras espera. */
+    private final AtomicBoolean commanderReturnUp = new AtomicBoolean();
+
+    /**
+     * "Tu comandante va a ir a tu mano (o a tu biblioteca): o a la zona de mando?"
+     *
+     * <p>Regla 903.9b, la hermana de {@link #offerCommanderZone}: si un
+     * comandante va a ir a la mano o a la biblioteca de su duenyo, puede ir a
+     * la zona de mando en su lugar. El motor lo pregunta con el si/no generico
+     * de un reemplazo — <i>"Apply replacement effect of ... to ...?"</i> — en
+     * los mismos botones de pasar, y SI es la zona de mando. Reportado en
+     * Discord el 24-10-2026: un Sink into Stupor del rival sobre su comandante,
+     * y el comandante acabo en la zona de mando en vez de en la mano. Lo casi
+     * seguro es un OK por inercia (principio 6b), y no tiene vuelta atras.
+     *
+     * <p>No sabemos si iba a la mano o a la biblioteca (el motor no lo dice en
+     * la pregunta), asi que el texto nombra las dos. El boton marcado es la
+     * zona de mando, que es lo que contestaba el SI de antes: el piloto de las
+     * pruebas sigue diciendo lo mismo.
+     *
+     * @return true si nos hemos hecho cargo de la pregunta
+     */
+    private boolean offerCommanderReturn(final String message) {
+        if (message == null || table == null || !message.contains(COMMANDER_RETURN_MARK)) {
+            return false;
+        }
+        if (!commanderReturnUp.compareAndSet(false, true)) {
+            return true;
+        }
+        final CardView commander = commanderNamedIn(message);
+        final UiDispatcher ui = uiDispatcher();
+        if (ui == null) {
+            commanderReturnUp.set(false);
+            return false;
+        }
+        final TableBinder b = binder;
+        if (b != null) {
+            b.setPrompt(NeoText.get("commander.returnPrompt"));
+        }
+        final AtomicBoolean answered = new AtomicBoolean();
+        ui.runLater(() -> {
+            final CardPromptDialog dialog = new CardPromptDialog(
+                    commander,
+                    commander == null ? NeoText.get("commander.yours") : null,
+                    NeoText.get("commander.returnAsk"),
+                    List.of(NeoText.get("commander.toZone"), NeoText.get("commander.letItGo")),
+                    0,
+                    table.zoomCardWidth() * 0.62,
+                    index -> {
+                        if (!answered.compareAndSet(false, true)) {
+                            return;
+                        }
+                        table.getOverlay().hide();
+                        commanderReturnUp.set(false);
+                        final boolean toCommand = index != null && index == 0;
+                        respondLater(() -> {
+                            if (toCommand) {
+                                getGameController().selectButtonOk();
+                            } else {
+                                getGameController().selectButtonCancel();
+                            }
+                        });
+                    });
+            table.getPromptBanner().hide();
+            table.getOverlay().show(dialog);
+            table.requestLayout();
+        });
+        return true;
+    }
+
+    /**
+     * El comandante cuyo nombre sale en la pregunta ({@code Card.toString} es
+     * "Nombre (id)", en ingles). Si no se encuentra, el primero que no este en
+     * la zona de mando; y si tampoco, ninguno: el dialogo sale sin carta.
+     */
+    private CardView commanderNamedIn(final String message) {
+        final GameView gv = getGameView();
+        if (gv == null || gv.getPlayers() == null) {
+            return null;
+        }
+        CardView away = null;
+        for (final PlayerView p : gv.getPlayers()) {
+            if (p.getCommanders() == null) {
+                continue;
+            }
+            for (final CardView c : p.getCommanders()) {
+                if (c.getName() != null && !c.getName().isEmpty() && message.contains(c.getName())) {
+                    return c;
+                }
+                if (away == null && isMe(p) && c.getZone() != ZoneType.Command) {
+                    away = c;
+                }
+            }
+        }
+        return away;
+    }
+
+    /** El ultimo mensaje que mando el motor, tal cual. */
+    private volatile String lastPrompt = "";
+    /** {@link #lastPrompt} tal y como se ensenyo (sin el "llevas N de M"); null en la de prioridad. */
+    private volatile String lastPreparedPrompt;
+
+    // ------------------------------------------------------------------
+    // Girar para pagar: waterbend, convocar, improvisar. Ver TapToPayStep,
+    // que es lo que se comparte con Android.
+    // ------------------------------------------------------------------
+
+    /**
+     * El paso de girar mientras dura, o null fuera de el. Lo pone
+     * {@link #showPromptMessage}, que el motor llama justo antes de
+     * {@link #updateButtons}.
+     */
+    private volatile TapToPayStep.Step tapToPayStep;
+
+    /** La tierra que se clico en ese paso: se gira en cuanto llegue el pago. */
+    private volatile CardView pendingManaClick;
+
+    /**
+     * El texto nuestro para ese paso, o null si el mensaje no es el suyo: que
+     * se gira, cuanto paga cada uno, y que OK (o una tierra) lleva al pago con
+     * mana. Lo de delante (la carta y su habilidad) se queda debajo, como
+     * contexto.
+     */
+    private static String tapToPayPrompt(final TapToPayStep.Step step) {
+        if (step == null) {
+            return null;
+        }
+        // La mecanica y luego "o pulsa Pagar con mana (o clica una tierra)":
+        // Android usa las mismas claves, con su "toca" (taptopay.restTouch).
+        final StringBuilder sb = new StringBuilder(NeoText.get("taptopay." + step.kind))
+                .append(' ').append(NeoText.get("taptopay.rest", step.left));
+        if (!step.head.isEmpty()) {
+            sb.append(System.lineSeparator()).append(forge.neo.EngineText.prompt(step.head));
+        }
+        return sb.toString();
+    }
+
+    /** En ese paso, y con algo por pagar todavia. */
+    private boolean tapToPayPending() {
+        final TapToPayStep.Step step = tapToPayStep;
+        return step != null && step.somethingLeft() && TapToPayStep.isActive(getGameController());
+    }
+
+    /**
+     * Clicar una tierra en el paso de girar = "lo pago con mana, empezando por
+     * esta". Es lo que intenta cualquiera, y antes no hacia nada.
+     *
+     * @return si el click se ha quedado aqui
+     */
+    private boolean landPaysTheRest(final CardView card) {
+        if (!TapToPayStep.isLandThatPays(card, isMe(card.getController())) || !tapToPayPending()) {
+            return false;
+        }
+        clickTrace(card, "pagar el resto con mana");
+        pendingManaClick = card;
+        respondLater(() -> getGameController().selectButtonOk());
+        return true;
+    }
+
+    /** Ya hemos avisado en esta eleccion. */
+    private final AtomicBoolean noPickWarned = new AtomicBoolean();
+
+    /**
+     * "Le he dado a OK y no ha pasado nada."
+     *
+     * <p>Hay hechizos cuyos objetivos son <b>opcionales de verdad</b>:
+     * <i>Will of the Abzan</i> dice "cualquier cantidad de oponentes objetivo"
+     * y su script lleva {@code TargetMin$ 0}. El motor, entonces, deja OK
+     * encendido desde el primer momento — cero objetivos es una respuesta
+     * legal — y si le das sin haber clicado a nadie, el hechizo se resuelve
+     * <b>sin objetivos</b>: nadie sacrifica, nadie pierde vidas, y la carta se
+     * va al cementerio. Reportado jugando tal cual: <i>"la he lanzado con mi
+     * comandante en mesa y no ha pasado nada"</i>.
+     *
+     * <p>No es un fallo del motor: es que nada avisaba de que estaba esperando
+     * clicks. Y es el principio 6 de las notas de diseño — <b>lo que no se puede deshacer
+     * hay que evitar que pase</b>, no remediarlo despues: un hechizo resuelto
+     * es un hechizo gastado.
+     *
+     * <p>Como se sabe que hay una eleccion en curso y que esta vacia, sin
+     * inventarse nada:
+     * <ul>
+     *   <li><b>Que hay eleccion:</b> {@code getSelectionMax() > 0}. Lo pone
+     *       {@code InputSelectTargets} en su constructor, y lo limpia
+     *       {@code clearSelectables()} al parar. Ojo: {@code isSelecting()} NO
+     *       vale, porque mira si hay <i>cartas</i> elegibles y aqui lo que se
+     *       elige son <b>jugadores</b>.</li>
+     *   <li><b>Que es opcional:</b> {@code getSelectionMin() == 0}. Si fuera
+     *       obligatoria, el motor tendria OK apagado y no se llegaria aqui.</li>
+     *   <li><b>Que no has elegido nada:</b> ni carta ni jugador marcado
+     *       ({@link #pickedSoFar()}: proliferar elige jugadores sin pasar por
+     *       "Targeted:") y el prompt del motor sin su
+     *       renglon {@code "Targeted:"}, que {@code InputSelectTargets} anyade
+     *       <b>solo</b> cuando ya hay algo apuntado — jugadores incluidos. Es
+     *       texto fijo sin traducir, asi que la comprobacion vale en cualquier
+     *       idioma.</li>
+     * </ul>
+     *
+     * @return true si nos hemos quedado la pulsacion para preguntar
+     */
+    private boolean warnNothingPicked() {
+        if (getSelectionMax() <= 0 || getSelectionMin() != 0) {
+            return false;
+        }
+        if (pickedSoFar() > 0 || lastPrompt.contains(TARGETED_MARK)) {
+            return false;
+        }
+        if (table == null || !noPickWarned.compareAndSet(false, true)) {
+            return false;
+        }
+        final AtomicBoolean answered = new AtomicBoolean();
+        table.getOverlay().show(new ConfirmDialog(
+                NeoText.get("pick.noneTitle"),
+                NeoText.get("pick.noneAsk"),
+                List.of(NeoText.get("pick.noneBack"), NeoText.get("pick.noneAnyway")),
+                0,
+                index -> {
+                    if (!answered.compareAndSet(false, true)) {
+                        return;
+                    }
+                    table.getOverlay().hide();
+                    if (index != null && index == 1) {
+                        respondLater(() -> getGameController().selectButtonOk());
+                    }
+                }));
+        table.requestLayout();
+        return true;
+    }
+
+    /**
+     * "Le he dado a OK y me he plantado en el combate sin querer."
+     *
+     * <p>Una fase principal con disparos se contesta a base de OK, uno por
+     * disparo, y cuando se acaban <b>el boton no cambia</b>: el siguiente OK
+     * — el que ya ibas a dar por inercia — pasa la prioridad con el stack
+     * vacio, o sea que deja tu fase principal y te planta en el combate
+     * declarando atacantes. No hay vuelta atras: el motor solo deshace lo que
+     * pasa por el stack, y un cambio de fase no pasa por ahi. Es el principio
+     * 6 de las notas de diseño — lo que no se puede deshacer hay que evitar que pase.
+     *
+     * <p>Se pregunta <b>solo</b> cuando ese OK significa de verdad "salgo de mi
+     * fase principal", y eso se comprueba con lo que dice el motor, sin deducir
+     * nada:
+     *
+     * <ul>
+     *   <li><b>Que es tu fase principal:</b> {@code getPhase()} es MAIN1 o
+     *       MAIN2 y el turno es tuyo. En el turno del rival pasar prioridad no
+     *       te cuesta ninguna fase.</li>
+     *   <li><b>Que la fase puede acabarse ahora:</b> el stack esta vacio. Con
+     *       algo encima, pasar prioridad lo unico que hace es resolverlo — que
+     *       es justo el OK de los disparos, el que NO hay que interrumpir.</li>
+     *   <li><b>Que este OK es el de pasar prioridad</b> y no la respuesta a una
+     *       pregunta: el prompt es el rutinario que compone
+     *       {@code InputPassPriority.showNormalPrompt}
+     *       ({@link #isRoutinePriorityPrompt}), no hay una eleccion en curso y
+     *       no hay un pago de mana. Sin esto se preguntaria "quieres pasar al
+     *       combate?" encima de un "quieres sacrificar?", que cae en tu propia
+     *       fase principal y con el stack vacio.</li>
+     * </ul>
+     *
+     * <p>El dialogo va <b>en medio y en grande a proposito</b>: la inercia va
+     * dirigida al boton de la columna de la derecha, y una pregunta que
+     * apareciera ahi mismo se contestaria con el mismo click que la provoco.
+     * Por lo mismo, la respuesta marcada es la segura ("me quedo").
+     *
+     * @return true si nos hemos quedado la pulsacion para preguntar
+     */
+    /**
+     * Cuantas veces ha preguntado el motor ({@code updateButtons}), y en cual
+     * de ellas mandamos el ultimo OK.
+     *
+     * <p><b>Un OK por pregunta.</b> Reportado en Discord el 23-09-2026: en un
+     * bucle casi infinito, con la tecla de OK MANTENIDA, salio el aviso de
+     * "dejar tu fase principal" en mitad del bucle. Lo explico bien quien lo
+     * reporto: la interfaz aceptaba el OK antes de que el motor volviera a
+     * preguntar. Cada OK hace que el motor resuelva lo de arriba del stack en
+     * SU hilo, y mientras tanto el boton sigue encendido con el mensaje de la
+     * pregunta anterior. La repeticion de la tecla caia justo en el hueco
+     * entre "se resolvio" y "se puso el disparo siguiente": stack vacio,
+     * fase principal, mensaje de prioridad normal — y el aviso, que se fia de
+     * esas tres cosas, preguntaba sin que el motor hubiera preguntado nada.
+     *
+     * <p>Mandar mas OK en ese hueco tampoco sirve de nada: no hay ninguna
+     * pregunta abierta que contestar. Asi que se ignoran hasta que el motor
+     * vuelve a llamar a {@code updateButtons} — que SOLO lo llama una pregunta
+     * nueva al aparecer; parar la anterior no la llama
+     * ({@code InputSyncronizedBase.stop}). Mantener la tecla sigue resolviendo
+     * el bucle entero, un OK por disparo, al ritmo del motor.
+     *
+     * <p>Con valvula (principio 7): si en {@link #OK_WAIT_MS} el motor no ha
+     * vuelto a preguntar, el OK vuelve a valer. Mejor un aviso de mas que un
+     * boton muerto.
+     */
+    private final AtomicInteger askGen = new AtomicInteger();
+    private volatile int okSentAtGen = -1;
+    private volatile long okSentAt;
+    private static final long OK_WAIT_MS = 3000;
+
+    /** true si este OK llega antes de que el motor haya vuelto a preguntar. */
+    private boolean okAwaitingEngine() {
+        return okSentAtGen == askGen.get()
+                && System.currentTimeMillis() - okSentAt < OK_WAIT_MS;
+    }
+
+    /** Si el boton izquierdo es el "Fin de turno" del motor (y no "Deshacer"). */
+    private static boolean isEndTurnLabel(final String label) {
+        return label != null && label.equals(forge.util.Localizer.getInstance().getMessage("lblEndTurn"));
+    }
+
+    /**
+     * "¿Terminar tu turno?" al pulsar Fin de turno en TU turno, diciendo a quien
+     * le toca despues (Discord, 15-10-2026: <i>"a confirmation ... that
+     * indicates who the turn will pass to, in case you accidentally click it on
+     * your turn without realizing"</i>).
+     *
+     * <p>Es el principio 6b otra vez: saltarse lo que queda de tu turno no se
+     * deshace. Va con el MISMO ajuste que {@link #confirmLeavingMain} y con su
+     * misma regla: antes de la segunda fase principal (te saltas el combate)
+     * pregunta con "al ir al combate"; en la segunda, solo con "en las dos".
+     * Fuera de tu turno no pregunta: ahi "Fin de turno" es lo normal.
+     *
+     * @param go lo que hace "Terminar el turno"
+     * @return true si se ha preguntado (y el que llama no hace nada mas)
+     */
+    private boolean confirmEndingTurn(final Runnable go) {
+        if (table == null || !interactive() || finished.get()) {
+            return false;
+        }
+        final int mode = forge.neo.NeoSettings.confirmPhaseMode();
+        final GameView gv = getGameView();
+        if (mode <= 0 || gv == null || !isMe(gv.getPlayerTurn())) {
+            return false;
+        }
+        final PhaseType phase = gv.getPhase();
+        if (phase == null || !phase.isBefore(PhaseType.END_OF_TURN)
+                || (phase == PhaseType.MAIN2 && mode < 2)) {
+            return false;
+        }
+        if (payingMana || isSelecting() || getSelectionMax() > 0 || topOfStack() != null) {
+            return false;
+        }
+        final String prompt = lastPrompt;
+        if (prompt == null || prompt.isBlank() || !isRoutinePriorityPrompt(prompt)
+                || table.getOverlay().isShowing()) {
+            return false;
+        }
+        // A quien le toca: getNextTurn sabe de turnos extra. Sin partida en
+        // esta maquina (invitado en red) no se sabe, y se dice sin nombre.
+        String next = null;
+        boolean mine = false;
+        try {
+            final forge.game.Game game = gv.getGame();
+            final forge.game.player.Player p = game == null ? null : game.getPhaseHandler().getNextTurn();
+            if (p != null) {
+                mine = isMe(p.getView());
+                next = p.getName();
+            }
+        } catch (final RuntimeException e) {
+            next = null;
+        }
+        final String detail = mine ? NeoText.get("phase.ask.endTurnDetailYou")
+                : next == null ? NeoText.get("phase.ask.endTurnDetailNoName")
+                : NeoText.get("phase.ask.endTurnDetail", next);
+        final AtomicBoolean answered = new AtomicBoolean();
+        final ConfirmDialog dialog = new ConfirmDialog(
+                NeoText.get("phase.ask.endTurnTitle"), detail,
+                List.of(NeoText.get("phase.ask.stay"), NeoText.get("phase.ask.endGo")),
+                0,
+                index -> {
+                    if (!answered.compareAndSet(false, true)) {
+                        return;
+                    }
+                    table.getOverlay().hide();
+                    if (index != null && index == 1) {
+                        go.run();
+                    }
+                });
+        dialog.getStyleClass().add("phase-ask");
+        // El piloto de pruebas pulsa el primer .btn-primary: ver confirmLeavingMain.
+        if (dialog.option(1) != null) {
+            dialog.option(1).getStyleClass().add("phase-ask-go");
+        }
+        table.getOverlay().show(dialog);
+        table.requestLayout();
+        return true;
+    }
+
+    private boolean confirmLeavingMain() {
+        if (table == null || !interactive() || finished.get()) {
+            return false;
+        }
+        final int mode = forge.neo.NeoSettings.confirmPhaseMode();
+        if (mode <= 0) {
+            return false;
+        }
+        final GameView gv = getGameView();
+        if (gv == null) {
+            return false;
+        }
+        final PhaseType phase = gv.getPhase();
+        final boolean toCombat = phase == PhaseType.MAIN1;
+        if (!toCombat && (phase != PhaseType.MAIN2 || mode < 2)) {
+            return false;
+        }
+        if (!isMe(gv.getPlayerTurn())) {
+            return false;
+        }
+        if (payingMana || isSelecting() || getSelectionMax() > 0 || topOfStack() != null) {
+            return false;
+        }
+        // Si ya has jugado algo en esta fase principal, pasar es a proposito:
+        // la pregunta es para no saltartela entera sin querer (Discord,
+        // 28-10-2026: "only ask if you played no cards in main1").
+        if (getGameController() instanceof forge.player.PlayerControllerHuman human
+                && MainPhaseActivity.playedSomething(human.getPlayer())) {
+            return false;
+        }
+        final String prompt = lastPrompt;
+        if (prompt == null || prompt.isBlank() || !isRoutinePriorityPrompt(prompt)) {
+            return false;
+        }
+        // Si ya hay un dialogo delante, esta pulsacion no puede venir del
+        // jugador (la capa se traga los clicks y la barra espaciadora se
+        // desactiva con ella). Se mira la capa en vez de guardar una marca
+        // nuestra: una marca que se quedara puesta apagaria la pregunta para el
+        // resto de la partida, y en silencio.
+        if (table.getOverlay().isShowing()) {
+            return false;
+        }
+        final AtomicBoolean answered = new AtomicBoolean();
+        final ConfirmDialog dialog = new ConfirmDialog(
+                NeoText.get(toCombat ? "phase.ask.combatTitle" : "phase.ask.endTitle"),
+                NeoText.get(toCombat ? "phase.ask.combatDetail" : "phase.ask.endDetail"),
+                List.of(NeoText.get("phase.ask.stay"),
+                        NeoText.get(toCombat ? "phase.ask.combatGo" : "phase.ask.endGo")),
+                0,
+                index -> {
+                    if (!answered.compareAndSet(false, true)) {
+                        return;
+                    }
+                    table.getOverlay().hide();
+                    if (index != null && index == 1) {
+                        respondLater(() -> getGameController().selectButtonOk());
+                    }
+                });
+        dialog.getStyleClass().add("phase-ask");
+        // Para el piloto de pruebas: cual de los dos botones es el de seguir.
+        // El piloto pulsa el primer .btn-primary que ve, y aqui el marcado es
+        // "me quedo" — se quedaria dando OK y diciendo que no para siempre, sin
+        // llegar nunca al combate. Marcando el otro contesta el que toca, y los
+        // comprobadores pasan por esta pregunta de verdad en vez de esquivarla.
+        // No vale cambiar cual esta marcado: para un humano la marcada tiene
+        // que ser la segura.
+        if (dialog.option(1) != null) {
+            dialog.option(1).getStyleClass().add("phase-ask-go");
+        }
+        table.getOverlay().show(dialog);
+        table.requestLayout();
+        return true;
+    }
+
+    /**
+     * "No has puesto a nadie a bloquear: ¿seguro?" (Discord, 03-10-2026).
+     *
+     * <p>El gemelo de {@link #confirmLeavingMain} para los bloqueos, con el
+     * ajuste apagado de fabrica. Cuando preguntar lo decide
+     * {@link BlockGuard} (lo comparte Android); aqui solo el dialogo, en medio
+     * y con la respuesta segura marcada, por lo mismo que alli: la inercia va
+     * al boton de la derecha.
+     *
+     * @return true si nos hemos quedado la pulsacion para preguntar
+     */
+    private boolean confirmNoBlockers() {
+        if (table == null || !interactive() || finished.get()) {
+            return false;
+        }
+        if (table.getOverlay().isShowing() || !BlockGuard.shouldAsk(getGameController())) {
+            return false;
+        }
+        final AtomicBoolean answered = new AtomicBoolean();
+        final ConfirmDialog dialog = new ConfirmDialog(
+                NeoText.get("block.ask.title"),
+                NeoText.get("block.ask.detail"),
+                List.of(NeoText.get("block.ask.stay"), NeoText.get("block.ask.go")),
+                0,
+                index -> {
+                    if (!answered.compareAndSet(false, true)) {
+                        return;
+                    }
+                    table.getOverlay().hide();
+                    if (index != null && index == 1) {
+                        respondLater(() -> getGameController().selectButtonOk());
+                    }
+                });
+        dialog.getStyleClass().add("phase-ask");
+        if (dialog.option(1) != null) {
+            dialog.option(1).getStyleClass().add("phase-ask-go");
+        }
+        table.getOverlay().show(dialog);
+        table.requestLayout();
+        return true;
+    }
+
+    /**
+     * "No has declarado ningun atacante: ¿seguro?" (Discord, 04-11-2026): el
+     * gemelo de {@link #confirmNoBlockers} al atacar. Cuando preguntar lo
+     * decide {@link AttackGuard} (lo comparte Android).
+     *
+     * @return true si nos hemos quedado la pulsacion para preguntar
+     */
+    private boolean confirmNoAttackers() {
+        if (table == null || !interactive() || finished.get()) {
+            return false;
+        }
+        if (table.getOverlay().isShowing() || !AttackGuard.shouldAsk(getGameController())) {
+            return false;
+        }
+        final AtomicBoolean answered = new AtomicBoolean();
+        final ConfirmDialog dialog = new ConfirmDialog(
+                NeoText.get("attack.ask.title"),
+                NeoText.get("attack.ask.detail"),
+                List.of(NeoText.get("attack.ask.stay"), NeoText.get("attack.ask.go")),
+                0,
+                index -> {
+                    if (!answered.compareAndSet(false, true)) {
+                        return;
+                    }
+                    table.getOverlay().hide();
+                    if (index != null && index == 1) {
+                        respondLater(() -> getGameController().selectButtonOk());
+                    }
+                });
+        dialog.getStyleClass().add("phase-ask");
+        if (dialog.option(1) != null) {
+            dialog.option(1).getStyleClass().add("phase-ask-go");
+        }
+        table.getOverlay().show(dialog);
+        table.requestLayout();
+        return true;
+    }
+
+    /** Lo que anyade {@code InputSelectTargets} en cuanto hay algo apuntado. */
+    private static final String TARGETED_MARK = "Targeted:";
+
+    /**
+     * "Adivinas 1 (o vigilas 1): la dejas arriba o se va?"
+     *
+     * <p>Es la misma trampa que la del comandante, y por eso se resuelve
+     * igual. El motor <b>no levanta ningun dialogo</b> para esto: cuando hay
+     * una sola carta que mirar, {@code arrangeForScry} y
+     * {@code arrangeForSurveil} preguntan con un {@code InputConfirm} normal y
+     * corriente — texto de reglas en el prompt de la barra lateral y los dos
+     * botones renombrados a "Superior"/"Fondo" o "Biblioteca"/"Cementerio".
+     *
+     * <p>Jugando eso es invisible: se reporto como <i>"juego una tierra que
+     * adivina 1, el disparo va al stack, le doy a OK y no pasa nada, no se me
+     * ensenya la carta ni nada"</i>. Y tiene toda la razon en lo de la carta —
+     * con adivinar 1 no se mueve <b>nada</b> en pantalla, asi que la unica
+     * forma de saber que ha ocurrido algo es ver la carta de la que va.
+     *
+     * <p>El motor si nos la pasa ({@code setCard} justo antes, y de nuevo en
+     * este mismo aviso), asi que se saca a un dialogo con la carta grande y las
+     * dos respuestas escritas en cristiano. Es la misma pieza que usan los
+     * disparos, {@link CardPromptDialog}.
+     *
+     * <p>La deteccion va por el <b>mensaje que compone el propio motor</b>,
+     * reconocido con {@link forge.neo.EnginePhrase}: se comparan los trozos
+     * literales de la plantilla <b>en los diez idiomas</b> que trae Forge, no
+     * la frase reconstruida con nuestro {@code Localizer}. En una partida en
+     * red eso es imprescindible — la frase la escribe el ANFITRION, en SU
+     * idioma — y de paso el nombre de la carta, que cada lado traduce por su
+     * cuenta, cae en el hueco {@code {0}} y deja de importar. Si algun dia
+     * cambiara la clave, lo unico que pasaria es que la pregunta volveria a
+     * salir como el si/no generico de la barra: no se rompe nada.
+     *
+     * @return true si nos hemos hecho cargo de la pregunta
+     */
+    private boolean offerTopOrBottom(final String message, final CardView card) {
+        if (message == null || card == null || table == null) {
+            return false;
+        }
+        final boolean scry =
+                forge.neo.EnginePhrase.contains(message, "lblPutCardOnTopOrBottomLibrary");
+        final boolean surveil = !scry
+                && forge.neo.EnginePhrase.contains(message, "lblPutCardsOnTheTopLibraryOrGraveyard");
+        if (!scry && !surveil) {
+            return false;
+        }
+        // El motor repite el aviso mientras el input sigue vivo. Contestar dos
+        // veces liberaria dos veces al motor, y volver a montar el dialogo
+        // encima del que ya esta puesto pierde la respuesta a medio dar.
+        if (!topOrBottomUp.compareAndSet(false, true)) {
+            return true;
+        }
+        final String ask = NeoText.get(scry ? "scry.ask" : "surveil.ask");
+        final TableBinder b = binder;
+        if (b != null) {
+            b.setPrompt(ask);
+        }
+
+        final UiDispatcher ui = uiDispatcher();
+        if (ui == null) {
+            topOrBottomUp.set(false);
+            return false;
+        }
+        final AtomicBoolean answered = new AtomicBoolean();
+        ui.runLater(() -> {
+            final CardPromptDialog dialog = new CardPromptDialog(
+                    card,
+                    null,
+                    ask,
+                    List.of(NeoText.get("scry.top"),
+                            NeoText.get(scry ? "scry.bottom" : "surveil.grave")),
+                    0,
+                    table.zoomCardWidth() * 0.62,
+                    index -> {
+                        if (!answered.compareAndSet(false, true)) {
+                            return;
+                        }
+                        table.getOverlay().hide();
+                        topOrBottomUp.set(false);
+                        final boolean top = index != null && index == 0;
+                        respondLater(() -> {
+                            if (top) {
+                                getGameController().selectButtonOk();
+                            } else {
+                                getGameController().selectButtonCancel();
+                            }
+                        });
+                    });
+            // El cartel del stack no puede quedarse por encima de una pregunta.
+            table.getPromptBanner().hide();
+            table.getOverlay().show(dialog);
+            table.requestLayout();
+        });
+        return true;
+    }
+
+    /** Hay un "arriba o abajo" puesto ahora mismo. */
+    private final AtomicBoolean topOrBottomUp = new AtomicBoolean();
+
+    /**
+     * El comandante del que va la pregunta.
+     *
+     * <p>No hay que buscarlo por las zonas a mano: el motor ya publica la lista
+     * en {@code PlayerView.getCommanders()}. Nos quedamos con el que este fuera
+     * de la partida; el nombre solo hace falta para desempatar cuando hay dos
+     * (partner, background).
+     */
+    private CardView findCommanderAway(final String name) {
+        final GameView gv = getGameView();
+        if (gv == null || gv.getPlayers() == null) {
+            return null;
+        }
+
+        // 1. Por NOMBRE y mirando la zona de verdad.
+        //
+        // El nombre es lo unico que el motor nos ha dicho con certeza — viene
+        // en su propio mensaje — y getCards(zone) es la lista real de esa zona.
+        // Buscar por getCommanders() + getZone() fallaba: la vista del
+        // comandante que hay en esa lista no siempre se ha enterado todavia de
+        // que la carta acaba de cambiar de zona.
+        for (final PlayerView p : gv.getPlayers()) {
+            for (final ZoneType zone : AWAY_ZONES) {
+                final CardView hit = byName(p.getCards(zone), name);
+                if (hit != null) {
+                    return hit;
+                }
+            }
+        }
+
+        // 2. Entre los comandantes declarados, ya sin mirar la zona.
+        for (final PlayerView p : gv.getPlayers()) {
+            final CardView hit = byName(p.getCommanders(), name);
+            if (hit != null) {
+                return hit;
+            }
+        }
+
+        // 3. Sin carta, y NUNCA la ultima resaltada.
+        //
+        // Aqui habia un ultimo recurso a focusCard — la carta que el motor
+        // habia marcado por lo que fuera — y eso es lo que produjo el fallo que
+        // se reporto jugando: te exilian a Felothar y el dialogo te ensenya la
+        // ultima criatura que lanzaste, con su arte y su texto, como si fuera
+        // tu comandante. Ensenyar la carta EQUIVOCADA con esa seguridad es
+        // mucho peor que no ensenyar ninguna: el titulo y el texto ya dicen de
+        // que comandante se trata, y el dialogo sabe salir sin carta.
+        System.err.println("[neo] no encuentro el comandante \"" + name
+                + "\" fuera de la partida; el dialogo saldra sin carta");
+        return null;
+    }
+
+    /** Donde puede estar un comandante que ha salido de la partida. */
+    private static final ZoneType[] AWAY_ZONES = {
+        ZoneType.Exile, ZoneType.Graveyard, ZoneType.Command,
+    };
+
+    /** La primera carta de la lista que se llame asi. */
+    private static CardView byName(final Iterable<CardView> cards, final String name) {
+        if (cards == null || name == null || name.isEmpty()) {
+            return null;
+        }
+        for (final CardView c : cards) {
+            if (c == null) {
+                continue;
+            }
+            // El motor manda el nombre en INGLES, asi que se compara con
+            // getName() y no con el traducido.
+            if (name.equals(c.getName())) {
+                return c;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * La pregunta del motor de la que ya ha llegado su {@link #setSelection}.
+     * Ver {@link #earlyButtons}.
+     */
+    private volatile Object selectionFor;
+
+    /**
+     * Los botones de una pregunta nueva que han llegado ANTES que su seleccion,
+     * aparcados hasta que llegue: {pregunta, owner, okLabel, cancelLabel,
+     * okEnabled, cancelEnabled, focusOk}.
+     *
+     * <p>Desde Forge #12259 (17-10-2026) {@code InputBase.showMessageInitial}
+     * pide los botones y DESPUES manda la seleccion; antes las cartas elegibles
+     * llegaban primero (desde el constructor). Todo lo nuestro que decide en
+     * {@code updateButtons} mira la seleccion —el piloto de las pruebas elige
+     * cartas, el pase automatico y los avisos miran {@code isSelecting} y
+     * {@code getSelectionMax}— y la veia vacia: el piloto no elegia nada (la
+     * partida se quedaba esperando en el descarte de la limpieza) o pulsaba
+     * Cancelar. Asi que los botones se procesan cuando llega la seleccion de su
+     * misma pregunta, en el orden de siempre. Solo para las preguntas de
+     * {@code InputBase}, que siempre la mandan; y si no llegara, a los
+     * {@link #EARLY_BUTTONS_WAIT_MS}.
+     */
+    private volatile Object[] earlyButtons;
+
+    /** Cuanto se espera la seleccion de unos botones aparcados antes de procesarlos igual. */
+    private static final int EARLY_BUTTONS_WAIT_MS = 300;
+
+    /**
+     * La "pregunta" de los botones del INVITADO en red: no tiene el motor en
+     * su proceso y no sabe de que pregunta son. Los suyos esperan a la
+     * siguiente seleccion que llegue por el cable (el anfitrion la manda justo
+     * detras, por el mismo orden), o a {@link #EARLY_BUTTONS_WAIT_MS}.
+     */
+    private static final class GuestAsk {
+    }
+
+    /**
+     * La marca de cada aparcamiento del invitado: UNA NUEVA cada vez, no una
+     * comun. Con una comun, el temporizador de unos botones viejos soltaba los
+     * nuevos antes de que llegara su seleccion; el piloto los veia sin cartas
+     * elegibles, no hacia nada, y la seleccion ya no encontraba nada que soltar
+     * (lobbycheck, rojo solo con carga: el invitado clavado en el descarte).
+     */
+    private static Object newGuestAsk() {
+        return new GuestAsk();
+    }
+
+    /** Mientras se procesan unos botones aparcados: que no se vuelvan a aparcar. */
+    private static final ThreadLocal<Boolean> FLUSHING_EARLY = ThreadLocal.withInitial(() -> false);
+
+    /** Procesa los botones aparcados de esa pregunta, si siguen ahi. */
+    private void flushEarlyButtons(final Object asked) {
+        final Object[] b;
+        synchronized (this) {
+            b = earlyButtons;
+            if (b == null || b[0] != asked) {
+                return;
+            }
+            earlyButtons = null;
+        }
+        FLUSHING_EARLY.set(true);
+        try {
+            updateButtons((PlayerView) b[1], (String) b[2], (String) b[3],
+                    (Boolean) b[4], (Boolean) b[5], (Boolean) b[6]);
+        } finally {
+            FLUSHING_EARLY.set(false);
+        }
+    }
+
+    /** Si somos el invitado de una partida en red (sin el motor en este proceso). */
+    private boolean isNetGuest() {
+        final GameView gv = getGameView();
+        return gv != null && gv.getGame() == null;
+    }
+
+    @Override
+    public void updateButtons(final PlayerView owner, final String okLabel, final String cancelLabel,
+                              final boolean okEnabled, final boolean cancelEnabled, final boolean focusOk) {
+        hostReplies.incrementAndGet();
+        if (isReplay()) {
+            replayButtons(okLabel, cancelLabel, okEnabled, cancelEnabled);
+            return;
+        }
+        // Una pregunta nueva (el pago, sin ir mas lejos): la prevision de la
+        // mano ya no vale, y el pago trae la suya.
+        if (!tapPreviewIds.isEmpty()) {
+            tapPreviewIds = java.util.Set.of();
+            pushActionable();
+        }
+        if (costHintId != -1) {
+            costHintId = -1;
+            runOnUi(() -> table.setHandCostHint(-1));
+        }
+        if (Boolean.getBoolean("neo.trace.choices")) {
+            System.out.println("[botones] " + okLabel + "/" + cancelLabel + " " + okEnabled + "/" + cancelEnabled
+                    + " de " + (owner == null ? "?" : owner.getName() + "#" + owner.getId()));
+        }
+        // Los botones de una pregunta nueva, antes que su seleccion: se aparcan
+        // hasta que llegue (ver earlyButtons).
+        final Object pending = pendingInput(getGameController());
+        final Object asked = pending == null && isNetGuest() ? newGuestAsk() : pending;
+        if (!FLUSHING_EARLY.get() && (asked instanceof GuestAsk
+                || asked instanceof forge.gamemodes.match.input.InputBase && asked != selectionFor)) {
+            synchronized (this) {
+                earlyButtons = new Object[] {asked, owner, okLabel, cancelLabel, okEnabled, cancelEnabled, focusOk};
+            }
+            forge.util.ThreadUtil.delay(EARLY_BUTTONS_WAIT_MS, () -> flushEarlyButtons(asked));
+            return;
+        }
+        cancelStaleAwaitIfGuest();
+        final DetailLog detailLog = detail;
+        if (detailLog != null) {
+            detailLog.buttons(okLabel, cancelLabel, okEnabled, cancelEnabled);
+        }
+        // Que una partida larga no se coma la memoria: las copias de la mesa
+        // que el motor no suelta (LkiPruner). Aqui, en el hilo de JavaFX, que es
+        // por donde pasan todas las respuestas de este jugador: el motor no
+        // puede arrancar a mitad de la poda. Android lo hace en su hilo de gestos.
+        final GameView pruneView = getGameView();
+        if (pruneView != null) {
+            LkiPruner.maybePrune(pruneView.getGame(), this);
+        }
+        // "Bloquear" en el paso de atacantes (askBlockOrUse): abierta ya la
+        // declaracion, se toca la criatura. Fuera del combate se olvida.
+        final CardView blockWith = pendingBlocker;
+        if (blockWith != null) {
+            if (forge.neo.match.BlockIntent.isDeclaringBlocks(getGameController())) {
+                final CardView against = pendingBlockAttacker;
+                pendingBlocker = null;
+                pendingBlockAttacker = null;
+                lastClicked = blockWith;
+                // Primero el atacante (InputBlock lo hace "el actual"),
+                // luego el bloqueador: el mismo orden que el arrastre.
+                if (against != null) {
+                    respondInTwoSteps(() -> getGameController().selectCard(against, null, null),
+                            () -> true,
+                            () -> getGameController().selectCard(blockWith, null, null));
+                } else {
+                    respondLater(() -> getGameController().selectCard(blockWith, null, null));
+                }
+            } else if (pruneView != null && pruneView.getPhase() != PhaseType.COMBAT_DECLARE_ATTACKERS
+                    && pruneView.getPhase() != PhaseType.COMBAT_DECLARE_BLOCKERS) {
+                pendingBlocker = null;
+                pendingBlockAttacker = null;
+            }
+        }
+        // El aura soltada sobre una criatura: si lo que se pregunta ahora es su
+        // objetivo y esa criatura vale, se elige sola (ver AuraDrop).
+        final CardView auraOn = pendingAuraTarget;
+        if (auraOn != null) {
+            final Object in = pendingInput(getGameController());
+            // La prioridad de vuelta = el lanzamiento ya acabo (o se cancelo).
+            // Con un segundo de margen: justo al soltar aun puede llegar un
+            // refresco de la prioridad de ANTES de empezar a lanzarla.
+            if (System.currentTimeMillis() > pendingAuraUntil
+                    || in instanceof forge.gamemodes.match.input.InputPassPriority
+                    && System.currentTimeMillis() > pendingAuraUntil - AURA_DROP_WINDOW_MS + 1000) {
+                pendingAuraTarget = null;
+            } else if (in instanceof forge.gamemodes.match.input.InputSelectTargets
+                    && AuraDrop.contains(selectables, auraOn)) {
+                pendingAuraTarget = null;
+                trace("aura soltada: objetivo %s", auraOn.getName());
+                respondLater(() -> getGameController().selectCard(auraOn, null, null));
+            }
+        }
+        // Mientras se REPRODUCE una macro, los botones como en el Forge de
+        // escritorio (CMatchUI.updateButtons): OK apagado y sin texto, y
+        // Cancelar encendido, que es lo que para la reproduccion
+        // (PlayerControllerHuman.selectButtonCancel).
+        final IGameController macroGc = getGameController();
+        // La reproduccion acaba sola: al acabar, el pase automatico vuelve.
+        if (macroAutoPassSaved != null && macroGc != null && macroGc.macros() != null
+                && !macroGc.macros().isRecording() && !macroGc.macros().isReplaying()) {
+            respondLater(() -> syncMacroAutoPass(macroGc));
+        }
+        if (!macroButtonsOverride && macroGc != null && macroGc.macros() != null
+                && macroGc.macros().isReplaying()) {
+            macroButtonsOverride = true;
+            try {
+                updateButtons(owner, "", forge.util.Localizer.getInstance().getMessage("lblCancel"),
+                        false, true, false);
+            } finally {
+                macroButtonsOverride = false;
+            }
+            return;
+        }
+        // El motor vuelve a preguntar: el OK vuelve a valer. Ver okAwaitingEngine.
+        askGen.incrementAndGet();
+        // Y lo que se puede lanzar desde el cementerio o el exilio depende de
+        // QUE pregunta (castableNow): al llegar o irse la prioridad, el brillo
+        // de las pilas se recalcula. El binder agrupa los avisos: no cuesta.
+        pushToTable();
+        // Lo PRIMERO: saber si hay un pago de mana en curso, y saberlo por lo
+        // que dice el motor. Ver setPayingMana.
+        setPayingMana(isAutoPayLabel(okLabel));
+        // La tierra clicada en el paso de girar para pagar: ya ha llegado el
+        // pago, se gira ella, y el resto lo paga el Auto de siempre (o el
+        // jugador). Si lo que llega no es el pago — lo cubrian todo las
+        // criaturas —, se olvida. Ver landPaysTheRest. Se mira el pago y no
+        // el prompt: InputPayMana pide los botones ANTES de mandar su texto.
+        final CardView manaClick = pendingManaClick;
+        if (manaClick != null && (payingMana || !TapToPayStep.isActive(getGameController()))) {
+            pendingManaClick = null;
+            if (payingMana && interactive()) {
+                trace("pago: giro la tierra clicada al elegir que girar: %s", manaClick);
+                respondLater(() -> getGameController().selectCard(manaClick, null, null));
+                return;
+            }
+        }
+        // Y en ese paso, OK es "lo demas lo pago con mana": que lo diga.
+        final String shownOk = tapToPayPending()
+                ? NeoText.get("taptopay.ok") : okLabel;
+        if (interactive()) {
+            // Modo humano: el motor esta esperando. Le enseñamos al jugador
+            // que puede hacer y esperamos a que pulse. Las etiquetas vienen
+            // del motor ("Pasar", "Terminar", "No bloquear"...), asi que leer
+            // el boton basta para saber que va a pasar.
+            // ---- pago automatico de mana, estilo Arena ----
+            //
+            // Forge ya sabe pagar solo: durante un pago, el boton OK pasa a
+            // llamarse "Auto" y al pulsarlo el motor usa la logica de mana de la
+            // IA para tapar lo que haga falta. Lo unico que faltaba era pulsarlo.
+            //
+            // Sin esto hay que ir clicando tierras a mano, que no es lo que hace
+            // ni Arena, ni la mesa de verdad, ni la propia GUI vieja de Forge.
+            // ...salvo que pagar sea OPCIONAL: "puede pagar {4}; si lo hace,
+            // desgira la criatura" (Paralyze), un coste de "a menos que", el
+            // eco. Ahi Cancelar es "no pago", y pulsar Auto por el jugador le
+            // cobraba el mana cada mantenimiento sin preguntar (Discord,
+            // 02-10-2026). Se le deja el pago delante: Auto paga, Cancelar no.
+            final boolean optionalPayment = payingMana && isOptionalPayment();
+            if (optionalPayment) {
+                noteOptionalPayment();
+            }
+            final Object payInput = payingMana ? pendingInput(getGameController()) : null;
+            if (payingMana && okEnabled && autoPayMana && !optionalPayment
+                    && (payInput == null || payInput != autoPayHeldFor)
+                    && autoPayPresses.incrementAndGet() <= MAX_AUTO_PAY_PRESSES) {
+                // Por si hay que pararse (autoPressOrHold): los botones de este pago.
+                heldButtons = new Object[] {owner, okLabel, cancelLabel, okEnabled, cancelEnabled, focusOk};
+                // Antes de soltarle el "Auto" al motor: apagar el rastreo de
+                // cartas accionables. Ver setActionableScans().
+                setActionableScans(false);
+                pressAutoInAMoment();
+                return;
+            }
+
+            // El "Auto" viene apagado. Antes de rendirse: si el hueco es el
+            // conocido — una fuente que COBRA mana para dar mas del que cobra,
+            // que el planificador del motor no contempla — se activa una, que
+            // es literalmente lo que haria el jugador clicandola. Ver
+            // FilterSources y tryBlindSource().
+            if (payingMana && !okEnabled && autoPayMana && !optionalPayment && tryBlindSource()) {
+                return;
+            }
+
+            // Aqui no vamos a pulsar nosotros: si el jugador tiene que pagar a
+            // mano, necesita ver las fuentes resaltadas.
+            setActionableScans(true);
+
+            // Y si el "Auto" viene APAGADO, decir por que.
+            noteAutoPayState(okEnabled);
+
+            // Un disparo de una reliquia TUYA encima del stack: se deja pasar
+            // solo, tras un momento para que se vea. Ver passRelicTriggerSoon.
+            if (okEnabled && !payingMana) {
+                passRelicTriggerSoon();
+            }
+
+            // Si lo que espera el motor es un JUGADOR, un boton por cada uno.
+            // Se lee AQUI, con el input vivo (las notas de diseño, fase 1, punto 3).
+            final List<forge.neo.ui.ActionBar.PlayerChoice> playerChoices = playerChoices();
+            // Y con dos o mas cosas en el stack, "Resolverlo todo".
+            final int resolveAll = resolveAllCount(okEnabled);
+            // Y "Si a todo" si lo que se pregunta es un disparo opcional tuyo.
+            final int yesToAll = yesToAllCount(okEnabled);
+
+            final UiDispatcher ui = uiDispatcher();
+            if (ui != null) {
+                ui.runLater(() -> {
+                    table.getActionBar().setButtons(shownOk, cancelLabel, okEnabled, cancelEnabled);
+                    table.getActionBar().setPlayerChoices(playerChoices);
+                    table.getActionBar().setResolveAll(resolveAll > 0
+                                    ? NeoText.get("stack.resolveAll", resolveAll) : null,
+                            NeoText.get("stack.resolveAll.tip"), this::resolveStack);
+                    table.getActionBar().setYesToAll(yesToAll > 0
+                                    ? NeoText.get("trigger.yesToAll", yesToAll) : null,
+                            NeoText.get("trigger.yesToAll.tip"), this::yesToAll);
+                    table.getActionBar().setOnOk(() -> {
+                        // Un OK por pregunta del motor. Lo demas, fuera: ver
+                        // okAwaitingEngine.
+                        if (okAwaitingEngine()) {
+                            // Solo pruebas (--ok-hold-test): cuantas de estas
+                            // caen con el stack VACIO en la vista, que es
+                            // cuando el aviso de la fase principal saltaba.
+                            if (Boolean.getBoolean("neo.okhold.debug")) {
+                                System.out.println("[okhold] OK ignorado, el motor aun no ha vuelto"
+                                        + " a preguntar | stack vacio en la vista: " + (topOfStack() == null));
+                            }
+                            return;
+                        }
+                        // Antes de dar por buena una eleccion VACIA, preguntar.
+                        if (warnNothingPicked()) {
+                            return;
+                        }
+                        // Y antes de dejar tu fase principal, tambien.
+                        if (confirmLeavingMain()) {
+                            return;
+                        }
+                        // Y antes de no bloquear con nada, si se ha pedido.
+                        if (confirmNoBlockers()) {
+                            return;
+                        }
+                        // Y antes de no atacar con nada, tambien si se ha pedido.
+                        if (confirmNoAttackers()) {
+                            return;
+                        }
+                        // Y antes de que "Auto" sacrifique una criatura tuya.
+                        if (confirmAutoSacrifice()) {
+                            return;
+                        }
+                        // Solo el OK de PASAR PRIORIDAD: es el que se da en
+                        // rafaga. En una seleccion, un OK rechazado no hace que
+                        // el motor vuelva a preguntar, y bloquear el siguiente
+                        // dejaria el boton muerto unos segundos.
+                        if (!payingMana && !isSelecting() && getSelectionMax() <= 0
+                                && isRoutinePriorityPrompt(lastPrompt)) {
+                            okSentAtGen = askGen.get();
+                            okSentAt = System.currentTimeMillis();
+                        }
+                        didDetail("pressed OK (" + shownOk + ")");
+                        respondLater(() -> getGameController().selectButtonOk());
+                    });
+                    table.getActionBar().setOnCancel(() -> {
+                        // "Fin de turno" en tu turno: preguntar antes.
+                        if (isEndTurnLabel(cancelLabel) && confirmEndingTurn(() -> {
+                            didDetail("pressed Cancel (" + cancelLabel + "), confirmed");
+                            respondLater(() -> getGameController().selectButtonCancel());
+                        })) {
+                            return;
+                        }
+                        didDetail("pressed Cancel (" + cancelLabel + ")");
+                        respondLater(() -> getGameController().selectButtonCancel());
+                    });
+
+                    // Y en el centro de la mesa, GRANDE y con la carta, lo que
+                    // esta pasando. Sin botones: los de verdad son estos de
+                    // arriba, en la barra de la derecha.
+                    showCentralPrompt(shownOk, cancelLabel, okEnabled, cancelEnabled);
+                    table.requestLayout();
+                    // Con una seleccion en curso, cada ficha tiene que poder
+                    // clicarse por separado: apiladas, siempre se elige la
+                    // primera y no hay forma de senyalar la segunda.
+                    // ANTES de marcar las elegibles: desapilar fabrica nodos
+                    // nuevos, y marcadas primero se quedarian sin marcar.
+                    table.setGroupingEnabled(!isSelecting());
+                    // Que le pasa a lo que elijas (sacrificar, descartar...),
+                    // para teñir la carta bajo el raton. ANTES de marcar las
+                    // elegibles, que es lo que repinta cada carta.
+                    // Y al elegir OBJETIVO, lo que dice la habilidad (Swords
+                    // to Plowshares: exiliar), si dice una sola cosa.
+                    forge.neo.card.CardNode.setChoiceAction(isSelecting()
+                            && forge.neo.NeoSettings.getBool(forge.neo.match.ChoiceAction.SETTING, true)
+                            ? forge.neo.match.ChoiceAction.forPrompt(lastPrompt,
+                                    pendingInput(getGameController())
+                                            instanceof forge.gamemodes.match.input.InputSelectTargets)
+                            : null);
+                    table.setSelectable(this::isSelectable);
+                    // Si no hay cartas elegibles pero si hay que contestar algo,
+                    // puede que lo que se pida sea un jugador. Dejarlos clicables
+                    // siempre es inofensivo: el motor ignora lo que no toca.
+                    table.setPlayersSelectable(true);
+                    // "● REC" segun el motor, no segun la tecla: el motor
+                    // cancela la macro solo (fin de partida), y el aviso no puede
+                    // quedarse encendido.
+                    table.setMacroState(isMacroRecording(), hasMacro());
+                });
+            }
+            return;
+        }
+
+        if (mode != Mode.AUTO_PLAY || finished.get()) {
+            return;
+        }
+        // Los disparos de tus reliquias, tambien con el piloto y ANTES de
+        // retenerlo: es lo que deja comprobar sin ventana que pasan solos
+        // (RelicPassCheck retiene todo lo demas). Ver passRelicTriggerSoon.
+        if (okEnabled && !payingMana && relicTriggerOnTop() != null) {
+            passRelicTriggerSoon();
+            return;
+        }
+        // Solo pruebas (MacroCheck): retener el piloto mientras la prueba hace
+        // de jugador. Ver setAutoPlayHold.
+        final java.util.function.BooleanSupplier hold = autoPlayHold;
+        if (hold != null && hold.getAsBoolean()) {
+            return;
+        }
+        // AQUI ESTA EL MODELO BLOQUEANTE.
+        // El motor nos acaba de decir "hay botones activos" y se ha quedado
+        // esperando. Hay que contestar desde OTRO hilo: si llamamos a
+        // selectButtonOk() aqui mismo, reentramos en el motor por el mismo
+        // hilo que esta bloqueado. En la fase 4 este disparo lo hara el click
+        // del usuario en vez de este executor.
+        // Y el piloto contesta por pilotRespond, no por respondLater: el motor
+        // pide los botones tambien DESDE DENTRO de una respuesta, y contestar
+        // ahi en linea revienta la pila.
+        if (okEnabled) {
+            // No un selectButtonOk a ciegas: el ataque obligado lo rechaza el
+            // motor y vuelve a preguntar para siempre. Ver autoPressOk().
+            pilotRespond(this::autoPressOk);
+            return;
+        }
+
+        // Un pago atascado tambien se intenta aqui, y no solo en el modo
+        // humano: es lo unico que permite comprobar el bucle entero sin
+        // ventana (FilterCheck). No toca a los otros comprobadores porque el
+        // interruptor viene apagado y ninguno lo enciende.
+        if (payingMana && autoPayMana && tryBlindSource()) {
+            return;
+        }
+
+        // OK deshabilitado puede significar dos cosas muy distintas:
+        // (a) hay una seleccion de cartas en curso y faltan cartas por elegir
+        // (b) no hay nada que hacer salvo cancelar
+        if (isSelecting()) {
+            // Un clic a la vez: el siguiente, cuando el motor haya marcado el
+            // anterior. Y sin caer a Cancelar mientras tanto. Ver pilotClicks.
+            if (pilotClickInFlight()) {
+                trace("eligiendo carta: espero a que el motor marque la anterior");
+                return;
+            }
+            final CardView next = nextUnpickedSelectable();
+            if (next != null) {
+                trace("eligiendo carta: %s", next);
+                pilotClicks.put(next.getId(), System.currentTimeMillis());
+                pilotRespond(() -> {
+                    final IGameController gc = getGameController();
+                    try {
+                        gc.selectCard(next, null, null);
+                    } finally {
+                        // Con el motor en este proceso el clic es sincrono: al
+                        // volver, o ya ha marcado la carta o no lo hara nunca
+                        // (llego antes que su pregunta), y el piloto tiene que
+                        // poder repetirlo. El invitado en red no: su clic solo
+                        // sale por el cable, y la marca llega despues.
+                        if (gc instanceof forge.player.PlayerControllerHuman) {
+                            pilotClicks.remove(next.getId());
+                        }
+                    }
+                });
+                return;
+            }
+        }
+
+        // (c) el motor quiere que elijas algo, pero NO es una carta.
+        //
+        // El caso de verdad: con tres o mas jugadores, quien gana el sorteo
+        // inicial tiene que decir quien empieza, y el motor lo pide con
+        // "(Haz clic en el retrato)" -- sin marcar ni una carta como elegible.
+        // Jugando esta resuelto porque los retratos se clican; en automatico no
+        // habia respuesta posible y la partida se quedaba clavada en el turno 0
+        // <b>la mitad de las veces</b>, segun cayera la moneda. Un comprobador
+        // que falla a cara o cruz es peor que no tenerlo: se acaba dando por
+        // bueno el fallo.
+        //
+        // Se mira getSelectionMax() y no isSelecting(), que es la trampa de
+        // siempre: isSelecting() pregunta si hay CARTAS elegibles, y aqui lo
+        // que se elige es un jugador.
+        if (getSelectionMax() > 0 && countPickedSelectables() < getSelectionMin()
+                && selectables.isEmpty()) {
+            // Uno que VALGA: "un rival elige la pila" no admite al que lanza,
+            // y elegirte a ti mismo ahi dejaba la partida clavada (el motor
+            // descarta el clic y sigue esperando). Para quien empieza vale
+            // cualquiera, y se sigue eligiendo al jugador local.
+            final List<PlayerPick.Choice> valid = PlayerPick.pending(getGameController());
+            PlayerView who = localPlayer();
+            if (valid.isEmpty() && who != null && who.getOpponents() != null) {
+                // Sin la lista de los que valen — un jugador OBJETIVO
+                // (InputSelectTargets, que PlayerPick no lee y Forge no marca),
+                // o el invitado en red, que no tiene el motor —, un rival: vale
+                // casi siempre ("rival objetivo", "un rival elige": los esquemas
+                // de Archenemy, 12-10-2026), y uno mismo en esos no, y el motor
+                // descarta el clic y se queda esperando. Solo el piloto.
+                // Uno que siga en la partida: getOpponents() se rellena al
+                // empezar y trae tambien a los que ya han perdido.
+                for (final PlayerView o : who.getOpponents()) {
+                    if (!o.getHasLost()) {
+                        who = o;
+                        break;
+                    }
+                }
+            }
+            if (!valid.isEmpty()) {
+                PlayerView first = null;
+                boolean localValid = false;
+                for (final PlayerPick.Choice c : valid) {
+                    if (first == null) {
+                        first = c.player();
+                    }
+                    localValid |= c.player().equals(who);
+                }
+                if (!localValid) {
+                    who = first;
+                }
+            }
+            if (who != null) {
+                trace("eligiendo jugador: %s", nameOf(who));
+                final PlayerView chosen = who;
+                pilotRespond(() -> getGameController().selectPlayer(chosen, null));
+                return;
+            }
+        }
+
+        if (cancelEnabled) {
+            pilotRespond(() -> getGameController().selectButtonCancel());
+        }
+    }
+
+    /**
+     * Cartas que el motor ha marcado como elegibles ahora mismo.
+     *
+     * <p>Se guardan aqui porque {@code setSelectables} se invoca desde el
+     * CONSTRUCTOR del input, antes de que ese input este activo en la cola: si
+     * contestamos en ese momento, el click se descarta y la partida se queda
+     * colgada. Un humano nunca lo nota porque tarda 100 ms en hacer click.
+     * Por eso la eleccion se dispara desde {@code updateButtons}, que si ocurre
+     * con el input ya vivo.
+     */
+    /**
+     * Tope de pulsaciones automaticas por pago.
+     *
+     * <p>Red de seguridad: {@code ComputerUtilMana} paga el coste entero de una
+     * vez, asi que con una basta. Si por lo que sea no avanzara, el tope evita
+     * que la interfaz se quede dandole al boton para siempre y le devuelve el
+     * control al jugador.
+     */
+    private static final int MAX_AUTO_PAY_PRESSES = 4;
+
+    /**
+     * Hay un pago de mana en curso.
+     *
+     * <p><b>Esto se decide por la ETIQUETA DEL BOTON, y es importante que sea
+     * asi.</b> La primera version lo deducia de {@code showManaPool} /
+     * {@code hideManaPool}, que parecia lo natural — son los avisos que el
+     * motor manda al empezar y al acabar un pago — y estaba mal por los dos
+     * lados:
+     *
+     * <ul>
+     *   <li>{@code showManaPool} solo se llama <b>si ya tenias mana flotante</b>
+     *       cuando empezo el pago ({@code InputPayMana}: {@code wasFloatingMana}).
+     *       En un pago normal no llega nunca.</li>
+     *   <li>{@code hideManaPool} solo se llama cuando el pago se <b>aborta</b>
+     *       ({@code onStop} con {@code !isFinished()}). Cuando el pago termina
+     *       bien, no llega — o sea que la marca <b>se quedaba encendida para
+     *       siempre</b>.</li>
+     * </ul>
+     *
+     * <p>Y con la marca encendida, este metodo pulsaba OK <b>solo</b> en los
+     * cuatro avisos siguientes, fueran de lo que fueran. El sintoma que lo
+     * delato, jugando: <i>"jugue una tierra que adivina 1, el disparo fue al
+     * stack, le di a OK y el adivinar no se hizo"</i>. Si se hizo — el motor
+     * pregunta "arriba o abajo" con un {@code InputConfirm} normal y corriente,
+     * y la interfaz contesto "arriba" ella sola antes de ensenyar nada. Con
+     * adivina 1 no se mueve nada en pantalla, asi que parece que no paso.
+     *
+     * <p>La senyal buena la publica el propio {@code InputPayMana}: mientras
+     * dura el pago, y <b>solo</b> mientras dura, el boton principal se llama
+     * "Auto" ({@code lblAuto}). Se reevalua en cada {@code updateButtons}, asi
+     * que no se puede quedar pegada.
+     */
+    private volatile boolean payingMana;
+
+    /** Cuantas veces seguidas hemos pulsado Auto en este pago. */
+    private final AtomicInteger autoPayPresses = new AtomicInteger();
+
+    /** El "Auto" del motor, en el idioma que sea. */
+    private static boolean isAutoPayLabel(final String okLabel) {
+        return forge.neo.EnginePhrase.equalsAny(okLabel, "lblAuto");
+    }
+
+    private void setPayingMana(final boolean on) {
+        // Cualquier aviso nuevo del motor invalida la pulsacion de "Auto" que
+        // estuviera esperando: el estado sobre el que se decidio ya cambio.
+        autoPayGen.incrementAndGet();
+        if (on && !payingMana) {
+            // Empieza un pago: se reinicia el tope de pulsaciones.
+            autoPayPresses.set(0);
+            blindTries.set(0);
+            blindTried.clear();
+        }
+        if (!on) {
+            // Se acabo el pago: lo que estuviera pendiente de avisar, ya no.
+            autoPayHint.incrementAndGet();
+            // Y vuelven los resaltados. Ver setActionableScans().
+            setActionableScans(true);
+            // Y si algun cambio se quedo sin llegar a la pantalla durante el
+            // pago, que se vuelque. Ver flushStrandedViewChanges().
+            needTrackerFlush.set(true);
+        }
+        payingMana = on;
+    }
+
+    /**
+     * Estan encendidos los resaltados de "que puedes usar ahora mismo".
+     *
+     * <p>Se apaga a proposito mientras el "Auto" esta pagando. Ver
+     * {@link #setActionableScans(boolean)}.
+     */
+    private final AtomicBoolean actionableScans = new AtomicBoolean(true);
+
+    /**
+     * <b>Silencio en el hilo de interfaz mientras el "Auto" paga.</b>
+     *
+     * <p>Este es el arreglo de un fallo que se llevaba partidas enteras por
+     * delante, y que en pantalla no se parecia en nada a lo que era. Los dos
+     * sintomas que se reportaron jugando:
+     *
+     * <ul>
+     *   <li><i>"lance una carta de 4 con {2} de offspring, pague 6, y solo se
+     *       me giraron 2 tierras"</i> — las seis estaban giradas <b>en el
+     *       motor</b>; lo que no llego fue el aviso a la pantalla.</li>
+     *   <li><i>"al turno siguiente se peto la IA"</i> — la partida muerta, con
+     *       el cartel de "la partida se ha roto".</li>
+     * </ul>
+     *
+     * <p><b>Lo que pasa de verdad.</b> El {@code Tracker} del motor —el que
+     * lleva la cuenta de que propiedades han cambiado para volcarlas a las
+     * vistas— lo dice el en su propio javadoc: <i>"Not thread-safe — game
+     * thread only"</i>. Y durante un pago de mana hay <b>dos</b> hilos dentro:
+     *
+     * <ol>
+     *   <li>El del pago. {@code InputPayMana.onOk} lanza
+     *       {@code ComputerUtilMana.payManaCost} con
+     *       {@code GameAction.invoke}, o sea en un hilo de partida aparte.</li>
+     *   <li>El de la interfaz. Mientras aquello paga, el motor va refrescando
+     *       el mensaje del pago, y ese refresco se hace <b>en el hilo de la
+     *       interfaz</b> ({@code InputPayMana.updateMessage} llega por
+     *       {@code invokeInEdtLater}). Y no es solo pintar: por el camino llama
+     *       a {@code pushActionableCards}, que para saber que cartas puedes
+     *       usar recorre tus zonas preguntandole a cada carta por sus
+     *       habilidades — y eso acaba en {@code checkStaticAbilities}, que
+     *       congela y descongela el Tracker.</li>
+     * </ol>
+     *
+     * <p>Los dos a la vez sobre la misma lista, y salta la
+     * {@code ConcurrentModificationException} que hay a pares en {@code
+     * neo.log}. Y lo peor no es la excepcion: es que revienta <b>a mitad</b> de
+     * {@code Tracker.unfreeze}, que es justo el bucle que aplica los cambios
+     * pendientes a las vistas. Los que quedaban detras no se aplican y ademas
+     * no se limpian, asi que se quedan ahi para el siguiente descongelado. De
+     * ahi las tierras que se ven sin girar.
+     *
+     * <p><b>Por que nos toca a nosotros y no a la GUI vieja.</b> Porque
+     * nosotros pulsamos "Auto" <b>al instante</b>, en cuanto el motor enciende
+     * el boton. Un humano tarda medio segundo, y en medio segundo el refresco
+     * de la interfaz ya ha terminado. Es otra vez la regla de siempre: el motor
+     * da por hecho que al otro lado hay alguien con reflejos humanos.
+     *
+     * <p><b>El arreglo.</b> No se puede tocar el motor (regla de oro), pero ese
+     * recorrido si tiene interruptor: el propio Forge lo consulta en
+     * {@code FPref.UI_SHOW_ACTIONABLE_HIGHLIGHTS} antes de mirar una sola
+     * carta, y sin el se va de {@code pushActionableCards} sin entrar. Asi que
+     * se apaga justo mientras el "Auto" esta pagando y se vuelve a encender en
+     * cuanto el pago acaba —o en cuanto queda claro que va a pagar el jugador a
+     * mano, que es cuando los resaltados hacen falta de verdad—. Durante un
+     * pago automatico no se pierde nada: resaltar las tierras que puedes tocar
+     * mientras las esta tocando otro no le sirve a nadie.
+     *
+     * <p>Se cambia <b>solo en memoria</b>, como todo lo que tocamos de las
+     * preferencias de Forge (ver {@code NeoGame.applyEnginePrefs}).
+     */
+    /**
+     * <b>Rescatar los cambios que se quedaron sin llegar a la pantalla.</b>
+     *
+     * <p>Es la red de seguridad del fallo de las tierras que se ven sin girar
+     * (ver {@link #setActionableScans(boolean)}). Si el {@code Tracker} revienta
+     * a mitad de {@code unfreeze}, los cambios que quedaban detras <b>ni se
+     * aplican ni se borran</b>: se quedan en la lista, y la carta se sigue
+     * viendo como estaba.
+     *
+     * <p>Sacarlos de ahi es un {@code freeze()} + {@code unfreeze()}: el
+     * segundo baja el contador a cero, vuelca la lista entera y la limpia. Los
+     * dos metodos son publicos, o sea que no hay que tocar el motor.
+     *
+     * <p>Cuesta nada cuando no hay nada atascado — {@code unfreeze} se va en la
+     * primera linea si la lista esta vacia — y si otro sitio esta dentro de su
+     * propio freeze, subir y bajar el contador no le afecta.
+     *
+     * <p>Va aqui, en {@code handleGameEvent}, porque este es el <b>hilo del
+     * motor</b>, que es el unico desde el que el Tracker se puede tocar. Y solo
+     * despues de un pago de mana, que es el unico sitio donde se ha visto
+     * pasar: hacerlo en cada evento seria trabajo en balde en el camino
+     * caliente de la partida.
+     */
+    private void flushStrandedViewChanges() {
+        if (!needTrackerFlush.compareAndSet(true, false)) {
+            return;
+        }
+        final GameView gv = getGameView();
+        final Game game = gv == null ? null : gv.getGame();
+        if (game == null || game.getTracker() == null) {
+            return;
+        }
+        try {
+            game.getTracker().freeze();
+            game.getTracker().unfreeze();
+        } catch (final RuntimeException e) {
+            System.out.println("[neo] no se han podido volcar los cambios pendientes: " + e);
+        }
+    }
+
+    /** Hay que volcar lo que se quedara atascado. Ver {@link #flushStrandedViewChanges()}. */
+    private final AtomicBoolean needTrackerFlush = new AtomicBoolean();
+
+    private void setActionableScans(final boolean on) {
+        if (actionableScans.get() == on) {
+            return;
+        }
+        actionableScans.set(on);
+        try {
+            forge.model.FModel.getPreferences().setPref(
+                    forge.localinstance.properties.ForgePreferences.FPref
+                            .UI_SHOW_ACTIONABLE_HIGHLIGHTS, on);
+        } catch (final RuntimeException e) {
+            // Sin preferencias cargadas (pruebas sin motor) no hay nada que hacer.
+            actionableScans.set(true);
+        }
+        if (!on) {
+            // Lo que hubiera resaltado deja de tener sentido: durante el pago
+            // automatico no se toca nada a mano.
+            setSelection(getSelection().withActionable(java.util.List.of()));
+        } else {
+            republishActionables();
+        }
+    }
+
+    /**
+     * <b>Al volver a encender el rastreo, lo jugable otra vez.</b>
+     *
+     * <p>Discord, 11-10-2026: <i>"During main phase 1, before moving to
+     * combat, there is a moment where castable cards that normally have the
+     * blue indicator lose said indicator ... you have the mana to cast cards
+     * but the hand no longer shows it"</i>. El orden del motor: al darte la
+     * prioridad, {@code InputPassPriority.showNormalPrompt} publica lo jugable
+     * ({@code pushActionableCards}) <b>antes</b> de {@code updateButtons}. Y es
+     * en {@code updateButtons} donde vemos que el pago automatico ha acabado y
+     * encendemos el rastreo — tarde: el motor ya habia preguntado con el
+     * rastreo apagado y habia borrado los resaltados. Hasta la siguiente
+     * prioridad (pasar, que se resuelva lo lanzado) la mano no decia nada.
+     *
+     * <p>Se le pide otra vez, pero solo si lo que espera es la prioridad normal:
+     * entonces estamos dentro de su propio {@code showNormalPrompt}, en su
+     * hilo, y es exactamente la llamada que acaba de hacer. En un pago (las
+     * fuentes, a mano) no: ahi el rastreo apagado es lo que evita el choque de
+     * hilos del {@code Tracker}.
+     */
+    private void republishActionables() {
+        final IGameController gc = getGameController();
+        if (!(gc instanceof forge.player.PlayerControllerHuman human)) {
+            return;
+        }
+        try {
+            if (human.getInputQueue().getInput() instanceof forge.gamemodes.match.input.InputPassPriority) {
+                // Desde Forge #12414 lo resaltado viaja en la seleccion.
+                setSelection(getSelection().withActionable(human.getActionableCards(false, null)));
+                trace("resaltados: vuelven tras el pago");
+            }
+        } catch (final RuntimeException e) {
+            log("Could not request the highlights again: %s", e);
+        }
+    }
+
+    /**
+     * El "Auto" apagado <b>quiere decir algo</b>, y hay que decirlo.
+     *
+     * <p>Durante un pago de mana el motor solo enciende el boton si su
+     * planificador — el de la IA, {@code ComputerUtilMana.getManaSourcesToPayCost}
+     * — encuentra un plan completo. Ese planificador <b>no es exhaustivo</b>:
+     * hay combinaciones que un jugador ve y el no, sobre todo con tierras que
+     * cobran mana para dar mas del que cobran (las de filtro: {1},{T}: añade
+     * {W}{U}). Reportado jugando: <i>"el auto me decia que no y luego yo a mano
+     * haciendo la logica podia"</i>.
+     *
+     * <p>El fallo de interfaz no era ese — la logica del motor no la vamos a
+     * reescribir, y menos por nuestra cuenta (regla de oro) — sino que <b>el
+     * boton se quedaba gris sin explicar nada</b>, y un boton gris se lee como
+     * "esto no se puede hacer" cuando en realidad significa "esto no lo se
+     * hacer yo; hazlo tu". Con las fuentes resaltadas (ver
+     * {@link #actionableChanged}) hacerlo a mano es cuestion de clicar.
+     *
+     * <p><b>Por que con retardo.</b> La secuencia del motor pasa siempre por un
+     * "Auto" apagado antes de encenderlo: {@code InputPayMana.showMessage} llama
+     * a {@code updateButtons} (apagado) y solo despues {@code updateMessage} lo
+     * enciende, si hay plan. Avisar en el primero saldria en TODOS los pagos.
+     * Se espera medio segundo y, si mientras tanto llega el encendido, el aviso
+     * se cancela solo por el numero de generacion.
+     */
+    /**
+     * Si el pago de mana en curso es de los que se pueden NO pagar: lo pide un
+     * efecto al resolverse (Paralyze, "a menos que", eco), no el coste de algo
+     * que el jugador ha decidido jugar. Ver {@code NeoPaymentPeek.isEffectPayment}.
+     * El invitado en red no tiene la entrada del motor: ahi se queda como antes.
+     */
+    boolean isOptionalPayment() {
+        return getGameController() instanceof forge.player.PlayerControllerHuman human
+                && forge.gamemodes.match.input.NeoPaymentPeek.isEffectPayment(
+                        human.getInputQueue().getInput());
+    }
+
+    /** Una vez por pago: por que el pago automatico no ha saltado esta vez. */
+    private void noteOptionalPayment() {
+        if (Boolean.getBoolean("neo.pay.debug")) {
+            System.out.println("[pago] opcional (lo pide un efecto): no se paga solo");
+        }
+    }
+
+    private void noteAutoPayState(final boolean okEnabled) {
+        if (!payingMana || !autoPayMana) {
+            return;
+        }
+        final int mine = autoPayHint.incrementAndGet();
+        if (okEnabled) {
+            return;
+        }
+        final UiDispatcher ui = uiDispatcher();
+        if (ui == null || table == null) {
+            return;
+        }
+        // El reloj es el de Forge y no un PauseTransition: los comprobadores
+        // sin ventana llegan hasta aqui, y JavaFX sin toolkit levantado
+        // revienta con "Toolkit not initialized" (ver las trampas conocidas).
+        // Si el hueco es el conocido — una fuente que cobra mana para dar mas
+        // del que cobra — se NOMBRA. "No encuentra la combinacion" no dice que
+        // hacer; "no sabe usar Pradera Hierbasol" dice exactamente que clicar.
+        final String culprit = blindSourceName();
+        forge.util.ThreadUtil.delay(500, () -> ui.runLater(() -> {
+            if (autoPayHint.get() == mine && payingMana) {
+                table.getActionBar().setWarning(culprit == null
+                        ? NeoText.get("mana.autoStuck")
+                        : NeoText.get("mana.autoStuckSource", culprit), false);
+            }
+        }));
+    }
+
+    /** Numero de generacion del aviso de "el Auto no puede". */
+    private final AtomicInteger autoPayHint = new AtomicInteger();
+
+    /**
+     * Si el pago automatico intenta por su cuenta las fuentes que el motor no
+     * ve. Apagado de fabrica (la auditoría del motor 1.1).
+     */
+    private static volatile boolean blindSourceFallback;
+
+    public static void setBlindSourceFallback(final boolean on) {
+        blindSourceFallback = on;
+    }
+
+    public static boolean isBlindSourceFallback() {
+        return blindSourceFallback;
+    }
+
+    /** Cuantas fuentes ciegas se han probado en ESTE pago. */
+    private final AtomicInteger blindTries = new AtomicInteger();
+
+    /**
+     * Tope de intentos por pago. Cada intento gira una tierra, y girar no se
+     * deshace desde aqui: si con cuatro no ha salido, el plan era malo y el
+     * jugador se apanya mejor a mano.
+     */
+    private static final int MAX_BLIND_TRIES = 4;
+
+    /** Las cartas que ya se han probado en este pago, por id. */
+    private final java.util.Set<Integer> blindTried =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+
+    /** El nombre de la primera fuente que el motor no sabe usar, o null. */
+    private String blindSourceName() {
+        final forge.game.card.Card c = firstBlindSource();
+        return c == null ? null : forge.neo.card.CardText.nameOf(c.getView());
+    }
+
+    /**
+     * La primera fuente de mana que cuesta mana y que aun no hemos probado en
+     * este pago.
+     *
+     * <p>Devuelve {@code null} si no hay partida local: en una partida en red
+     * el {@code Game} vive en el anfitrion y aqui solo llegan vistas. Es el
+     * caso en el que todo esto se apaga solo y la pantalla se queda como
+     * estaba (la auditoría del motor 1.1).
+     */
+    private forge.game.card.Card firstBlindSource() {
+        final GameView gv = getGameView();
+        final Game game = gv == null ? null : gv.getGame();
+        if (game == null) {
+            return null;
+        }
+        forge.game.player.Player me = null;
+        for (final PlayerView seat : getLocalPlayers()) {
+            for (final forge.game.player.Player p : game.getPlayers()) {
+                if (p.getView() == seat) {
+                    me = p;
+                }
+            }
+        }
+        for (final forge.game.card.Card c : FilterSources.of(game, me)) {
+            if (!blindTried.contains(c.getId())) {
+                return c;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Activa una fuente de las que el motor no ve, como si la clicara el
+     * jugador.
+     *
+     * <p><b>Por que esto funciona.</b> El planificador se atraganta con el
+     * coste ENTERO ({@code {G}{W}} con una tierra de filtro), pero el sub-pago
+     * que abre la propia tierra — su {@code {1}} — es un coste generico
+     * corriente que su "Auto" si sabe pagar. O sea que basta con dar el primer
+     * paso, que es justo el que un humano da a mano, y el motor se encarga del
+     * resto por el camino de siempre.
+     *
+     * @return si se ha activado algo (y por tanto hay que esperar al motor)
+     */
+    private boolean tryBlindSource() {
+        if (!blindSourceFallback || blindTries.get() >= MAX_BLIND_TRIES) {
+            return false;
+        }
+        final forge.game.card.Card c = firstBlindSource();
+        if (c == null) {
+            return false;
+        }
+        blindTries.incrementAndGet();
+        blindTried.add(c.getId());
+        trace("pago: probando una fuente que el motor no ve: %s", c);
+        final CardView view = c.getView();
+        respondLater(() -> getGameController().selectCard(view, null, null));
+        return true;
+    }
+
+    /**
+     * Cuanto se espera antes de pulsar "Auto", en milisegundos.
+     *
+     * <p><b>Este numero es un arreglo, no una preferencia estetica.</b> Pulsar
+     * en el mismo instante en que el motor enciende el boton mete nuestro pago
+     * dentro del refresco que el propio motor esta haciendo en el hilo de
+     * interfaz, y de ahi salen las {@code ConcurrentModificationException} que
+     * dejaban tierras sin girar y llegaban a matar la partida (ver
+     * {@link #setActionableScans(boolean)}). Un jugador de carne tarda medio
+     * segundo largo y por eso a la GUI vieja no le pasa.
+     *
+     * <p>Un cuarto de segundo es de sobra para que el refresco termine y no se
+     * nota jugando. Se puede tocar con {@code -Dneo.autoPay.delayMs} para
+     * probar.
+     */
+    private static final long AUTO_PAY_DELAY_MS =
+            Long.getLong("neo.autoPay.delayMs", 250);
+
+    /**
+     * Pulsa "Auto", pero <b>dejando respirar al motor primero</b>.
+     *
+     * <p>El numero de generacion es lo que evita pulsar de mas: si mientras
+     * esperamos llega otro {@code updateButtons} — porque el pago avanzo, o
+     * porque ya no hay pago — la pulsacion que estaba en el aire se descarta
+     * sola en vez de caer sobre un estado que ya no existe.
+     */
+    /**
+     * LOS DISPAROS DE TUS RELIQUIAS SE RESUELVEN SOLOS (Ascenso).
+     *
+     * <p>Discord (Tommy, 10-10-2026), con una veintena de reliquias: cada
+     * disparo ("al empezar tu fase principal, anade {C}") va al stack, y para
+     * que se resuelva hay que pasar la prioridad: un OK por reliquia y turno,
+     * sin nada que decidir. Forge tiene su "dejar pasar siempre" (el menu del
+     * stack, la Y), pero es por habilidad y se GUARDA entre partidas; aqui no se
+     * escribe nada en sus almacenes: es la interfaz la que pulsa el OK, como
+     * hace con el "Auto" del mana.
+     *
+     * <p>Solo cuando todo esto lo dice el motor, sin deducir nada:
+     * <ul>
+     *   <li>te esta pidiendo <b>prioridad</b> ({@code InputPassPriority} vivo, no
+     *       una pregunta ni un pago — lo que el disparo pregunte, objetivos o un
+     *       "puedes", se sigue preguntando);</li>
+     *   <li>lo de <b>encima</b> del stack es un disparo, <b>tuyo</b>, y su carta es
+     *       una reliquia ({@code AscentRelics.byCardName}). Los del jefe paran
+     *       como siempre;</li>
+     *   <li>el ajuste {@link forge.neo.NeoSettings#RELIC_PASS} esta encendido (de fabrica).</li>
+     * </ul>
+     *
+     * <p>Tras {@link #AUTO_PAY_DELAY_MS} para que se vea en el cartel del stack.
+     * Si en ese rato el motor vuelve a preguntar (has dado OK tu, o se ha
+     * resuelto), no se pulsa nada: {@link #askGen} ha cambiado.
+     */
+    private void passRelicTriggerSoon() {
+        final CardView source = relicTriggerOnTop();
+        if (source == null) {
+            return;
+        }
+        final IGameController gc = getGameController();
+        final int asked = askGen.get();
+        System.out.println("[reliquia] se deja pasar su disparo: " + source.getName());
+        final Runnable press = () -> {
+            if (askGen.get() == asked && !finished.get()) {
+                respondLater(() -> gc.selectButtonOk());
+            }
+        };
+        if (AUTO_PAY_DELAY_MS <= 0) {
+            press.run();
+        } else {
+            // El reloj de Forge, como en pressAutoInAMoment: sin JavaFX.
+            forge.util.ThreadUtil.delay((int) AUTO_PAY_DELAY_MS, press);
+        }
+    }
+
+    /**
+     * La carta de la reliquia TUYA cuyo disparo esta encima del stack con el
+     * motor pidiendote prioridad, o null. Las condiciones de
+     * {@link #passRelicTriggerSoon}, aparte para que {@code RelicPassCheck}
+     * pueda preguntarlas.
+     */
+    CardView relicTriggerOnTop() {
+        if (!forge.neo.NeoSettings.getBool(forge.neo.NeoSettings.RELIC_PASS, true)
+                || isSelecting() || getSelectionMax() > 0) {
+            return null;
+        }
+        final IGameController gc = getGameController();
+        if (!(gc instanceof forge.player.PlayerControllerHuman human)
+                || !(human.getInputQueue().getInput()
+                        instanceof forge.gamemodes.match.input.InputPassPriority)) {
+            return null;
+        }
+        final StackItemView top = topOfStack();
+        final CardView source = top == null ? null : top.getSourceCard();
+        if (top == null || !top.isTrigger() || !isMe(top.getActivatingPlayer()) || source == null
+                || forge.neo.ascent.AscentRelics.byCardName(source.getName()) == null) {
+            return null;
+        }
+        return source;
+    }
+
+    private void pressAutoInAMoment() {
+        final int mine = autoPayGen.get();
+        if (AUTO_PAY_DELAY_MS <= 0) {
+            respondLater(this::autoPressOrHold);
+            return;
+        }
+        // El reloj es el de Forge (un hilo "Delayed-N") y no un
+        // PauseTransition: los comprobadores sin ventana llegan hasta aqui y
+        // JavaFX sin toolkit levantado revienta con "Toolkit not initialized".
+        // De la vuelta al hilo de interfaz ya se encarga respondLater.
+        forge.util.ThreadUtil.delay((int) AUTO_PAY_DELAY_MS, () -> {
+            if (autoPayGen.get() != mine || !payingMana || !autoPayMana) {
+                return;
+            }
+            respondLater(this::autoPressOrHold);
+        });
+    }
+
+    /**
+     * El pago automatico pulsa "Auto"... salvo que "Auto" fuera a sacrificar
+     * otra carta tuya (Phyrexian Tower: ver {@link AutoPaySacrifice}). Entonces
+     * NO paga solo: lo dice en la barra y el pago se queda en tus manos — "Auto"
+     * sigue ahi, y si lo pulsas pregunta ({@link #confirmAutoSacrifice}).
+     */
+    private void autoPressOrHold() {
+        final Object input = pendingInput(getGameController());
+        final forge.game.card.Card culprit = AutoPaySacrifice.culprit(input);
+        // Con mana flotante y otras fuentes, elegir con que se paga es tuyo:
+        // "Auto" gastaria primero lo flotante (Discord, 25-10-2026). Ver
+        // FloatingManaChoice.
+        final boolean floating = culprit == null && FloatingManaChoice.applies(input);
+        // Y si se ha pedido que no gire criaturas (AutoPayCreatures).
+        final forge.game.card.Card creature = culprit == null && !floating
+                ? AutoPayCreatures.culprit(input) : null;
+        if (culprit == null && !floating && creature == null) {
+            getGameController().selectButtonOk();
+            return;
+        }
+        trace(floating ? "pago automatico parado: hay mana flotante"
+                : creature != null ? "pago automatico parado: giraria " + creature.getName()
+                : "pago automatico parado: " + culprit.getName() + " sacrificaria una carta");
+        // Este pago ya no se intenta solo, y sus botones (Auto / Cancelar) a la
+        // vista: hasta aqui no se habian pintado porque se iba a pagar solo.
+        autoPayHeldFor = pendingInput(getGameController());
+        final Object[] b = heldButtons;
+        if (b != null) {
+            updateButtons((PlayerView) b[0], (String) b[1], (String) b[2],
+                    (Boolean) b[3], (Boolean) b[4], (Boolean) b[5]);
+        }
+        setActionableScans(true);
+        if (table != null) {
+            table.getActionBar().setWarning(floating ? NeoText.get("mana.floating.held")
+                    : creature != null ? NeoText.get("mana.creatures.held",
+                            forge.neo.card.CardText.nameOf(creature.getView()))
+                    : NeoText.get("mana.autoSac.held",
+                            forge.neo.card.CardText.nameOf(culprit.getView())), false);
+        }
+    }
+
+    /**
+     * El boton "Auto" cuando el pago automatico de Forge sacrificaria otra carta
+     * tuya (Discord, 25-10-2026). Se pregunta, con "Pagar a mano" marcado: una
+     * criatura sacrificada no vuelve (principio 6).
+     *
+     * @return true si nos hemos quedado el clic para preguntar
+     */
+    private boolean confirmAutoSacrifice() {
+        if (!payingMana || table == null) {
+            return false;
+        }
+        final forge.game.card.Card culprit =
+                AutoPaySacrifice.culprit(pendingInput(getGameController()));
+        if (culprit == null) {
+            return false;
+        }
+        final String name = forge.neo.card.CardText.nameOf(culprit.getView());
+        final AtomicBoolean answered = new AtomicBoolean();
+        final ConfirmDialog dialog = new ConfirmDialog(
+                NeoText.get("mana.autoSac.title"),
+                NeoText.get("mana.autoSac.detail", name),
+                List.of(NeoText.get("mana.autoSac.manual"), NeoText.get("mana.autoSac.go")),
+                0,
+                index -> {
+                    if (!answered.compareAndSet(false, true)) {
+                        return;
+                    }
+                    table.getOverlay().hide();
+                    if (index != null && index == 1) {
+                        didDetail("pressed Auto, may sacrifice with " + name);
+                        respondLater(() -> getGameController().selectButtonOk());
+                    }
+                });
+        dialog.getStyleClass().add("phase-ask");
+        table.getOverlay().show(dialog);
+        table.requestLayout();
+        return true;
+    }
+
+    /** El pago en el que el pago automatico se ha parado (sacrificaria algo): no se reintenta. */
+    private volatile Object autoPayHeldFor;
+    /** Los botones del pago que se iba a pagar solo, por si hay que pararse. */
+    private volatile Object[] heldButtons;
+
+    /** Generacion de la pulsacion de "Auto" que esta en el aire. */
+    private final AtomicInteger autoPayGen = new AtomicInteger();
+
+    /** Ajuste: pagar el mana solo. Encendido por defecto, como en Arena. */
+    private volatile boolean autoPayMana = true;
+
+    public void setAutoPayMana(final boolean on) {
+        this.autoPayMana = on;
+        if (!on) {
+            // Si el jugador apaga el pago automatico a mitad de un pago, los
+            // resaltados le hacen falta YA: es el quien va a tocar las tierras.
+            setActionableScans(true);
+        }
+    }
+
+    private volatile List<CardView> selectables = List.of();
+
+    /**
+     * Lo que marca la pregunta que espera: las cartas elegibles con su minimo
+     * y maximo, los jugadores y entradas del stack que acepta, y lo ya elegido.
+     *
+     * <p>Hasta Forge #12259 (17-10-2026) eran tres llamadas —{@code setSelectables}
+     * al abrir la eleccion, {@code setHighlighted} en cada marca y
+     * {@code clearSelectables} al cerrarla— y ahora llega el estado ENTERO en cada
+     * cambio. Asi que lo de "al abrir" (abrir la zona, reiniciar el piloto) se
+     * hace solo cuando cambian las cartas elegibles; lo de "al cerrar", cuando se
+     * quedan en nada; y lo de "al marcar", con la diferencia entre lo elegido antes
+     * y ahora. Es lo mismo que hace {@code CMatchUI.setSelection}.
+     */
+    @Override
+    public void setSelection(final forge.gamemodes.match.Selection selection) {
+        hostReplies.incrementAndGet();
+        final forge.gamemodes.match.Selection prev = getSelection();
+        super.setSelection(selection);
+        actionableChanged();
+        if (!prev.cards().equals(selection.cards())) {
+            if (selection.cards().isEmpty()) {
+                selectionEnded();
+            } else {
+                selectionStarted(selection.cards(), selection.min(), selection.max());
+            }
+        } else if (!selection.cards().isEmpty() && pickedOffBoard(prev, selection)) {
+            // ELECCION DE VARIOS FUERA DE LA MESA (Nethroi, Discord
+            // 10-11-2026: "can't pick multiple creatures to return from
+            // graveyard"). Clicar una carta en el visor de zona lo cierra
+            // (TableScreen.pickedInZone), y la eleccion seguia abierta sin que
+            // nada lo dijera: para el segundo habia que volver a abrir el
+            // cementerio a mano. Si lo que acaba de cambiar es de una zona
+            // escondida y aun se puede elegir, se vuelve a abrir, con lo ya
+            // elegido marcado (ZoneViewer.markPicked).
+            if (showSelectionZone(selection.cards())) {
+                selectionZoneShown.set(true);
+            }
+        }
+        // La marca es la respuesta del motor al clic del piloto. Ver pilotClicks.
+        if (!pilotClicks.isEmpty()) {
+            for (final forge.trackable.TrackableObject e : com.google.common.collect.Sets.symmetricDifference(
+                    new java.util.HashSet<>(prev.chosen()), new java.util.HashSet<>(selection.chosen()))) {
+                if (e instanceof CardView cv) {
+                    pilotClicks.remove(cv.getId());
+                }
+            }
+        }
+        // El defensor elegido, el atacante sobre el que asignas bloqueos, las
+        // cartas ya escogidas: sin pintarlo, el combate se juega a ciegas. Las
+        // entradas del STACK se guardan arriba como las demas pero no se pintan:
+        // nuestro stack apunta con el dialogo de siempre (canPickStackTargets es false).
+        if (!prev.equals(selection)) {
+            refreshHighlights();
+        }
+        // ...salvo de INVITADO EN RED: ahi el anfitrion pregunta por su
+        // ProtocolGuiGame, cuyo canPickStackTargets es true SIEMPRE, y espera
+        // que se toque la entrada en el stack (InputSelectStackItems). Nuestro
+        // stack no se toca para eso, asi que el invitado no podia elegir que
+        // contrarrestar (Discord, 23-10-2026). Se le pregunta con el dialogo de
+        // siempre y la respuesta va como el toque: pickStackItem.
+        if (interactive() && selection.offersStackItems() && !prev.offersStackItems()) {
+            askStackTargets(selection);
+        }
+        // Y los botones de esta pregunta, si llegaron antes (ver earlyButtons).
+        final Object asked = pendingInput(getGameController());
+        selectionFor = asked;
+        if (asked != null) {
+            flushEarlyButtons(asked);
+        } else if (isNetGuest()) {
+            final Object[] parked = earlyButtons;
+            if (parked != null && parked[0] instanceof GuestAsk) {
+                flushEarlyButtons(parked[0]);
+            }
+        }
+    }
+
+    /**
+     * Elegir en el dialogo las entradas del stack que ofrece la pregunta, y
+     * mandarlas como si se hubieran tocado. Ver {@link #setSelection}.
+     *
+     * <p>En su propio hilo: el dialogo espera al jugador, y {@code setSelection}
+     * llega del hilo de la red. Los botones de la barra siguen valiendo (el motor
+     * los manda con la pregunta), pero aqui el dialogo ya contesta: elegir el
+     * maximo cierra la pregunta solo, y con menos se pulsa OK; vacio, Cancelar.
+     */
+    private void askStackTargets(final forge.gamemodes.match.Selection sel) {
+        final List<StackItemView> offered = new ArrayList<>();
+        for (final forge.trackable.TrackableObject t : sel.targets()) {
+            if (t instanceof StackItemView si && !sel.chosen().contains(si)) {
+                offered.add(si);
+            }
+        }
+        if (offered.isEmpty()) {
+            return;
+        }
+        final int max = Math.max(1, Math.min(sel.max() > 0 ? sel.max() : 1, offered.size()));
+        final String title = lastPrompt == null || lastPrompt.isBlank() ? NeoText.get("pick.ask.title") : lastPrompt;
+        final Thread t = new Thread(() -> {
+            final List<StackItemView> picked = askChoice(title, offered, 0, max, null);
+            if (picked.isEmpty()) {
+                // Si tambien vale una carta de la mesa (Chaoslace: un hechizo O
+                // un permanente), cerrar el dialogo es "elijo en la mesa", no
+                // cancelar el hechizo.
+                if (!sel.cards().isEmpty()) {
+                    return;
+                }
+                respondLater(() -> getGameController().selectButtonCancel());
+                // Si el objetivo es obligatorio, Cancelar no hace nada y la
+                // pregunta sigue ahi: se vuelve a ofrecer, o no habria forma
+                // de contestarla.
+                forge.util.ThreadUtil.delay(600, () -> {
+                    final forge.gamemodes.match.Selection now = getSelection();
+                    if (now.offersStackItems() && now.targets().equals(sel.targets())) {
+                        askStackTargets(now);
+                    }
+                });
+                return;
+            }
+            for (final StackItemView si : picked) {
+                respondLater(() -> pickStackItem(si));
+            }
+            if (picked.size() < max) {
+                respondLater(() -> getGameController().selectButtonOk());
+            }
+        }, "neo-stack-targets");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** Si entre las dos lo elegido ha cambiado en una carta de fuera de la mesa (cementerio, exilio...). */
+    private static boolean pickedOffBoard(final forge.gamemodes.match.Selection prev,
+                                          final forge.gamemodes.match.Selection now) {
+        for (final forge.trackable.TrackableObject e : com.google.common.collect.Sets.symmetricDifference(
+                new java.util.HashSet<>(prev.chosen()), new java.util.HashSet<>(now.chosen()))) {
+            if (e instanceof CardView cv) {
+                final ZoneType z = cv.getZone();
+                if (z != null && z != ZoneType.Battlefield && z != ZoneType.Hand && z != ZoneType.Stack) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Empieza una eleccion de cartas (lo que antes era {@code setSelectables}). */
+    private void selectionStarted(final List<CardView> cards, final int min, final int max) {
+        final List<CardView> list = new ArrayList<>(cards);
+        selectables = list;
+        noPickWarned.set(false);
+        pilotClicks.clear();
+        trace("setSelection: %d elegibles (min %d, max %d)", list.size(), min, max);
+        // Un maximo de 0 es "solo resaltar": quien llama ensenya lo suyo.
+        if (max > 0 && showSelectionZone(list)) {
+            selectionZoneShown.set(true);
+        }
+    }
+
+    /** Se acaba la eleccion de cartas (lo que antes era {@code clearSelectables}). */
+    private void selectionEnded() {
+        selectables = List.of();
+        noPickWarned.set(false);
+        pilotClicks.clear();
+        // Se cierra solo lo que abrio la eleccion: si el jugador tenia abierta
+        // una zona por su cuenta, no se la quitamos de delante.
+        if (selectionZoneShown.getAndSet(false) && interactive()) {
+            final UiDispatcher ui = uiDispatcher();
+            if (ui != null) {
+                ui.runLater(() -> table.hideZoneViewer());
+            }
+        }
+    }
+
+    private void refreshHighlights() {
+        if (!interactive()) {
+            return;
+        }
+        final UiDispatcher ui = uiDispatcher();
+        if (ui != null) {
+            ui.runLater(() -> {
+                table.setHighlighted(this::isHighlightedEntity);
+                // Y el "llevas N de M", que cambia con cada click. Sin
+                // repintarlo aqui solo se actualizaria cuando el motor mandara
+                // un prompt nuevo, y durante una eleccion no manda ninguno.
+                final TableBinder b = binder;
+                if (b != null) {
+                    // El texto YA PREPARADO (traducido, reordenado, con el
+                    // "Chooser:" explicado), no el crudo del motor: si no, al
+                    // marcar algo volvia a salir el ingles a pelo.
+                    final String prepared = lastPreparedPrompt;
+                    b.setPrompt((isRoutinePriorityPrompt(lastPrompt) ? routinePrompt()
+                            : prepared != null ? prepared : lastPrompt) + pickedSuffix());
+                }
+            });
+        }
+    }
+
+    /**
+     * El aviso roto que el motor manda al terminar de declarar atacantes.
+     *
+     * <p>Es un fallo del motor, no de una carta ni nuestro.
+     * {@code InputAttack.onOk()} — el boton con el que cierras el ataque —
+     * llama a {@code setCurrentDefender(null)} "para quitar los resaltados", y
+     * esa funcion termina SIEMPRE llamando a {@code updateMessage()}, que
+     * compone la frase asi:
+     *
+     * <pre>
+     *   lblSelectAttackCreatures + " " + currentDefender + " " + lblSelectAttackTarget
+     * </pre>
+     *
+     * <p>Con el defensor ya a {@code null}, o sea que sale <i>"Selecciona las
+     * criaturas para atacar a <b>null</b> o selecciona al jugador/planeswalker
+     * que quieres atacar"</i> — justo cuando acabas de terminar de declararlos
+     * y ya no hay nada que elegir. Pasa en los diez idiomas y le pasa igual a
+     * las dos GUIs oficiales.
+     *
+     * <p>Por la regla de oro no se toca alli: se reconoce y se tira, y el
+     * siguiente aviso de verdad llega solo. Se reconoce con
+     * {@link forge.neo.EnginePhrase} para que valga venga en el idioma que venga — en
+     * una partida en red ese texto lo escribe el anfitrion, en SU idioma — y
+     * ademas se exige el {@code " null "} literal, que es lo que de verdad
+     * distingue el aviso roto del bueno: el bueno lleva ahi el nombre del
+     * defensor.
+     *
+     * <p>(Si algun dia un jugador se llama exactamente "null", su aviso bueno
+     * se tirara tambien. Se asume.)
+     */
+    private boolean isStaleAttackPrompt(final String message) {
+        return message != null
+                && message.contains(" null ")
+                && forge.neo.EnginePhrase.contains(message, "lblSelectAttackCreatures");
+    }
+
+    /**
+     * Pone <b>delante</b> lo que el motor te esta pidiendo AHORA.
+     *
+     * <p>Cuando hay que elegir objetivo, {@code InputSelectTargets} compone el
+     * aviso siempre igual: primero la carta y el texto de la habilidad,
+     * despues una linea en blanco, y al final la instruccion concreta
+     * ({@code TgtPrompt$} del script). Con una carta de varios modos eso sale
+     * al reves de como hace falta.
+     *
+     * <p>El caso que lo destapo es Shadrix Silverquill: eliges DOS modos y
+     * cada uno tiene que apuntar a un jugador distinto. El aviso quedaba asi:
+     *
+     * <pre>
+     *   Shadrix (203) - - El jugador objetivo crea una ficha...  - El jugador
+     *                     objetivo roba una carta y pierde 1 vida.
+     *
+     *   Select target player to create a 2/1 ... inkling ...
+     * </pre>
+     *
+     * O sea: arriba y en castellano, <b>los dos</b> modos que ya elegiste — que
+     * no distinguen nada — y abajo del todo, la unica linea que dice cual te
+     * esta pidiendo. Encima esa linea va en <b>ingles</b>, porque
+     * {@code TgtPrompt$} es texto suelto del script de la carta y Forge no lo
+     * traduce en ningun idioma. Reportado jugando: <i>"no me queda claro que
+     * habilidad va a ir a quien"</i>.
+     *
+     * <p>Aqui se le da la vuelta: la instruccion primero, el recordatorio
+     * detras. Lo que cambia entre el primer objetivo y el segundo es
+     * justamente esa linea, asi que ponerla arriba es lo que hace que se
+     * distingan. Si el aviso no tiene esa forma se devuelve tal cual: no
+     * inventamos nada sobre un texto que no reconocemos.
+     */
+    static String frontLoadInstruction(final String message) {
+        if (message == null || message.isEmpty()) {
+            return message;
+        }
+        final java.util.regex.Matcher m =
+                BLANK_LINE.matcher(message);
+        if (!m.find()) {
+            return message;
+        }
+        final String recap = message.substring(0, m.start()).trim();
+        final String instruction = message.substring(m.end()).trim();
+        if (recap.isEmpty() || instruction.isEmpty()) {
+            return message;
+        }
+        return instruction + System.lineSeparator() + recap;
+    }
+
+    private static final java.util.regex.Pattern BLANK_LINE =
+            java.util.regex.Pattern.compile("\\R[ \\t]*\\R");
+
+    /**
+     * "Elegidas 2 de 3", cuando hay una eleccion de varias cartas en curso.
+     *
+     * <p>El motor lleva la cuenta y la publica ({@code countPickedSelectables},
+     * {@code getSelectionMin/Max}); lo que faltaba era ensenyarla. Con un
+     * "sacrifica tres criaturas" no habia forma de saber por cual ibas, y el
+     * marco dorado de la carta dice <i>cual</i> pero no <i>cuantas te quedan</i>.
+     *
+     * <p>Solo con mas de una: para elegir UNA sola, la eleccion se cierra en
+     * cuanto clicas y el contador seria un parpadeo.
+     */
+    private String pickedSuffix() {
+        if (!isSelecting()) {
+            return "";
+        }
+        final int need = getSelectionMin() > 0 ? getSelectionMin() : getSelectionMax();
+        if (need <= 1) {
+            return "";
+        }
+        return System.lineSeparator()
+                + NeoText.get("prompt.picked", pickedSoFar(), need);
+    }
+
+    /**
+     * Lo elegido hasta ahora en la eleccion en curso: las cartas
+     * ({@code countPickedSelectables}) <b>y los jugadores</b>.
+     *
+     * <p>{@code countPickedSelectables} solo cuenta cartas, y hay elecciones
+     * que mezclan las dos cosas: proliferar elige "permanentes y/o jugadores"
+     * ({@code InputSelectEntitiesFromList}), y un jugador elegido solo queda
+     * marcado ({@code setHighlighted}). Reportado en Discord el 10-10-2026,
+     * con Contagion Clasp: eliges al rival y sale "Elegidas 0 de 2" y, al dar
+     * a OK, el aviso de que no has elegido nada.
+     */
+    private int pickedSoFar() {
+        int n = countPickedSelectables();
+        final GameView game = getGameView();
+        if (game != null && game.getPlayers() != null && getSelectionMax() > 0) {
+            for (final PlayerView p : game.getPlayers()) {
+                if (isHighlighted(p)) {
+                    n++;
+                }
+            }
+        }
+        return n;
+    }
+
+    private boolean isHighlightedEntity(final Object entity) {
+        return entity instanceof GameEntityView view && isHighlighted(view);
+    }
+
+    /**
+     * El motor esta esperando que cliques un JUGADOR, no una carta.
+     *
+     * <p>El caso claro: con tres o mas jugadores, quien gana el sorteo inicial
+     * dice quien empieza, y el motor lo pide con "(Haz clic en el retrato)"
+     * sin marcar ni una carta como elegible.
+     *
+     * <p>Se mira {@code getSelectionMax()} y no {@code isSelecting()}, que es
+     * la trampa de siempre: {@code isSelecting()} pregunta si hay CARTAS
+     * elegibles, y aqui lo que se elige es un jugador.
+     *
+     * <p>Lo usa el piloto de pruebas ({@code --autopilot}): sin esto se queda
+     * dandole al OK, que ahi no hace nada, y la partida no arranca <b>la mitad
+     * de las veces</b> — segun caiga la moneda.
+     */
+    /**
+     * Los botones de jugador de la barra, si el motor espera un jugador.
+     * Ver {@link PlayerPick}: aqui solo se les pone nombre y se cablea el clic.
+     */
+    private List<forge.neo.ui.ActionBar.PlayerChoice> playerChoices() {
+        final List<forge.neo.ui.ActionBar.PlayerChoice> out = new ArrayList<>();
+        for (final PlayerPick.Choice c : PlayerPick.pending(getGameController())) {
+            final PlayerView pv = c.player();
+            out.add(new forge.neo.ui.ActionBar.PlayerChoice(PlayerName.of(pv), c.picked(),
+                    () -> pickPlayer(pv)));
+        }
+        return out;
+    }
+
+    /**
+     * El clic en uno de esos botones: lo mismo que clicar su retrato, pero
+     * solo si la pregunta sigue siendo esa. El boton se pinto con un aviso
+     * del motor y se clica despues, y un {@code selectPlayer} contra otra
+     * pregunta (un objetivo, a quien atacas) no es inofensivo.
+     */
+    private void pickPlayer(final PlayerView player) {
+        if (!interactive() || player == null || finished.get()) {
+            return;
+        }
+        respondLater(() -> {
+            for (final PlayerPick.Choice c : PlayerPick.pending(getGameController())) {
+                if (c.player().equals(player)) {
+                    getGameController().selectPlayer(player, null);
+                    return;
+                }
+            }
+        });
+    }
+
+    public boolean isWaitingForPlayerPick() {
+        return getSelectionMax() > 0
+                && countPickedSelectables() < getSelectionMin()
+                && selectables.isEmpty();
+    }
+
+    /**
+     * Las cartas que el piloto {@code AUTO_PLAY} ha clicado en la eleccion en
+     * curso y que el motor aun no ha marcado ({@code setHighlighted}), con la
+     * hora del clic. Mientras haya una, el piloto no clica otra.
+     *
+     * <p>Fue {@code lobbycheck} en rojo a ratos (12-10-2026): el invitado en
+     * red tenia que descartar dos en la limpieza, clico tres veces y la
+     * partida se quedo esperando para siempre. El piloto clica en cada
+     * {@code updateButtons} con OK apagado, y a veces llegan dos antes que la
+     * marca del primer clic — el "esperando al rival" que el invitado se pinta
+     * solo 250 ms despues de cada {@code awaitNextInput}, y que el anfitrion no
+     * le cancela por el cable. El segundo clic caia en la MISMA carta y la
+     * desmarcaba. Y el anfitrion atiende cada mensaje del invitado en un hilo
+     * nuevo ({@code GameServerHandler} → {@code invokeInBackgroundThread}), asi
+     * que los dos clics se cruzaban alla, y las marcas llegaban al reves: el
+     * invitado creia llevar las dos y el anfitrion tenia una.
+     *
+     * <p>Una a la vez, como un humano que mira si su clic ha cogido. Se olvidan
+     * con la marca de esa carta, con una eleccion nueva, al volver un clic
+     * contra el motor de este proceso (es sincrono) y, por si un clic se pierde,
+     * a los {@link #PILOT_CLICK_WAIT_MS}.
+     */
+    private final Map<Integer, Long> pilotClicks = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Cuanto se espera la marca de un clic del piloto antes de darlo por perdido. */
+    private static final long PILOT_CLICK_WAIT_MS = 5000;
+
+    /** Si hay un clic del piloto sin marcar. Ver {@link #pilotClicks}. */
+    private boolean pilotClickInFlight() {
+        final long now = System.currentTimeMillis();
+        pilotClicks.values().removeIf(t -> now - t >= PILOT_CLICK_WAIT_MS);
+        return !pilotClicks.isEmpty();
+    }
+
+    /** Primera carta elegible que aun no se ha elegido. */
+    private CardView nextUnpickedSelectable() {
+        if (countPickedSelectables() >= getSelectionMin()) {
+            return null;
+        }
+        for (final CardView cv : selectables) {
+            if (!isHighlighted(cv)) {
+                return cv;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Manda una respuesta al motor desde el hilo de interfaz.
+     *
+     * <p>Es exactamente lo que hace Swing: el click del boton se procesa en el
+     * EDT, y desde ahi se libera el latch que tiene bloqueado al motor. Hacerlo
+     * desde un hilo cualquiera funciona, pero va mucho mas lento por contencion.
+     * En la fase 4 quien llame a esto sera el manejador del click del usuario.
+     */
+    /** Cuantas respuestas han reventado en el motor en esta partida (para el registro). */
+    private final AtomicInteger droppedResponses = new AtomicInteger();
+
+    /** Cuantas veces ha contestado el motor (botones o seleccion): ver {@link #respondInTwoSteps}. */
+    private final java.util.concurrent.atomic.AtomicInteger hostReplies = new java.util.concurrent.atomic.AtomicInteger();
+
+    /**
+     * DOS ORDENES SEGUIDAS AL MOTOR (elegir a quien atacas y luego la criatura;
+     * el atacante y luego el bloqueador). En local van una detras de otra, como
+     * siempre.
+     *
+     * <p><b>Como invitado en red, la segunda espera a que el anfitrion conteste
+     * a la primera</b> (Discord, 11-11-2026, con los registros de los dos: cartas
+     * grises y flechas de ataque que no salian al declarar ataques en red). El
+     * anfitrion atiende cada orden del invitado en un hilo de fondo
+     * ({@code GameProtocolHandler} → {@code FThreads.invokeInBackgroundThread}),
+     * asi que dos mandadas con 1 ms de diferencia corrian A LA VEZ: las dos
+     * sincronizaban la mesa con el invitado al mismo tiempo, el registro de "lo
+     * que ya tiene" reventaba ({@code ConcurrentModificationException} en
+     * {@code DeltaSyncManager.collectDeltas}, 46 veces en una partida) y el
+     * siguiente envio le mandaba la partida entera como nueva: cartas en gris
+     * mientras se rellenaban, sumas de control que no cuadraban y la partida
+     * entera pedida otra vez. Y {@code stillWanted} (el brillo del defensor) se
+     * miraba antes de que el anfitrion lo hubiera puesto, asi que a veces la
+     * segunda ni se mandaba: la flecha que no salia.
+     */
+    private void respondInTwoSteps(final Runnable first, final java.util.function.BooleanSupplier stillWanted,
+                                   final Runnable second) {
+        if (!isNetGuest()) {
+            respondLater(() -> {
+                first.run();
+                if (stillWanted.getAsBoolean()) {
+                    second.run();
+                }
+            });
+            return;
+        }
+        respondLater(() -> {
+            final int before = hostReplies.get();
+            first.run();
+            final Thread wait = new Thread(() -> {
+                final long until = System.currentTimeMillis() + 1500;
+                try {
+                    while (hostReplies.get() == before && System.currentTimeMillis() < until) {
+                        Thread.sleep(20);
+                    }
+                    // Lo que el anfitrion manda detras (la seleccion, el combate)
+                    // llega en el mismo instante: un respiro para que entre todo.
+                    Thread.sleep(120);
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                respondLater(() -> {
+                    if (stillWanted.getAsBoolean()) {
+                        second.run();
+                    }
+                });
+            }, "neo-two-steps");
+            wait.setDaemon(true);
+            wait.start();
+        });
+    }
+
+    private void respondLater(final Runnable action) {
+        decisions.incrementAndGet();
+        final Runnable safe = () -> {
+            try {
+                action.run();
+            } catch (final Exception e) {
+                // El motor puede haber avanzado ya; no es fatal.
+                trace("respuesta descartada: %s", e.getClass().getSimpleName());
+                // Pero SIEMPRE al registro: un clic que revienta aqui se pierde
+                // sin que se vea nada, y sin esta linea tampoco quedaba en el
+                // neo.log que nos manda quien lo reporta (Discord, 14-10-2026:
+                // "no puedo activar nada de la mesa"). Con la traza las primeras
+                // veces, para no llenarlo si se repite.
+                System.err.println("[neo] respuesta descartada: " + e);
+                if (droppedResponses.incrementAndGet() <= 5) {
+                    e.printStackTrace();
+                }
+            }
+        };
+        final UiDispatcher ui = uiDispatcher();
+        if (ui != null) {
+            ui.runLater(safe);
+        } else {
+            try {
+                responder.execute(safe);
+            } catch (final Exception ignored) {
+                // executor cerrado
+            }
+        }
+    }
+
+    /** Mientras corre una respuesta del piloto {@code AUTO_PLAY}. Ver pilotRespond. */
+    private volatile boolean pilotAnswering;
+
+    /**
+     * Una respuesta del piloto {@code AUTO_PLAY}: {@link #respondLater}, salvo
+     * que el motor la pida <b>desde dentro</b> de otra respuesta del piloto, en
+     * el hilo de JavaFX. Esa va detras, y solo si la pregunta sigue en pie.
+     *
+     * <p>Fue un {@code StackOverflowError} real (12-10-2026), con "Reportar un
+     * fallo" en pantalla, solo con ventana ({@code ui --live --auto}, a cuatro y
+     * con Planechase). {@code FxUiDispatcher.runLater} ejecuta en linea si ya se
+     * esta en el hilo de JavaFX, e {@code InputAttack.onOk} pide los botones
+     * ({@code setCurrentDefender(null) → updatePrompt → updateButtons}, con OK
+     * encendido) <b>antes</b> de su {@code stop()}: el OK del piloto volvia a
+     * pulsar OK sobre el mismo ataque sin terminar, que volvia a pedir los
+     * botones... hasta reventar la pila dentro de
+     * {@code CombatUtil.validateAttackers}. Sin ventana no pasa:
+     * {@code ConsoleUiDispatcher} siempre encola, y aqui no cambia nada.
+     *
+     * <p>Detras y no descartada, porque a veces hace falta: el ataque obligado
+     * ({@code answerInvalidAttack}) ataca con todo desde dentro de una
+     * respuesta, y el OK que lo cierra sale de los botones que pide
+     * {@code alphaStrike}. Y solo con la pregunta de antes, porque la de
+     * {@code onOk} llega con la suya a punto de cerrarse: suelta, caeria en la
+     * siguiente, y un {@code selectCard} sobre la prioridad juega la carta.
+     * Lo que no viene de dentro de una respuesta sigue en linea, como siempre.
+     */
+    private void pilotRespond(final Runnable action) {
+        final IGameController gc = getGameController();
+        final Runnable marked = () -> {
+            final boolean outer = pilotAnswering;
+            pilotAnswering = true;
+            try {
+                action.run();
+            } finally {
+                pilotAnswering = outer;
+            }
+        };
+        final UiDispatcher ui = uiDispatcher();
+        if (!pilotAnswering || !(ui instanceof forge.neo.platform.FxUiDispatcher)
+                || !ui.isUiThread()) {
+            respondLater(marked);
+            return;
+        }
+        final Object asked = pendingInput(gc);
+        decisions.incrementAndGet();
+        javafx.application.Platform.runLater(() -> {
+            if (pendingInput(gc) != asked) {
+                trace("piloto: la pregunta ya no es la misma, respuesta descartada");
+                return;
+            }
+            try {
+                marked.run();
+            } catch (final Exception e) {
+                trace("respuesta descartada: %s", e.getClass().getSimpleName());
+            }
+        });
+    }
+
+    /** La pregunta que el motor tiene puesta ahora mismo, o null. */
+    private static Object pendingInput(final IGameController gc) {
+        return gc instanceof forge.player.PlayerControllerHuman human
+                ? human.getInputQueue().getInput() : null;
+    }
+
+    private static UiDispatcher uiDispatcher() {
+        final Object base = GuiBase.getInterface();
+        return base instanceof NeoGuiBase ? ((NeoGuiBase) base).getDispatcher() : null;
+    }
+
+    // ===============================================================
+    // Modo humano (fase 4)
+    // ===============================================================
+
+    /**
+     * Pide algo al usuario y BLOQUEA el hilo del motor hasta que conteste.
+     *
+     * <p>Este es el primitivo sobre el que se apoya toda la interaccion. El
+     * motor llama a {@code getChoices(...)} desde su hilo y espera un valor de
+     * vuelta; nosotros levantamos el dialogo en el hilo de JavaFX y dejamos al
+     * motor parado en el {@code get()}.
+     *
+     * <p>NUNCA llamarlo desde el hilo de JavaFX: se quedaria esperandose a si
+     * mismo. Por eso la comprobacion del principio.
+     *
+     * @param shower recibe el "callback de respuesta"; se ejecuta en el hilo de UI
+     */
+    private <T> T askUser(final Consumer<Consumer<T>> shower, final T fallback) {
+        final UiDispatcher ui = uiDispatcher();
+        if (ui == null || table == null) {
+            return fallback;
+        }
+        if (ui.isUiThread()) {
+            return askOnUiThread(shower, fallback);
+        }
+
+        final CompletableFuture<T> answer = new CompletableFuture<>();
+        ui.runLater(() -> {
+            try {
+                // Que dialogo se ha puesto no lo sabe este metodo: lo pinta el
+                // shower, que es distinto en cada pregunta. Se le pregunta a la
+                // capa DESPUES, y esa es la pieza que hace que la mesa pueda
+                // reponerlo si algo se lo lleva por delante. Ver
+                // TableScreen.markEngineDialog.
+                final javafx.scene.layout.Region[] shown = new javafx.scene.layout.Region[1];
+                // Lo que habia ANTES, porque no todas las preguntas del motor
+                // se pintan en esta capa: el aviso de "esto te acaba de pasar"
+                // usa la banda de arriba. Si la capa no ha cambiado, esto no es
+                // su dialogo y marcarlo seria adoptar el de otro — y al
+                // contestar, borrarle la guardia.
+                final javafx.scene.layout.Region before = table.getOverlay().getContent();
+                shower.accept(value -> {
+                    if (shown[0] != null) {
+                        table.clearEngineDialog(shown[0]);
+                    }
+                    table.getOverlay().hide();
+                    answer.complete(value);
+                });
+                // Si ya ha contestado aqui mismo (un dialogo que se resuelve
+                // solo), no hay nada pendiente que vigilar.
+                final javafx.scene.layout.Region after = table.getOverlay().getContent();
+                if (!answer.isDone() && after != null && after != before) {
+                    shown[0] = after;
+                    table.markEngineDialog(after);
+                }
+            } catch (final Exception e) {
+                e.printStackTrace();
+                answer.complete(fallback);
+            }
+        });
+
+        try {
+            return answer.get();
+        } catch (final Exception e) {
+            Thread.currentThread().interrupt();
+            return fallback;
+        }
+    }
+
+    /**
+     * La misma pregunta, pero hecha DESDE el hilo de interfaz.
+     *
+     * <p>Pasa mas de lo que parece. Un click del jugador se atiende en el hilo
+     * de JavaFX y desde ahi se llama al motor ({@code selectCard}); si esa carta
+     * tiene varias habilidades, el motor devuelve la llamada a
+     * {@code getAbilityToPlay} <b>sin cambiar de hilo</b>. O sea que acabamos
+     * teniendo que ensenyar un dialogo y esperar respuesta estando ya en el hilo
+     * que tiene que pintarlo.
+     *
+     * <p>Bloquearlo con un {@code Future} seria un cuelgue seguro. Antes se
+     * devolvia el valor por defecto, que es peor de lo que parece: la decision
+     * del jugador se perdia EN SILENCIO. Sintoma real: clicar una tierra con dos
+     * habilidades de mana, o un equipamiento con su "Equipar", y que no pasara
+     * absolutamente nada.
+     *
+     * <p>La solucion es la misma que usa Swing con sus dialogos modales: un
+     * <b>bucle de eventos anidado</b>. {@code Platform.enterNestedEventLoop}
+     * detiene esta pila de llamadas pero SIGUE atendiendo eventos, asi que el
+     * dialogo se pinta y responde; cuando el jugador contesta,
+     * {@code exitNestedEventLoop} devuelve el valor justo aqui y el motor
+     * continua como si nada.
+     */
+    private <T> T askOnUiThread(final Consumer<Consumer<T>> shower, final T fallback) {
+        final Object key = new Object();
+        final java.util.concurrent.atomic.AtomicBoolean answered =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        final List<T> box = new ArrayList<>(1);
+        box.add(fallback);
+
+        final javafx.scene.layout.Region[] shown = new javafx.scene.layout.Region[1];
+        // Ver el comentario gemelo en askUser: solo es "su" dialogo si la capa
+        // ha cambiado al pintarlo.
+        final javafx.scene.layout.Region before = table.getOverlay().getContent();
+        try {
+            shower.accept(value -> {
+                // Contestar dos veces reventaria el bucle anidado.
+                if (!answered.compareAndSet(false, true)) {
+                    return;
+                }
+                if (shown[0] != null) {
+                    table.clearEngineDialog(shown[0]);
+                }
+                table.getOverlay().hide();
+                box.set(0, value);
+                javafx.application.Platform.exitNestedEventLoop(key, null);
+            });
+            final javafx.scene.layout.Region after = table.getOverlay().getContent();
+            if (!answered.get() && after != null && after != before) {
+                shown[0] = after;
+                table.markEngineDialog(after);
+            }
+        } catch (final Exception e) {
+            e.printStackTrace();
+            return fallback;
+        }
+
+        if (answered.get()) {
+            // Ha contestado sin llegar a pintarse (un dialogo que se resuelve
+            // solo): no hay bucle que arrancar.
+            return box.get(0);
+        }
+
+        try {
+            javafx.application.Platform.enterNestedEventLoop(key);
+        } catch (final RuntimeException e) {
+            System.err.println("[neo] no se ha podido abrir el dialogo anidado: " + e);
+            return fallback;
+        }
+        return box.get(0);
+    }
+
+    /**
+     * "Elige una de las dos pilas", con su dialogo de verdad.
+     *
+     * <p>El motor manda esta pregunta como una lista de cartas normal, con las
+     * dos pilas metidas dentro como {@code CardView} falsos. Ver
+     * {@link forge.neo.ui.PileDialog}, que explica por que eso no se puede
+     * ensenyar tal cual.
+     *
+     * <p>Devuelve la <b>etiqueta</b> elegida, que es lo que
+     * {@code chooseCardsPile} compara. Si algo va mal devuelve null y se cae al
+     * dialogo de siempre: mas vale feo que colgado.
+     */
+    @SuppressWarnings("unchecked")
+    private <T> List<T> askPile(final String message, final List<T> choices) {
+        final List<CardView> cards = new ArrayList<>();
+        for (final T o : choices) {
+            if (!(o instanceof CardView)) {
+                return null;
+            }
+            cards.add((CardView) o);
+        }
+        final CardView picked = askUser(reply -> {
+            final forge.neo.ui.PileDialog dialog = new forge.neo.ui.PileDialog(
+                    message, cards, handCardWidth(), reply::accept);
+            table.getOverlay().show(dialog);
+        }, null);
+        if (picked == null) {
+            return null;
+        }
+        final List<T> out = new ArrayList<>();
+        out.add((T) picked);
+        return out;
+    }
+
+    /** Dialogo de "elige N de esta lista". Cubre casi todo el long tail. */
+    private <T> List<T> askChoice(final String title, final List<T> options,
+                                  final int min, final int max,
+                                  final FSerializableFunction<T, String> display) {
+        return askChoice(title, options, min, max, display, List.of());
+    }
+
+    /**
+     * El mismo, ensenyando ademas de que carta habla el disparo que pregunta.
+     *
+     * @param about vacio casi siempre; ver {@link TriggerSubject}
+     */
+    private <T> List<T> askChoice(final String title, final List<T> options,
+                                  final int min, final int max,
+                                  final FSerializableFunction<T, String> display,
+                                  final List<TriggerSubject.Subject> about) {
+        return askChoice(title, options, min, max, display, about, false);
+    }
+
+    /**
+     * @param ordered la respuesta es una SECUENCIA (ordenar disparos, cartas al
+     *                fondo de la biblioteca): cada opcion marcada lleva su numero
+     */
+    private <T> List<T> askChoice(final String title, final List<T> options,
+                                  final int min, final int max,
+                                  final FSerializableFunction<T, String> display,
+                                  final List<TriggerSubject.Subject> about,
+                                  final boolean ordered) {
+        return askChoice(title, options, min, max, display, about, ordered, null);
+    }
+
+    /** @param note una linea de ayuda bajo el titulo, o null (ver {@link #orderHint}) */
+    private <T> List<T> askChoice(final String title, final List<T> asked,
+                                  final int min, final int max,
+                                  final FSerializableFunction<T, String> display,
+                                  final List<TriggerSubject.Subject> about,
+                                  final boolean ordered, final String note) {
+        // En red, las cartas de ESTA partida: el invitado podia recibir la de la
+        // anterior con el mismo numero (ver GuestCards).
+        final List<T> options = forge.neo.net.GuestCards.fresh(asked, getGameView());
+        if (options == null || options.isEmpty()) {
+            return new ArrayList<>();
+        }
+        if (Boolean.getBoolean("neo.trace.choices")) {
+            System.out.println("[eleccion] " + title + " -> " + options);
+        }
+        // reveal() llega como getChoices(msg, -1, -1, items): no hay nada que
+        // elegir, solo enseñar una lista. Se pasa tal cual al dialogo, que sabe
+        // ponerse en modo solo-lectura.
+        final boolean reveal = min < 0 || max <= 0;
+        final int lo = reveal ? -1 : Math.max(0, Math.min(min, options.size()));
+        final int hi = reveal ? -1 : Math.max(lo, Math.min(max, options.size()));
+
+        // LA MACRO (MacroChoices): repitiendo, la misma pregunta con las mismas
+        // opciones se contesta como al grabar; grabando, se apunta.
+        final int macro = reveal ? 0 : macroMode();
+        final List<String> macroLabels = new ArrayList<>();
+        if (macro != 0) {
+            for (final T o : options) {
+                macroLabels.add(display == null ? defaultLabel(o) : display.apply(o));
+            }
+        }
+        if (macro == 2) {
+            final List<String> want = macroChoices.replay("choice", title, macroLabels);
+            final List<Integer> at = want == null ? null : MacroChoices.indicesOf(macroLabels, want);
+            if (at != null && at.size() >= lo && at.size() <= hi) {
+                final List<T> out = new ArrayList<>();
+                for (final int i : at) {
+                    out.add(options.get(i));
+                }
+                trace("macro: '%s' -> %s", title, want);
+                return out;
+            }
+        }
+
+        final List<T> picked = askUser(reply -> {
+            final ChoiceDialog<T> dialog = new ChoiceDialog<>(
+                    title, options, lo, hi,
+                    display == null ? NeoMatchUI::defaultLabel : display::apply,
+                    handCardWidth(), null, ordered, reply::accept);
+            javafx.scene.control.Label line = null;
+            if (note != null) {
+                line = new javafx.scene.control.Label(note);
+                line.getStyleClass().add("dialog-note");
+                line.setWrapText(true);
+                line.setMaxWidth(forge.neo.ui.UiScale.px(760));
+            }
+            final boolean cards = about != null && !about.isEmpty();
+            if (cards && line != null) {
+                // Las dos: la linea del disparo ("Damaged: Lisian") encima de
+                // las cartas de las que habla. Ver TriggerSubject.
+                final javafx.scene.layout.VBox both = new javafx.scene.layout.VBox(
+                        forge.neo.ui.UiScale.px(8), line, subjectRow(about));
+                dialog.setContext(both);
+            } else if (cards) {
+                dialog.setContext(subjectRow(about));
+            } else if (line != null) {
+                dialog.setContext(line);
+            }
+            table.getOverlay().show(dialog);
+        }, null);
+
+        final DetailLog detailLog = detail;
+        if (detailLog != null) {
+            final java.util.function.Function<T, String> label = o -> display == null
+                    ? defaultLabel(o) : display.apply(o);
+            final List<String> shown = new ArrayList<>();
+            for (final T o : options) {
+                shown.add(label.apply(o));
+            }
+            final List<String> chosen = new ArrayList<>();
+            if (picked != null) {
+                for (final T o : picked) {
+                    chosen.add(label.apply(o));
+                }
+            }
+            detailLog.asked(title + (reveal ? " (shown, nothing to pick)" : " (pick " + lo + "-" + hi + ")"),
+                    shown, picked == null ? null : chosen.isEmpty() ? "(none)" : String.join(" | ", chosen));
+        }
+        if (macro == 1 && picked != null) {
+            final List<String> chosenLabels = new ArrayList<>();
+            for (final T o : picked) {
+                chosenLabels.add(display == null ? defaultLabel(o) : display.apply(o));
+            }
+            macroChoices.record("choice", title, macroLabels, chosenLabels);
+        }
+        if (picked != null) {
+            return picked;
+        }
+        // Si algo fue mal, contestar lo minimo legal en vez de colgar la partida.
+        final List<T> safe = new ArrayList<>();
+        for (int i = 0; i < Math.max(0, lo); i++) {
+            safe.add(options.get(i));
+        }
+        return safe;
+    }
+
+    /**
+     * Las cartas de las que habla un disparo, con los nombres ya en el idioma
+     * de la partida. Se monta en el hilo de interfaz, como el resto del dialogo.
+     */
+    private forge.neo.ui.TriggerSubjectRow subjectRow(final List<TriggerSubject.Subject> about) {
+        final List<forge.neo.ui.TriggerSubjectRow.Entry> entries = new ArrayList<>();
+        for (final TriggerSubject.Subject s : about) {
+            final GameEntityView who = s.attacking();
+            final String attacking = who instanceof PlayerView p ? PlayerName.of(p)
+                    : who instanceof CardView c ? forge.neo.card.CardText.nameOf(c)
+                    : null;
+            entries.add(new forge.neo.ui.TriggerSubjectRow.Entry(
+                    s.card(), forge.neo.card.CardText.nameOf(s.card()), attacking));
+        }
+        return new forge.neo.ui.TriggerSubjectRow(entries, handCardWidth() * 0.7);
+    }
+
+    /**
+     * Herramienta de prueba: lanza un dialogo de opciones y devuelve lo elegido.
+     *
+     * <p>Existe para poder verificar el caso dificil — pedirle algo al jugador
+     * ESTANDO ya en el hilo de interfaz — sin tener que montar una partida y
+     * encontrar una carta con varias habilidades. La usa {@code --nested-test}.
+     */
+    public int selfTestAskOption() {
+        return askOption("Prueba", NeoText.get("choice.title"),
+                java.util.List.of("Primera", "Segunda"), 0);
+    }
+
+    /**
+     * Pregunta ensenyando la carta de la que viene, como hace Arena.
+     *
+     * <p>Es el camino por defecto de todas las preguntas de si/no y de modos:
+     * la carta a tamano de lectura y los botones grandes al lado, en el centro
+     * de la pantalla. Sin la carta delante, el jugador no sabe que le estan
+     * preguntando ni por que.
+     */
+    private int askCard(final CardView card, final String title, final String question,
+                        final List<String> options, final int defaultOption) {
+        if (options == null || options.isEmpty()) {
+            return defaultOption;
+        }
+        final Integer index = askUser(reply -> {
+            final CardPromptDialog dialog = new CardPromptDialog(
+                    card, title, question, options, defaultOption,
+                    table.zoomCardWidth() * 0.62, reply::accept);
+            table.getOverlay().show(dialog);
+        }, null);
+        askedDetail((card == null ? "" : "[" + DetailLog.card(card) + "] ") + question, options, index);
+        return index == null ? defaultOption : index;
+    }
+
+    /**
+     * Una pregunta de varios botones con la carta delante, para los arreglos
+     * con asiento que necesitan mas de un si o un no ({@link ExploreChoice}).
+     * Sin jugador delante devuelve {@code defaultOption}, como {@link #confirm}.
+     */
+    public int askWithCard(final CardView card, final String question,
+                           final List<String> options, final int defaultOption) {
+        if (interactive()) {
+            return askCard(card, null, question, options, defaultOption);
+        }
+        trace("askWithCard: %s -> %d", question, defaultOption);
+        return defaultOption;
+    }
+
+    /** Dialogo de botones. Devuelve el indice elegido. */
+    private int askOption(final String title, final String message,
+                          final List<String> options, final int defaultOption) {
+        if (options == null || options.isEmpty()) {
+            return defaultOption;
+        }
+        final Integer index = askUser(reply -> {
+            final ConfirmDialog dialog = new ConfirmDialog(
+                    title, message, options, defaultOption, reply::accept);
+            table.getOverlay().show(dialog);
+        }, null);
+        askedDetail(message, options, index);
+        return index == null ? defaultOption : index;
+    }
+
+    /** Una pregunta de botones, al registro detallado si esta encendido. */
+    private void askedDetail(final String question, final List<String> options, final Integer index) {
+        final DetailLog d = detail;
+        if (d != null) {
+            d.asked(question, options, index == null || index < 0 || index >= options.size()
+                    ? null : options.get(index));
+        }
+    }
+
+    private double handCardWidth() {
+        return 132;
+    }
+
+    // ===============================================================
+    // Decisiones automaticas (fase 1)
+    // En la fase 4 cada una de estas se convierte en una interaccion real.
+    // ===============================================================
+
+    @Override
+    public boolean confirm(final CardView c, final String question, final boolean defaultYes,
+                           final List<String> options) {
+        if (interactive()) {
+            final List<String> opts = options == null || options.size() < 2
+                    ? List.of("Si", "No") : options;
+            // El motor SIEMPRE manda aqui la carta de la que viene la pregunta.
+            // Antes se tiraba, y por eso un disparo en tu paso final salia como
+            // una linea de texto sin decir siquiera de que carta era.
+            return askCard(c, null, question, opts, defaultYes ? 0 : 1) == 0;
+        }
+        trace("confirm: %s -> %s", question, defaultYes);
+        return defaultYes;
+    }
+
+    @Override
+    public boolean showConfirmDialog(final String message, final String title, final String yes,
+                                     final String no, final boolean defaultYes) {
+        // Tambien es el motor preguntando ("perderas el mana flotante...").
+        // Si se contesta que no, el OK siguiente tiene que valer. Ver askGen.
+        askGen.incrementAndGet();
+        if (autoConfirm) {
+            // Ya se le ha preguntado al jugador en nuestro propio dialogo.
+            return true;
+        }
+        if (interactive()) {
+            final List<String> opts = List.of(
+                    yes == null || yes.isBlank() ? "Si" : yes,
+                    no == null || no.isBlank() ? "No" : no);
+            // SIN carta, y es lo correcto: ver setCard.
+            return askCard(null, title, message, opts, defaultYes ? 0 : 1) == 0;
+        }
+        trace("confirmDialog: %s -> %s", message, defaultYes);
+        return defaultYes;
+    }
+
+    @Override
+    public int showOptionDialog(final String message, final String title, final FSkinProp icon,
+                                final List<String> options, final int defaultOption) {
+        if (interactive()) {
+            // SIN carta, y es lo correcto: ver setCard.
+            return askCard(null, title, message, options, defaultOption);
+        }
+        trace("optionDialog: %s -> %d", message, defaultOption);
+        return defaultOption;
+    }
+
+    /**
+     * Elegir un numero con lista corta y "Otro...". Si es la X de un hechizo,
+     * la lista llega hasta lo que puedes pagar en vez de hasta 9 (Discord,
+     * 25-10-2026): ver {@link AffordableX}. "Otro..." se queda.
+     */
+    @Override
+    public Integer getInteger(final String message, final int min, final int max, final int cutoff) {
+        return super.getInteger(message, min, max, AffordableX.cutoff(min, max, cutoff));
+    }
+
+    /**
+     * Escribir algo: casi siempre <b>un numero</b>.
+     *
+     * <p><b>Devolver {@code initialInput} sin preguntar colgaba la partida
+     * entera</b>, y no de forma sutil. `AbstractGuiGame.getInteger` pregunta
+     * primero con una lista corta (0..9 y "Otro numero"), y si eliges "Otro
+     * numero" cae a un {@code while (true)} que llama <b>aqui</b> y solo sale
+     * con un numero o con una cancelacion ({@code null}). Nuestro
+     * {@code initialInput} era {@code ""}: ni numero ni cancelacion, asi que el
+     * hilo del motor se ponia a girar para siempre — sin excepcion, sin aviso y
+     * al 100% de CPU.
+     *
+     * <p>Se llega ahi con cualquier <b>X mayor que 9</b>, con un multikicker
+     * repetido muchas veces o con "cuantos contadores" pasado de diez. O sea
+     * que no era un caso raro: era cuestion de tiempo.
+     *
+     * <p>Ojo al orden de los parametros, que enganya: {@code message} es el
+     * texto de ayuda ("escribe un numero entre 0 y 15") y {@code title} el
+     * titulo. Forge llama {@code showInputDialog(prompt, message, ...)}.
+     */
+    @Override
+    public String showInputDialog(final String message, final String title, final FSkinProp icon,
+                                  final String initialInput, final List<String> inputOptions,
+                                  final boolean isNumeric) {
+        if (!interactive()) {
+            trace("inputDialog (sin jugador): %s", message);
+            return initialInput;
+        }
+        // Con opciones cerradas no hay nada que escribir: es una eleccion.
+        if (inputOptions != null && !inputOptions.isEmpty()) {
+            final List<String> picked =
+                    askChoice(headingOf(title, message), new ArrayList<>(inputOptions), 1, 1, null);
+            return picked.isEmpty() ? null : picked.get(0);
+        }
+        return askUser(reply -> {
+            final javafx.scene.layout.Region dialog = isNumeric
+                    ? forge.neo.ui.TextDialog.number(headingOf(title, null), message,
+                            initialInput, reply::accept, () -> reply.accept(null))
+                    : forge.neo.ui.TextDialog.line(headingOf(title, null), message,
+                            initialInput, reply::accept, () -> reply.accept(null));
+            table.getOverlay().show(dialog);
+        }, null);
+    }
+
+    /**
+     * De dia o de noche.
+     *
+     * <p>El motor lo lleva desde Innistrad y nos lo manda aqui; hasta ahora
+     * {@code AbstractGuiGame} se lo guardaba y no se veia en ninguna parte. Hay
+     * cartas que se transforman al cambiar el ciclo, y sin el indicador la
+     * transformacion parece que pasa sola.
+     */
+    @Override
+    public void updateDayTime(final String daytime) {
+        super.updateDayTime(daytime);
+        if (table == null) {
+            return;
+        }
+        runOnUi(() -> table.getPhaseRail().setDayTime(daytime));
+    }
+
+    // ===============================================================
+    // El resaltado DEBIL: "esto lo puedes usar ahora mismo"
+    // ===============================================================
+
+    /**
+     * El motor nos dice que cartas puedes usar, y hasta cual taparia el "Auto".
+     *
+     * <p><b>Esto llegaba y se tiraba.</b> {@code PlayerControllerHuman.
+     * getActionableCards} recorre tus zonas y saca la lista de lo que puedes
+     * jugar o activar ahora mismo; durante un pago de mana esa lista es
+     * <b>exactamente tus fuentes de mana disponibles</b>. Y viene <b>pesada</b>:
+     * las cartas que el boton "Auto" iba a tapar van dos veces, asi que
+     * {@code getActionableStrength} vale 2 para ellas. O sea que el plan del
+     * motor se puede ENSENYAR antes de pulsar nada.
+     *
+     * <p>Desde Forge #12414 (25-10-2026) llega dentro de la seleccion
+     * ({@code Selection.actionable}, ver {@link #setSelection}); antes tenia su
+     * propio par {@code setWeaklySelectable}/{@code clearWeaklySelectable}.
+     * Lo de {@link #setOverlooked} lo pone {@code SafeActions.Guarded} justo
+     * antes, en la misma llamada del prompt; una seleccion que llega SIN esa
+     * llamada (otro prompt, o el que acaba) lo borra, que es lo que hacia el
+     * {@code clearWeaklySelectable} de antes.
+     */
+    private void actionableChanged() {
+        if (!overlookedFresh) {
+            overlookedIds = java.util.Set.of();
+        }
+        overlookedFresh = false;
+        pushActionable();
+        // El brillo de lo que se lanza desde fuera lo dice esta misma lista
+        // (castableNow): si llega despues de pintar, se repinta.
+        pushToTable();
+    }
+
+    /** Si {@link #setOverlooked} acaba de llegar para la seleccion que viene. */
+    private volatile boolean overlookedFresh;
+
+    /**
+     * Lo que se puede lanzar pagando con artefactos o criaturas girados
+     * (improvisar, convocar) y el motor no ilumina, porque lo estima la IA y
+     * la IA no los cuenta. Lo pone {@code SafeActions.Guarded} justo despues
+     * del resaltado del motor. Ver {@link TapToPay}.
+     */
+    @Override
+    public void setOverlooked(final Collection<CardView> cards) {
+        overlookedFresh = true;
+        final java.util.Set<Integer> ids = new java.util.HashSet<>();
+        for (final CardView cv : cards) {
+            ids.add(cv.getId());
+        }
+        if (ids.equals(overlookedIds)) {
+            return;
+        }
+        overlookedIds = java.util.Set.copyOf(ids);
+        pushActionable();
+    }
+
+    private volatile java.util.Set<Integer> overlookedIds = java.util.Set.of();
+
+    /**
+     * Lo que giraria "Auto" para lanzar la carta de la mano bajo el raton
+     * (Discord, 29-10-2026; ver {@link TapPreview}). Se pinta como el plan del
+     * pago de Forge, fuerza 2, y se va al salir de la carta o en cuanto el
+     * motor pregunta otra cosa.
+     */
+    private volatile java.util.Set<Integer> tapPreviewIds = java.util.Set.of();
+
+    private void previewPayment(final CardView card) {
+        TapPreview.Preview p = null;
+        if (card != null && interactive() && !finished.get()
+                && getGameController() instanceof forge.player.PlayerControllerHuman human
+                && human.getInputQueue().getInput() instanceof forge.gamemodes.match.input.InputPassPriority) {
+            p = TapPreview.of(getGameView(), card);
+        }
+        final java.util.Set<Integer> ids = p == null ? java.util.Set.of() : p.ids();
+        // "Depende de lo que elijas" (X, escavar...): un rotulo en la carta, para
+        // que la falta de borde ambar no parezca "no hace falta girar nada".
+        final int hint = p != null && p.kind() == TapPreview.Kind.CHOICE ? card.getId() : -1;
+        if (hint != costHintId) {
+            costHintId = hint;
+            runOnUi(() -> table.setHandCostHint(hint));
+        }
+        if (ids.equals(tapPreviewIds)) {
+            return;
+        }
+        tapPreviewIds = ids;
+        pushActionable();
+    }
+
+    /** La carta de la mano con el rotulo de "depende de lo que elijas", o -1. */
+    private volatile int costHintId = -1;
+
+    private void pushActionable() {
+        if (verbose) {
+            // El recuento recorre todas las zonas: solo con traza encendida.
+            trace("resaltado debil: %d cartas", weaklySelectableCount());
+        }
+        if (table == null) {
+            return;
+        }
+        runOnUi(() -> table.setActionable(this::actionableStrength));
+    }
+
+    /** Cuantas cartas trae el ultimo resaltado debil. Solo para la traza. */
+    private int weaklySelectableCount() {
+        int n = 0;
+        final forge.game.GameView gv = getGameView();
+        if (gv == null || gv.getPlayers() == null) {
+            return 0;
+        }
+        for (final PlayerView p : gv.getPlayers()) {
+            for (final forge.game.zone.ZoneType z : new forge.game.zone.ZoneType[] {
+                    forge.game.zone.ZoneType.Battlefield, forge.game.zone.ZoneType.Hand}) {
+                final var cards = p.getCards(z);
+                if (cards == null) {
+                    continue;
+                }
+                for (final CardView cv : cards) {
+                    if (actionableStrength(cv) > 0) {
+                        n++;
+                    }
+                }
+            }
+        }
+        return n;
+    }
+
+    /** 0 nada, 1 la puedes usar, 2 ademas es del plan del boton "Auto". */
+    public int actionableStrength(final CardView card) {
+        if (card == null) {
+            return 0;
+        }
+        try {
+            if (tapPreviewIds.contains(card.getId())) {
+                return 2;
+            }
+            final int engine = getActionableStrength(card);
+            if (engine > 0) {
+                return engine;
+            }
+            if (overlookedIds.contains(card.getId())) {
+                return 1;
+            }
+            // Una criatura preparada cuyo hechizo se puede lanzar YA.
+            //
+            // El motor no la resalta, y con razon desde su punto de vista: lo
+            // jugable es la copia del exilio, no ella. Pero el click que lo
+            // lanza es el suyo (ver preparedSpellToCast), asi que el resaltado
+            // tiene que estar donde esta el click — o seria un control
+            // invisible, que es peor que no tenerlo.
+            return castablePreparedSpell(card) != null ? 1 : 0;
+        } catch (final RuntimeException e) {
+            return 0;
+        }
+    }
+
+    /** Titulo y ayuda vienen sueltos y a veces uno de los dos esta vacio. */
+    private static String headingOf(final String title, final String extra) {
+        final String t = title == null || title.isBlank()
+                ? NeoText.get("input.title") : title;
+        return extra == null || extra.isBlank() ? t : t + " — " + extra;
+    }
+
+    @Override
+    public <T> List<T> getChoices(final String message, final int min, final int max,
+                                  final List<T> choices, final List<T> selected,
+                                  final FSerializableFunction<T, String> display) {
+        if (isSilencedAiDeckWarning(message)) {
+            // Es el aviso de arranque de "la IA no juega bien estas cartas".
+            // Llega como un reveal, o sea que sale un panel que hay que cerrar
+            // antes de empezar CADA partida. Si el jugador lo ha silenciado, se
+            // contesta solo con la lista vacia, que es lo que espera un reveal.
+            return new ArrayList<>();
+        }
+        if (interactive()) {
+            // "Elige una pila" no es una eleccion de cartas, aunque el motor la
+            // mande como tal. Ver PileDialog.
+            if (max == 1 && forge.neo.ui.PileDialog.looksLikePiles(choices)) {
+                final List<T> one = askPile(message, choices);
+                if (one != null) {
+                    return one;
+                }
+            }
+            // "Which dungeon do you want to venture into?": el motor manda los
+            // NOMBRES; se ensenyan las cartas de las mazmorras, con sus salas.
+            // Ver DungeonFaces (Discord, 05-11-2026).
+            if (forge.neo.card.DungeonFaces.allDungeons(choices)) {
+                final List<T> picked = askDungeon(message, min, max, choices);
+                if (picked != null) {
+                    return picked;
+                }
+            }
+            // Si es el modo de un disparo, de QUE carta habla: con tres
+            // disparos de Jin Sakai, uno por atacante, las tres preguntas eran
+            // identicas. Se lee aqui, en el hilo que pregunta, porque es donde
+            // lo apunto el controlador. Ver TriggerSubject. Y de QUIEN
+            // ("Damaged: Lisian"): el Parapet Thrasher a cinco jugadores.
+            // En red, al invitado esa linea le llega pegada al titulo: se
+            // despega y se pinta igual que en casa.
+            // Y si no es un disparo, la carta que avisa setCard (War o Peace de
+            // Archangel of Strife): con la carta delante se lee que hace cada
+            // opcion. Si se eligen cartas, ya se ven ellas.
+            List<TriggerSubject.Subject> about = subjectsFor(choices);
+            // Y si tampoco avisa (una VOTACION: Plea for Power, Council's
+            // Judgment...), la carta que nombra el titulo con su numero:
+            // "Plea for Power (580) Vote:". Discord, 01-11-2026: "an easy way to
+            // know what the effect of each vote will be, perhaps display the
+            // card on the menu so it can be read".
+            if (about.isEmpty() && choices != null && !choices.isEmpty()
+                    && !(choices.get(0) instanceof CardView)) {
+                final CardView named = cardNamedIn(message);
+                if (named != null) {
+                    about = List.of(new TriggerSubject.Subject(named, null));
+                }
+            }
+            return askChoice(TriggerSubject.titleOf(message), choices, min, max, display,
+                    about, false, TriggerSubject.detailFor(choices, message));
+        }
+        // Sin jugador delante solo se apunta, para TriggerDetailCheck: la
+        // linea que el dialogo habria ensenyado, y la que habria viajado a un
+        // invitado pegada al titulo. Y la carta (AskingCardCheck).
+        final List<TriggerSubject.Subject> shownAbout = subjectsFor(choices);
+        if (!shownAbout.isEmpty()) {
+            lastShownSubject = shownAbout.get(0).card();
+        }
+        final String detail = TriggerSubject.detailFor(choices);
+        if (detail != null) {
+            lastTriggerDetail = detail;
+        }
+        final String wired = TriggerSubject.wiredDetail(message);
+        if (wired != null) {
+            lastWiredDetail = wired;
+            lastWiredTitle = TriggerSubject.titleOf(message);
+        }
+        // Coger los primeros 'min'.
+        final List<T> out = new ArrayList<>();
+        if (choices != null) {
+            final int want = Math.min(Math.max(min, 0), choices.size());
+            for (int i = 0; i < want; i++) {
+                out.add(choices.get(i));
+            }
+        }
+        trace("getChoices(%d..%d de %d) -> %d", min, max,
+                choices == null ? 0 : choices.size(), out.size());
+        return out;
+    }
+
+    /**
+     * La eleccion de mazmorra con las cartas delante. Se pregunta con las
+     * cartas y se contesta con los nombres que mando el motor, buscando POR
+     * POSICION: las cartas de {@code getCardForUi} pueden compartir numero, y
+     * un {@code indexOf} las confundiria. Null si alguna no se pudo pintar
+     * (y entonces va por el camino de siempre, con los nombres).
+     */
+    private <T> List<T> askDungeon(final String message, final int min, final int max, final List<T> choices) {
+        final List<CardView> views = new ArrayList<>();
+        final java.util.IdentityHashMap<CardView, T> back = new java.util.IdentityHashMap<>();
+        final java.util.IdentityHashMap<CardView, String> labels = new java.util.IdentityHashMap<>();
+        for (final T c : choices) {
+            final CardView v = forge.neo.card.DungeonFaces.viewOf(c);
+            if (v == null || back.containsKey(v)) {
+                return null;
+            }
+            views.add(v);
+            back.put(v, c);
+            labels.put(v, defaultLabel(c));
+        }
+        final List<CardView> got = askChoice(TriggerSubject.titleOf(message), views, min, max, labels::get);
+        final List<T> out = new ArrayList<>();
+        for (final CardView v : got) {
+            final T c = back.get(v);
+            if (c != null) {
+                out.add(c);
+            }
+        }
+        return out;
+    }
+
+    @Override
+    public GameEntityView chooseSingleEntityForEffect(final String title,
+                                                      final List<? extends GameEntityView> optionList,
+                                                      final DelayedReveal delayedReveal,
+                                                      final boolean isOptional) {
+        if (interactive() && optionList != null && !optionList.isEmpty()) {
+            final List<GameEntityView> opts = new ArrayList<>(optionList);
+            final List<GameEntityView> picked =
+                    askChoice(title, opts, isOptional ? 0 : 1, 1, null);
+            return picked.isEmpty() ? null : picked.get(0);
+        }
+        final GameEntityView pick =
+                (optionList == null || optionList.isEmpty()) ? null : optionList.get(0);
+        trace("chooseSingleEntity: %s", title);
+        return pick;
+    }
+
+    @Override
+    public List<GameEntityView> chooseEntitiesForEffect(final String title,
+                                                        final List<? extends GameEntityView> optionList,
+                                                        final int min, final int max,
+                                                        final DelayedReveal delayedReveal) {
+        if (interactive() && optionList != null && !optionList.isEmpty()) {
+            return askChoice(title, new ArrayList<GameEntityView>(optionList), min, max, null);
+        }
+        final List<GameEntityView> out = new ArrayList<>();
+        if (optionList != null) {
+            final int want = Math.min(Math.max(min, 0), optionList.size());
+            for (int i = 0; i < want; i++) {
+                out.add(optionList.get(i));
+            }
+        }
+        return out;
+    }
+
+    // ---------------------------------------------------------------
+    // "No me vuelvas a preguntar por esto"
+    // ---------------------------------------------------------------
+
+    /**
+     * El menu de click derecho sobre algo del stack.
+     *
+     * <p><b>Esto tampoco lo programamos nosotros.</b> Forge guarda las
+     * respuestas en {@code AutoYieldStore} y en {@code PersistentAutoDecisionStore},
+     * y las <b>recuerda entre partidas</b>. Las dos GUIs oficiales lo enseñan
+     * desde el click derecho del stack ({@code VStack} + {@code
+     * VAutoYieldsAndTriggers}); nosotros no lo enseñabamos en ningun sitio, asi
+     * que el mismo disparo te preguntaba una y otra vez. En Commander, donde un
+     * disparo puede saltar ocho veces por turno, eso es de lo que mas cansa.
+     *
+     * <p>La llave de cada cosa la da el motor: {@code StackItemView.getKey()}.
+     * El alcance — si lo recordado vale para esta habilidad o para la carta
+     * entera — lo decide tambien el motor
+     * ({@code YieldController.isAbilityScope()}), no nosotros.
+     *
+     * <p><b>El zoom sigue el primero.</b> Antes de esto, el click derecho en el
+     * stack ampliaba la carta y nada mas; si el menu lo sustituyera sin mas, se
+     * habria perdido algo que ya funcionaba. Va como primera opcion.
+     *
+     * <p>Y "olvidar lo recordado" no es un extra: una respuesta que se guarda
+     * sola y para siempre <b>tiene</b> que poder deshacerse desde donde se puso
+     * (principio 6 de las notas de diseño). Solo sale si hay algo que olvidar.
+     */
+    private void showStackMenu(final StackItemView item) {
+        if (!interactive() || item == null || table == null) {
+            return;
+        }
+        final CardView source = item.getSourceCard();
+        final IGameController gc = getGameController();
+        if (gc == null) {
+            table.showZoom(source);
+            return;
+        }
+
+        final String key = item.getKey();
+        final boolean hasKey = key != null && !key.isEmpty();
+        // Un disparo opcional es el unico al que tiene sentido contestarle
+        // "siempre" — y solo si es TUYO: el motor no te pregunta por los del
+        // rival. isOptionalTrigger() es justo el dato que hacia falta.
+        final boolean mineTrigger = hasKey && item.isOptionalTrigger()
+                && isMe(item.getActivatingPlayer());
+        final boolean canYield = hasKey && item.isAbility();
+
+        final List<String> labels = new ArrayList<>();
+        final List<Runnable> actions = new ArrayList<>();
+
+        labels.add(NeoText.get("stack.menu.zoom"));
+        actions.add(() -> table.showZoom(source));
+
+        if (canYield) {
+            final boolean yielding = gc.shouldAutoYield(key);
+            labels.add(NeoText.get(yielding ? "stack.menu.yield.on" : "stack.menu.yield.off"));
+            actions.add(() -> {
+                gc.setShouldAutoYield(key, !yielding, abilityScope(gc));
+                refreshYieldUi(getCurrentPlayer());
+            });
+        }
+
+        if (mineTrigger) {
+            final AutoYieldStore.TriggerDecision now = gc.getTriggerDecision(key);
+            labels.add(NeoText.get(now == AutoYieldStore.TriggerDecision.ACCEPT
+                    ? "stack.menu.alwaysYes.on" : "stack.menu.alwaysYes.off"));
+            actions.add(() -> {
+                gc.setTriggerDecision(key,
+                        now == AutoYieldStore.TriggerDecision.ACCEPT
+                                ? AutoYieldStore.TriggerDecision.ASK
+                                : AutoYieldStore.TriggerDecision.ACCEPT,
+                        abilityScope(gc));
+                refreshYieldUi(getCurrentPlayer());
+            });
+            labels.add(NeoText.get(now == AutoYieldStore.TriggerDecision.DECLINE
+                    ? "stack.menu.alwaysNo.on" : "stack.menu.alwaysNo.off"));
+            actions.add(() -> {
+                gc.setTriggerDecision(key,
+                        now == AutoYieldStore.TriggerDecision.DECLINE
+                                ? AutoYieldStore.TriggerDecision.ASK
+                                : AutoYieldStore.TriggerDecision.DECLINE,
+                        abilityScope(gc));
+                refreshYieldUi(getCurrentPlayer());
+            });
+        }
+
+        if (hasRemembered(gc)) {
+            labels.add(NeoText.get("stack.menu.forget"));
+            actions.add(() -> {
+                gc.getYieldController().clearAutoYields();
+                gc.getYieldController().setDisableAutoTriggers(false);
+                forgetTriggerDecisions(gc);
+                refreshYieldUi(getCurrentPlayer());
+            });
+        }
+
+        final boolean[] all = new boolean[labels.size()];
+        java.util.Arrays.fill(all, true);
+        // EN LA CAPA DEL MENU, no en la de los dialogos de la partida.
+        //
+        // Este menu es consultar, no contestar, y la capa de los dialogos solo
+        // ensenya UNA cosa (Overlay.show hace setAll): abrirlo ahi mientras el
+        // motor esperaba una eleccion **borraba esa eleccion de la pantalla**,
+        // y el "Volver" de "Ver la mesa" te devolvia a este menu en vez de a la
+        // pregunta. Cerrandolo con Cancelar, la pregunta ya no estaba en ningun
+        // sitio y el motor se quedaba esperando una respuesta que ya no se
+        // podia dar: partida muerta, sin un solo error.
+        //
+        // Reportado en itch.io el 20-09-2026 con la secuencia entera: un rival
+        // lanza Dredge the Mire, se abre la eleccion, el jugador da a "Ver la
+        // mesa" para leer el hechizo en el stack, abre este menu... y ya no hay
+        // vuelta. Es la misma regla que ya cumplia el visor de zonas
+        // (TableScreen.showZone) y que a este menu se le habia escapado.
+        final AbilityMenu menu = new AbilityMenu(source, labels, all,
+                table.zoomCardWidth() * 0.62, picked -> {
+                    table.getMenuOverlay().hide();
+                    if (picked != null && picked >= 0 && picked < actions.size()) {
+                        actions.get(picked).run();
+                    }
+                });
+        // Clicar fuera lo cierra, como cualquier consulta. Sin esto se quedaba
+        // con lo que hubiera dejado puesto el ultimo panel de esta capa — a
+        // veces nada, y entonces solo cerraba Escape (Discord, 27-10-2026:
+        // "right and left click don't close it ... I have to press esc").
+        table.getMenuOverlay().setOnBackgroundClick(table.getMenuOverlay()::hide);
+        table.getMenuOverlay().show(menu);
+    }
+
+    /** Si lo recordado vale para la habilidad o para la carta. Lo dice el motor. */
+    private static boolean abilityScope(final IGameController gc) {
+        return gc.getYieldController() != null && gc.getYieldController().isAbilityScope();
+    }
+
+    /** ¿Hay algo recordado que se pueda olvidar? */
+    private static boolean hasRemembered(final IGameController gc) {
+        final YieldController yc = gc.getYieldController();
+        if (yc == null) {
+            return false;
+        }
+        return yc.getAutoYields().iterator().hasNext()
+                || yc.getAutoTriggers().iterator().hasNext();
+    }
+
+    /** Devuelve a "preguntar" cada disparo que tuviera respuesta fija. */
+    private static void forgetTriggerDecisions(final IGameController gc) {
+        final YieldController yc = gc.getYieldController();
+        if (yc == null) {
+            return;
+        }
+        // Se copian las llaves antes de tocarlas: se esta recorriendo lo mismo
+        // que se modifica.
+        final List<String> keys = new ArrayList<>();
+        for (final Map.Entry<String, AutoYieldStore.TriggerDecision> e : yc.getAutoTriggers()) {
+            keys.add(e.getKey());
+        }
+        for (final String k : keys) {
+            gc.setTriggerDecision(k, AutoYieldStore.TriggerDecision.ASK, abilityScope(gc));
+        }
+    }
+
+    /**
+     * El motor avisa de que lo recordado ha cambiado.
+     *
+     * <p>Lo llama Forge cuando una respuesta se guarda o se borra — tambien
+     * desde el otro lado en una partida en red. Se repinta el stack porque el
+     * menu se construye leyendo el estado en el momento de abrirlo: sin esto,
+     * la marca de "ya lo dejas pasar" se quedaria como estaba hasta el
+     * siguiente cambio de mesa.
+     */
+    @Override
+    public void refreshYieldUi(final PlayerView player) {
+        // Solo si es de los nuestros: en una partida en red esto llega tambien
+        // por lo que recuerde el otro, y repintar nuestra mesa por eso seria
+        // trabajo para nada.
+        if (player == null || isLocalPlayer(player)) {
+            pushToTable();
+        }
+    }
+
+    @Override
+    public SpellAbilityView getAbilityToPlay(final CardView hostCard,
+                                             final List<SpellAbilityView> abilities,
+                                             final ITriggerEvent triggerEvent) {
+        // Si esta pregunta viene del boton "Equipar" de la carta ampliada, se
+        // contesta sola con el equipar: el jugador ya dijo lo que queria.
+        List<SpellAbilityView> offered = abilities;
+        final int wanted = pendingEquipCard;
+        if (wanted >= 0) {
+            pendingEquipCard = -1;
+            if (hostCard != null && hostCard.getId() == wanted && abilities != null
+                    && System.currentTimeMillis() - pendingEquipAt < EQUIP_PENDING_MS) {
+                final List<SpellAbilityView> equips = new ArrayList<>();
+                for (final SpellAbilityView sa : abilities) {
+                    if (sa != null && sa.canPlay() && isEquip(sa)) {
+                        equips.add(sa);
+                    }
+                }
+                if (equips.isEmpty()) {
+                    // Ahora no se puede (otro coste, otra fase...): se dice, y
+                    // no se activa otra cosa en su lugar.
+                    showWhy(NeoText.get("zoom.equip.cant"));
+                    return null;
+                }
+                if (equips.size() == 1) {
+                    return equips.get(0);
+                }
+                // Varios equipar (p.ej. uno barato para legendarias): el menu
+                // de siempre, pero solo con esos.
+                offered = equips;
+            }
+        }
+        final List<SpellAbilityView> choices = offered;
+        // El motor nos devuelve la llamada cuando una carta tiene varias cosas
+        // jugables: es el menu contextual de Arena.
+        if (interactive() && choices != null && choices.size() > 1) {
+            // Si todas son la MISMA habilidad (Marvin, Murderous Mimic con tres
+            // criaturas que hacen lo mismo), el menu se quedaria en un solo
+            // boton: se activa sin preguntar, como hace Forge con una sola.
+            final int[] grouped = forge.neo.ui.AbilityMenu.groupedOriginal(hostCard, choices);
+            if (grouped.length == 1) {
+                return choices.get(grouped[0]);
+            }
+            // LA MACRO (MacroChoices): Forge graba el clic en la carta, pero no
+            // cual de sus habilidades; repitiendo, se elige la que toca EN ORDEN
+            // si sigue estando y se puede pagar. En orden y no por la lista
+            // entera: en un combo la lista cambia a cada paso (Necrotic Ooze,
+            // Discord 21-10-2026) y no volvia a coincidir nunca.
+            final int macro = macroMode();
+            final String hostName = hostCard == null || hostCard.getCurrentState() == null
+                    ? "" : hostCard.getCurrentState().getName();
+            final List<String> abilityLabels = new ArrayList<>();
+            for (final SpellAbilityView sa : choices) {
+                abilityLabels.add(sa == null ? "" : String.valueOf(sa.getDescription()));
+            }
+            if (macro == 2) {
+                final List<String> want = macroChoices.replayInOrder("ability", hostName, abilityLabels);
+                final List<Integer> at = want == null ? null : MacroChoices.indicesOf(abilityLabels, want);
+                if (at != null && at.size() == 1 && choices.get(at.get(0)).canPlay()) {
+                    trace("macro: habilidad de %s -> %s", hostName, want);
+                    return choices.get(at.get(0));
+                }
+            }
+            // Un aura con mas de una forma de jugarla: el menu de siempre, y el
+            // objetivo lo elige el jugador (Ana: "mejor eso que cagarla").
+            pendingAuraTarget = null;
+            final Integer picked = askUser(reply -> {
+                final AbilityMenu menu = new AbilityMenu(
+                        hostCard, choices, table.zoomCardWidth() * 0.62, reply::accept);
+                table.getOverlay().show(menu);
+            }, null);
+            // -1 (o nada) significa "me he equivocado de carta": devolver null
+            // es la forma de decirle al motor que no se hace nada. Sin esto,
+            // clicar una carta por error te obligaba a activar algo.
+            if (picked == null || picked < 0 || picked >= choices.size()) {
+                return null;
+            }
+            if (macro == 1) {
+                macroChoices.record("ability", hostName, abilityLabels,
+                        java.util.List.of(abilityLabels.get(picked)));
+            }
+            return choices.get(picked);
+        }
+        return (choices == null || choices.isEmpty()) ? null : choices.get(0);
+    }
+
+    // ---------------------------------------------------------------
+    // "Equipar" desde la carta ampliada
+    // ---------------------------------------------------------------
+
+    /**
+     * La carta cuyo equipar se ha pedido con el boton, o -1.
+     *
+     * <p>Pedido en Discord el 23-09-2026: con los equipos apilados detras de
+     * la criatura no se veia como volver a equipar. El boton no activa nada
+     * por su cuenta — no hay forma publica de lanzar UNA habilidad concreta
+     * sin que el motor la haya ofrecido antes ({@code selectAbility} solo vale
+     * despues de su menu). Hace lo mismo que un clic en la carta, y cuando el
+     * motor pregunta que habilidad ({@code getAbilityToPlay}, que pregunta
+     * SIEMPRE, aunque haya una sola) se contesta el equipar sin ensenyar el
+     * menu. Luego el motor pide el objetivo como siempre.
+     *
+     * <p>Caduca: el clic va por {@code respondLater}, asi que la pregunta
+     * llega un poco despues; y si nunca llega (el motor esperaba otra cosa),
+     * no puede quedarse armado y contestar "equipar" a un clic de dentro de
+     * un rato.
+     */
+    private volatile int pendingEquipCard = -1;
+    private volatile long pendingEquipAt;
+    private static final long EQUIP_PENDING_MS = 5000;
+
+    /** "Equip {1}", "Heroic — Equip {2}", "Equip legendary creature {1}"... pero no "Equipped". */
+    private static final java.util.regex.Pattern EQUIP_DESC =
+            java.util.regex.Pattern.compile("^(?:[^—]*—\\s*)?Equip(?!ped)\\b");
+
+    /**
+     * Si esta habilidad es un equipar. Por su texto: el motor lo monta siempre
+     * igual ({@code CardFactoryUtil}, "PrecostDesc$ Equip") y en ingles, sea
+     * cual sea el idioma de la interfaz.
+     */
+    private static boolean isEquip(final SpellAbilityView sa) {
+        final String d = sa.getDescription();
+        return d != null && EQUIP_DESC.matcher(d.trim()).find();
+    }
+
+    /**
+     * El texto del boton ("Equipar {1}"), o null si ahora no toca ofrecerlo.
+     *
+     * <p>Solo cuando de verdad se puede: un equipo TUYO en la mesa, en TU fase
+     * principal con el stack vacio (equipar va a velocidad de conjuro), sin
+     * una eleccion ni un pago a medias, y con la carta marcada por el motor
+     * como usable. Un boton que se ofrece y luego no hace nada es peor que no
+     * tenerlo (principio 1).
+     */
+    private String equipLabel(final CardView card) {
+        if (!interactive() || card == null || finished.get() || payingMana || isSelecting()
+                || card.getZone() != ZoneType.Battlefield || !isMe(card.getController())) {
+            return null;
+        }
+        final GameView gv = getGameView();
+        if (gv == null || !isMe(gv.getPlayerTurn())
+                || (gv.getPhase() != PhaseType.MAIN1 && gv.getPhase() != PhaseType.MAIN2)
+                || (gv.getStack() != null && !gv.getStack().isEmpty())) {
+            return null;
+        }
+        final CardView.CardStateView st = card.getCurrentState();
+        if (st == null || st.getKeywords() == null || actionableStrength(card) <= 0) {
+            return null;
+        }
+        final java.util.Set<String> costs = new java.util.LinkedHashSet<>();
+        for (final forge.game.keyword.KeywordView k : st.getKeywords()) {
+            if (k == null || k.keyword() != forge.game.keyword.Keyword.EQUIP) {
+                continue;
+            }
+            costs.add(equipCost(k.original()));
+        }
+        if (costs.isEmpty()) {
+            return null;
+        }
+        costs.remove("");
+        return NeoText.get("zoom.equip", String.join(" / ", costs)).trim();
+    }
+
+    /** "Equip:1:..." -> "{1}". Si no se entiende, vacio: el boton sale sin coste. */
+    private static String equipCost(final String original) {
+        try {
+            final String[] k = original.split(":");
+            if (k.length < 2) {
+                return "";
+            }
+            return new forge.game.cost.Cost(k[1], true).toSimpleString();
+        } catch (final RuntimeException e) {
+            return "";
+        }
+    }
+
+    /** El boton: armar la respuesta y hacer el clic de siempre. */
+    private void equipFromZoom(final CardView card) {
+        if (equipLabel(card) == null) {
+            return;
+        }
+        pendingEquipCard = card.getId();
+        pendingEquipAt = System.currentTimeMillis();
+        onCardClicked(card);
+    }
+
+    @Override
+    public Map<CardView, Integer> assignCombatDamage(final CardView attacker,
+                                                     final List<CardView> blockers, final int damage,
+                                                     final GameEntityView defender,
+                                                     final boolean overrideOrder,
+                                                     final boolean maySkip) {
+        if (interactive() && blockers != null && !blockers.isEmpty()) {
+            final boolean trample = attacker != null && attacker.getCurrentState() != null
+                    && attacker.getCurrentState().hasTrample();
+            final GameView gv = getGameView();
+            final int poison = gv == null ? 10 : gv.getPoisonCountersToLose();
+            final Map<CardView, Integer> picked = askUser(reply -> {
+                final DamageDialog dialog = new DamageDialog(
+                        attacker, blockers, damage, defender, overrideOrder, maySkip,
+                        trample, poison, handCardWidth(), reply::accept);
+                table.getOverlay().show(dialog);
+            }, null);
+            if (picked != null) {
+                return picked;
+            }
+            // askUser solo devuelve null si algo fue mal (o si el jugador eligio
+            // "no asignar", que el motor entiende como null): en ambos casos hay
+            // que devolver algo legal, y el reparto automatico lo es.
+            if (maySkip) {
+                return null;
+            }
+        }
+        // Reparto automatico: letal en orden, el resto al ultimo.
+        final Map<CardView, Integer> map = new HashMap<>();
+        if (blockers != null && !blockers.isEmpty()) {
+            map.put(blockers.get(0), damage);
+        }
+        return map;
+    }
+
+    /**
+     * "Reparte N entre estos".
+     *
+     * <p><b>Esto contestaba solo y no hacia ruido</b>: le daba el total al
+     * primer objetivo del mapa. Por aqui pasa, entre otras cosas, <b>que mana
+     * produce una tierra de filtro</b> — {@code
+     * PlayerControllerHuman.specifyManaCombo} acaba llamando a este metodo — y
+     * el orden de {@code ColorSet} pone el <b>rojo antes que el blanco</b>
+     * ({@code RW(Color.RED, Color.WHITE)}), asi que una <i>Rugged Prairie</i>
+     * producia siempre {R}{R} sin preguntar nada. Reportado jugando: <i>"quiero
+     * generar 2 blancos, no me pregunta y genera 2 rojos"</i>.
+     *
+     * <p>Con un solo objetivo no hay nada que repartir y preguntar seria un
+     * dialogo con una sola respuesta posible, asi que se contesta directamente.
+     */
+    @Override
+    public Map<Object, Integer> assignGenericAmount(final CardView effectSource,
+                                                    final Map<Object, Integer> targets,
+                                                    final int amount, final boolean atLeastOne,
+                                                    final String amountLabel) {
+        if (targets == null || targets.isEmpty() || amount <= 0) {
+            return new HashMap<>();
+        }
+        if (interactive() && targets.size() > 1) {
+            final Map<Object, Integer> picked = askUser(reply -> {
+                final AmountDialog dialog = new AmountDialog(
+                        effectSource, targets, amount, atLeastOne, amountLabel,
+                        handCardWidth(), reply::accept);
+                table.getOverlay().show(dialog);
+            }, null);
+            if (picked != null && !picked.isEmpty()) {
+                return picked;
+            }
+        }
+        // Sin jugador delante (o si algo fue mal) hay que devolver algo legal:
+        // que sume el total y que nadie pase de su tope.
+        return AmountDialog.autoSplit(targets, amount, atLeastOne);
+    }
+
+    /**
+     * "X manas en cualquier combinacion de colores", en un dialogo y ya
+     * repartido. Lo pide {@link ManaCombo} (Selvala y compania).
+     *
+     * <p>Sin jugador delante se devuelve la sugerencia tal cual: es un reparto
+     * legal, y es lo que el jugador habria aceptado casi siempre.
+     *
+     * @param costText   lo que falta por pagar, o null si no se esta pagando
+     * @param payingCard de quien es ese coste, o null
+     * @param asLastTime si la sugerencia es "como la ultima vez"
+     * @return el reparto, o null si algo fue mal (y entonces pregunta Forge)
+     */
+    /**
+     * El texto de una opcion que el motor manda sin etiqueta. Casi siempre es
+     * su {@code toString()}, pero un color de mana ("Selecciona el mana a
+     * producir": Mox Opal, Birds of Paradise...) es una constante de enum y
+     * salia WHITE / BLUE / BLACK, en mayusculas y en ingles. El nombre
+     * traducido lo da el propio color, el mismo que usa Forge cuando pregunta
+     * entre dos.
+     */
+    static String defaultLabel(final Object option) {
+        if (option instanceof forge.card.MagicColor.Color c) {
+            return c.getTranslatedName();
+        }
+        // "Nombra una carta": traducido y con el ingles, para buscar por los dos.
+        if (option instanceof forge.game.card.CardFaceView face) {
+            return forge.neo.card.CardText.nameOf(face);
+        }
+        // Una habilidad de una carta TUYA boca abajo lleva su nombre real:
+        // con cuatro de Magar pegando a la vez, ordenar sus disparos era a
+        // ciegas. Ver FaceDownName.
+        if (option instanceof forge.game.spellability.SpellAbilityView sa) {
+            return forge.neo.card.FaceDownName.label(sa, NeoMatchUI::mayFlipHere);
+        }
+        return String.valueOf(option);
+    }
+
+    /** Si quien tiene la mesa delante puede girar esta carta boca abajo (lo mismo que CardNode). */
+    public static boolean mayFlipHere(final CardView card) {
+        return card.canFaceDownBeShownToAny(forge.neo.ui.CardZoom.localViewers());
+    }
+
+    Map<forge.card.MagicColor.Color, Integer> askManaCombo(final CardView source, final forge.card.ColorSet options,
+                                                final int amount,
+                                                final Map<forge.card.MagicColor.Color, Integer> suggested,
+                                                final String costText, final CardView payingCard,
+                                                final boolean asLastTime) {
+        if (!interactive()) {
+            return suggested;
+        }
+        final Map<Object, Integer> targets = new java.util.LinkedHashMap<>();
+        final Map<Object, Integer> start = new java.util.LinkedHashMap<>();
+        for (final Map.Entry<forge.card.MagicColor.Color, Integer> e : suggested.entrySet()) {
+            targets.put(e.getKey(), amount);
+            start.put(e.getKey(), e.getValue());
+        }
+        final String note;
+        if (costText != null) {
+            final String what = payingCard == null
+                    ? "" : forge.neo.card.CardText.nameOf(payingCard);
+            note = what.isEmpty() ? NeoText.get("amount.mana.forCost", costText)
+                    : NeoText.get("amount.mana.forCostOf", costText, what);
+        } else {
+            note = asLastTime ? NeoText.get("amount.mana.lastTime") : null;
+        }
+        final Map<Object, Integer> picked = askUser(reply -> {
+            final AmountDialog dialog = AmountDialog.forMana(
+                    source, targets, amount, start, note, handCardWidth(), reply::accept);
+            table.getOverlay().show(dialog);
+        }, null);
+        if (picked == null) {
+            return null;
+        }
+        final Map<forge.card.MagicColor.Color, Integer> out = new java.util.LinkedHashMap<>();
+        for (final Map.Entry<Object, Integer> e : picked.entrySet()) {
+            if (e.getKey() instanceof forge.card.MagicColor.Color c && e.getValue() != null) {
+                out.put(c, e.getValue());
+            }
+        }
+        return out;
+    }
+
+    /**
+     * "Elige cuales, y en que orden."
+     *
+     * <p><b>Esto devolvia la lista entera sin preguntar, y era un fallo caro
+     * porque no hacia ruido.</b> Por aqui pasan, entre otras cosas,
+     * <b>adivinar</b> y <b>vigilar</b> de dos cartas o mas: {@code
+     * PlayerControllerHuman.arrangeForScry} / {@code arrangeForSurveil} llaman
+     * a {@code getGui().many(...)}, y {@code many} con mas de una carta acaba
+     * aqui. Devolver "todas" significaba <b>mandar al cementerio todo lo que
+     * vigilas</b> y <b>al fondo todo lo que adivinas</b>, en silencio y sin que
+     * el jugador viera nada. Con una sola carta el motor pregunta por otro
+     * camino ({@code InputConfirm}), asi que el fallo solo salia a partir de
+     * dos.
+     *
+     * <p><b>Como se traducen los limites.</b> El motor no cuenta lo que hay que
+     * ELEGIR, cuenta lo que puede QUEDARSE en el origen: {@code min} y {@code
+     * max} son "cuantas pueden quedar sin elegir". Un {@code -1} es "las que
+     * quieras". Se le da la vuelta para el dialogo, que piensa en lo elegido.
+     *
+     * <p><b>Y el orden sale gratis.</b> {@code ChoiceDialog} guarda lo elegido
+     * en un conjunto por orden de insercion, o sea en el orden en el que se
+     * clica. Para los usos que son de verdad ordenar — colocar cartas encima de
+     * tu biblioteca, el orden de dano entre bloqueadores — eso es exactamente
+     * la respuesta: se clican en el orden que quieras.
+     */
+    @Override
+    public <T> IGuiGame.OrderResult<T> order(final String title, final String top, final int min,
+                                             final int max, final List<T> sourceChoices,
+                                             final List<T> destChoices, final CardView referenceCard,
+                                             final boolean referenceCardIsSource,
+                                             final boolean rememberOption) {
+        final List<T> source = sourceChoices == null ? List.of() : sourceChoices;
+        final List<T> already = destChoices == null ? new ArrayList<>() : new ArrayList<>(destChoices);
+        if (rememberOption && interactive()) {
+            return orderRemembering(title, top, source, already);
+        }
+        if (source.isEmpty()) {
+            return new IGuiGame.OrderResult<>(already, false);
+        }
+        if (!interactive()) {
+            final List<T> all = new ArrayList<>(already);
+            all.addAll(source);
+            trace("order(%s) sin jugador -> %d", title, all.size());
+            return new IGuiGame.OrderResult<>(all, false);
+        }
+
+        // De "cuantas pueden QUEDAR" a "cuantas hay que ELEGIR".
+        final int n = source.size();
+        final int pickMin = max < 0 ? 0 : Math.max(0, n - max);
+        final int pickMax = min < 0 ? n : Math.min(n, n - min);
+
+        // Adjuntar varias Auras o Equipos (Ardenn): el motor pide el ORDEN de
+        // todas con el titulo generico de "poner en el campo de batalla", y
+        // parece que estas eligiendo cuales. Se dice lo que es (AttachOrder).
+        final boolean attach = forge.neo.match.AttachOrder.applies(source);
+        final String heading = attach ? NeoText.get("order.attach.title")
+                : top == null || top.isBlank() ? title
+                : (title == null || title.isBlank() ? top : title + " — " + top);
+
+        // Separar en dos pilas tambien llega por aqui, y "Select cards for a
+        // face down pile" no dice que pasa con las que NO marcas. Ahi no hay
+        // orden que numerar. Ver pileHint.
+        final String pile = pileHint(title);
+        final List<T> picked = askChoice(heading, source, pickMin, Math.max(pickMin, pickMax), null,
+                List.of(), pile == null, attach ? NeoText.get("order.attach.hint")
+                        : pile != null ? pile : orderHint(top, Math.max(pickMin, pickMax)));
+        final List<T> ordered = new ArrayList<>(already);
+        if (picked != null) {
+            ordered.addAll(picked);
+        }
+        return new IGuiGame.OrderResult<>(ordered, false);
+    }
+
+    /**
+     * Que queda arriba y que abajo al ordenar cartas de la biblioteca.
+     *
+     * <p>Pedido en Discord el 02-10-2026: <i>"I wish it was more clear which
+     * card will end on top vs bottom ... Is 1 the first card I'll draw?"</i>. El
+     * motor solo dice "Closest to top" y hay que adivinar a que se refiere. Lo
+     * que hace de verdad, mirado en el codigo: con "Closest to top" (y "Top of
+     * Library", la de adivinar y vigilar) <b>la primera de la lista queda
+     * arriba del todo</b> — {@code orderMoveToZoneList} y {@code scry} le dan
+     * la vuelta antes de ir metiendolas una a una en la cima —; con "Closest to
+     * bottom", la primera queda abajo del todo. Se reconoce la etiqueta por el
+     * texto del motor en el idioma de la partida.
+     *
+     * @return la linea de ayuda, o null si no es de biblioteca o hay una sola carta
+     */
+    /**
+     * Que pasa con las cartas que marcas, y con las que no, al separar en dos
+     * pilas ({@code TwoPilesEffect}: <i>Curator of Destinies</i>, <i>Fact or
+     * Fiction</i>, <i>Steam Augury</i>...). Discord, 08-10-2026: <i>"I could
+     * not find a way to actually select or move the cards into the appropriate
+     * piles"</i>. El motor manda solo "Select cards for a face down pile": las
+     * que marcas forman esa pila, y el resto, la otra. Se reconoce el titulo por
+     * su clave en el idioma de la partida.
+     *
+     * @return la linea de ayuda, o null si no es separar en pilas
+     */
+    public static String pileHint(final String title) {
+        if (title == null) {
+            return null;
+        }
+        final forge.util.Localizer l = forge.util.Localizer.getInstance();
+        if (title.equals(l.getMessage("lblSelectCardForFaceDownPile"))) {
+            return NeoText.get("pile.split.faceDown");
+        }
+        if (title.equals(l.getMessage("lblDivideCardIntoTwoPiles"))) {
+            return NeoText.get("pile.split.two");
+        }
+        if (title.equals(l.getMessage("lblSelectCardForLeftPile"))) {
+            return NeoText.get("pile.split.left");
+        }
+        return null;
+    }
+
+    public static String orderHint(final String top, final int count) {
+        if (top == null || count < 2) {
+            return null;
+        }
+        final forge.util.Localizer l = forge.util.Localizer.getInstance();
+        if (top.equals(l.getMessage("lblClosestToTop")) || top.equals(l.getMessage("lblTopOfLibrary"))) {
+            return NeoText.get("order.hint.top", count);
+        }
+        if (top.equals(l.getMessage("lblClosestToBottom"))) {
+            return NeoText.get("order.hint.bottom", count);
+        }
+        return null;
+    }
+
+    /**
+     * Ordenar disparos simultaneos, como lo hace Forge ({@code DualListBox}).
+     *
+     * <p>Pedido en itch.io el 28-09-2026: <i>"Is there no way to auto sort
+     * simultaneous triggered abilities? I think normal Forge had an auto button
+     * for that"</i>. Lo que trae Forge, y lo que se copia:
+     * <ul>
+     *   <li><b>"Auto"</b>: todas en el orden en que vienen, de un click.
+     *   <li><b>"Usar siempre este orden"</b>, marcada de fabrica: el motor lo
+     *       recuerda el resto de la partida y ya no pregunta cuando vuelvan a
+     *       coincidir los mismos disparos. La memoria es suya
+     *       ({@code PlayerControllerHuman.orderedSALookup}); nosotros solo le
+     *       devolvemos el {@code rememberDecision}.
+     *   <li><b>Si no se marco</b>, la vez siguiente el motor manda el orden de
+     *       la anterior en {@code destChoices} y la fuente vacia — "reordena si
+     *       quieres". Antes eso se devolvia tal cual sin preguntar (fuente
+     *       vacia = nada que elegir), o sea que se recordaba igual, en silencio.
+     *       Ahora sale el dialogo con ese orden ya puesto, como en Forge.
+     *   <li>"Olvidar los ordenes guardados" en el menu de Escape
+     *       ({@link #forgetSavedOrders}), que es el "Reset Saved Orders" de su
+     *       menu Game.
+     * </ul>
+     */
+    private <T> IGuiGame.OrderResult<T> orderRemembering(final String title, final String top,
+                                                         final List<T> source, final List<T> already) {
+        final List<T> all = new ArrayList<>(already);
+        all.addAll(source);
+        if (all.isEmpty()) {
+            return new IGuiGame.OrderResult<>(all, false);
+        }
+        final String heading = top == null || top.isBlank() ? title
+                : (title == null || title.isBlank() ? top : title + " — " + top);
+        final java.util.concurrent.atomic.AtomicBoolean keep =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        final List<T> picked = askUser(reply -> {
+            final List<ChoiceDialog<T>> self = new ArrayList<>(1);
+            final ChoiceDialog<T> dialog = new ChoiceDialog<>(
+                    heading, all, all.size(), all.size(), String::valueOf,
+                    handCardWidth(), already.isEmpty() ? null : already, true,
+                    chosen -> {
+                        keep.set(!self.isEmpty() && self.get(0).remember());
+                        reply.accept(chosen);
+                    });
+            self.add(dialog);
+            dialog.offerRemember(true);
+            table.getOverlay().show(dialog);
+        }, null);
+        if (picked == null || picked.size() != all.size()) {
+            return new IGuiGame.OrderResult<>(all, false);
+        }
+        if (keep.get()) {
+            savedOrders = true;
+        }
+        return new IGuiGame.OrderResult<>(picked, keep.get());
+    }
+
+    /** Si el motor tiene algun orden de disparos guardado en esta partida. */
+    private volatile boolean savedOrders;
+
+    public boolean hasSavedOrders() {
+        return savedOrders;
+    }
+
+    /**
+     * Olvida los ordenes guardados con "Usar siempre este orden": la proxima
+     * vez vuelve a preguntar. Es el "Reset Saved Orders" de Forge, y la valvula
+     * de escape (principio 7) de una casilla que viene marcada de fabrica.
+     */
+    public void forgetSavedOrders() {
+        savedOrders = false;
+        final IGameController controller = getGameController();
+        if (controller != null) {
+            controller.sendYieldUpdate(new forge.gamemodes.match.YieldUpdate.ClearAbilityOrders());
+        }
+    }
+
+    @Override
+    public List<CardView> manipulateCardList(final String title, final Iterable<CardView> cards,
+                                             final Iterable<CardView> manipulable, final boolean toTop,
+                                             final boolean toBottom, final boolean toAnywhere) {
+        final List<CardView> out = new ArrayList<>();
+        if (cards != null) {
+            cards.forEach(out::add);
+        }
+        return out;
+    }
+
+    /**
+     * Banquillo entre partida y partida de un Bo3 (draft y sellado con
+     * banquillo — {@code la auditoría del motor} C5).
+     *
+     * <p>Solo lo llama el motor cuando el formato admite banquillo
+     * ({@code GameType.isSideboardingAllowed()} — Commander no, draft y
+     * sellado si) y va a empezar la SEGUNDA partida en adelante de un
+     * partido ({@code Match.prepareAllZones}). Fuera de eso esto no se llama
+     * nunca, asi que no hace falta comprobar el formato aqui.
+     *
+     * <p>Se ofrece el pool ENTERO — lo que estaba en el mazo mas lo que se
+     * quedo fuera — y se elige de ahi el nuevo mazo, con el mismo tamano de
+     * antes: es mas simple que un "mueve de aqui para alla" con dos listas, y
+     * el mismo lenguaje visual que ya usa {@code ChoiceDialog} en todo lo
+     * demas (la carta es la protagonista, no una fila de texto). El motor
+     * valida el resultado el solo y vuelve a preguntar si algo no cuadra
+     * (tamano minimo, banquillo maximo), asi que aqui no hace falta calcular
+     * ningun limite de verdad — basta con pedir el mismo numero de cartas
+     * que ya tenia el mazo, que es ademas lo que de verdad significa
+     * "sideboard": cambias cartas, no encoges ni agrandas el mazo.
+     */
+    @Override
+    public List<PaperCard> sideboard(final CardPool sideboard, final CardPool main,
+                                     final String message) {
+        if (!interactive()) {
+            return null; // sin jugador: se queda el mazo de antes
+        }
+        final List<PaperCard> current = main.toFlatList();
+        // El pool entero (draft: la banda ya lo es; el resto: la suma). BestOf.
+        final List<PaperCard> pool = BestOf.sideboardPool(sideboard, main);
+        final int size = current.size();
+        // Cualquier tamanyo LEGAL del formato, como Forge, no exactamente el de
+        // antes. Con el mismo numero fijo, una carta de ante ganada que el
+        // motor ya habia metido en el mazo (Match.executeOwnershipChanges) no
+        // se podia volver a sacar: habia que elegir las 41 para seguir. Lo
+        // reportaron jugando eventos de la Aventura (Jumpstart), 29-09-2026.
+        final GameView now = getGameView();
+        final int[] range = BestOf.legalMainRange(now == null ? null : now.getGameType(), size, pool.size());
+        final List<PaperCard> picked = askUser(reply -> {
+            final ChoiceDialog<PaperCard> dialog = new ChoiceDialog<>(
+                    NeoText.get("sideboard.title"), pool, range[0], range[1],
+                    PaperCard::getName, handCardWidth(), current, reply::accept);
+            table.getOverlay().show(dialog);
+        }, null);
+        return picked;
+    }
+
+    // ===============================================================
+    // Presentacion: en fase 1 no aplica
+    // ===============================================================
+
+    /**
+     * El motor avisa de que el combate ha cambiado.
+     *
+     * <p>Se dispara cada vez que se declara o se retira un atacante o un
+     * bloqueador, asi que es lo que mantiene las flechas al dia mientras el
+     * jugador declara.
+     */
+    @Override
+    public void showCombat() {
+        pushToTable();
+    }
+
+    /**
+     * Empieza un pago de mana.
+     *
+     * <p>Aqui no hay que montar nada: los pips de la barra ya muestran
+     * {@code PlayerView.getMana(color)}, que ES la reserva. Lo unico que falta
+     * es destacarla mientras dura el pago, y que clicarla la gaste (eso lo
+     * cablea {@link #setTable}).
+     */
+    @Override
+    public void showManaPool(final PlayerView player) {
+        manaPool(player, true);
+    }
+
+    @Override
+    public void hideManaPool(final PlayerView player) {
+        manaPool(player, false);
+    }
+
+    /**
+     * Destaca (o apaga) la reserva de mana en la barra del jugador.
+     *
+     * <p>Solo es la luz de los pips. <b>No</b> decide si hay un pago en curso:
+     * eso lo dice la etiqueta del boton, ver {@link #payingMana}.
+     */
+    private void manaPool(final PlayerView player, final boolean on) {
+        if (!interactive()) {
+            return;
+        }
+        final UiDispatcher ui = uiDispatcher();
+        if (ui != null) {
+            ui.runLater(() -> table.setManaPoolActive(player, on));
+        }
+    }
+
+    @Override public void updateShards(final Iterable<PlayerView> players) { }
+    @Override public void enableOverlay() { }
+    @Override public void disableOverlay() { }
+    /**
+     * "Marca esta carta." Se recibe y <b>no se guarda</b>, a proposito.
+     *
+     * <p>Aqui habia un {@code focusCard} con la ultima carta que el motor
+     * hubiera marcado, y las preguntas genericas ({@code showConfirmDialog},
+     * {@code showOptionDialog}) salian con ella al lado. El problema es que esa
+     * carta <b>no tiene por que tener nada que ver</b>: no se limpia nunca, asi
+     * que lo que se ensenya es lo ultimo que pasara por delante. Reportado
+     * jugando: el aviso de <i>"tienes mana flotando que podrias perder"</i>
+     * salio con la criatura que se acababa de lanzar al lado, grande y con su
+     * texto, como si preguntara por ella.
+     *
+     * <p>Y no es un caso raro que haya que tapar: <b>ninguna</b> de esas dos
+     * preguntas es de carta. Las que Forge manda por ahi son conceder, cerrar
+     * como espectador, sobrescribir un fichero y el mana flotante
+     * ({@code InputPassPriority.passPriority}). Cuando la pregunta SI viene de
+     * una carta, el motor la pasa en la firma — {@code confirm(CardView, ...)}
+     * — y ahi si se ensenya.
+     *
+     * <p>Es la misma leccion que la del comandante que sale de la partida (ver
+     * {@code commanderByName}): <b>ensenyar la carta equivocada con esa
+     * seguridad es mucho peor que no ensenyar ninguna.</b>
+     */
+    @Override
+    public void setCard(final CardView card) {
+        // DE QUE CARTA VIENE LA PREGUNTA QUE LLEGA AHORA (Discord, 16-10-2026,
+        // Archangel of Strife: "War" o "Peace" sin decir de donde salia, y sin
+        // poder leer la carta). Forge lo avisa justo antes de las elecciones que
+        // no son disparos —"al entrar" (GenericChoice), "elige uno"— y el Forge
+        // de siempre la pinta en su panel de detalle; aqui se tiraba. Se apunta
+        // y la pregunta siguiente la ensenya (askingCard).
+        askingCard = card;
+        askingAt = System.currentTimeMillis();
+    }
+
+    /**
+     * De que carta habla una pregunta: la del disparo ({@link TriggerSubject}),
+     * y si no es un disparo, la que acaba de avisar {@link #setCard} — salvo que
+     * lo que se elige sean cartas, que ya se ven.
+     */
+    private List<TriggerSubject.Subject> subjectsFor(final List<?> choices) {
+        final List<TriggerSubject.Subject> about = TriggerSubject.forChoices(choices);
+        final CardView asking = takeAskingCard();
+        if (about.isEmpty() && asking != null && choices != null && !choices.isEmpty()
+                && !(choices.get(0) instanceof CardView)) {
+            return List.of(new TriggerSubject.Subject(asking, null));
+        }
+        return about;
+    }
+
+    /**
+     * La carta que un titulo del motor nombra con su numero ("Plea for Power
+     * (580) Vote:"): la fuente de algo del stack o una carta de la mesa con ese
+     * numero. Null si no hay numero o no esta a la vista.
+     */
+    private CardView cardNamedIn(final String title) {
+        final GameView gv = getGameView();
+        if (title == null || gv == null) {
+            return null;
+        }
+        final java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\((\\d+)\\)").matcher(title);
+        while (m.find()) {
+            final int id;
+            try {
+                id = Integer.parseInt(m.group(1));
+            } catch (final NumberFormatException e) {
+                continue;
+            }
+            if (gv.getStack() != null) {
+                for (final StackItemView si : gv.getStack()) {
+                    final CardView src = si.getSourceCard();
+                    if (src != null && src.getId() == id) {
+                        return src;
+                    }
+                }
+            }
+            if (gv.getPlayers() != null) {
+                for (final PlayerView p : gv.getPlayers()) {
+                    if (p.getBattlefield() == null) {
+                        continue;
+                    }
+                    for (final CardView c : p.getBattlefield()) {
+                        if (c.getId() == id) {
+                            return c;
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /** La ultima carta que una pregunta habria ensenyado (sin jugador delante). Solo pruebas. */
+    private volatile CardView lastShownSubject;
+
+    public CardView lastShownSubject() {
+        return lastShownSubject;
+    }
+
+    /** La carta de {@link #setCard} y cuando llego. */
+    private volatile CardView askingCard;
+    private volatile long askingAt;
+
+    /**
+     * La carta que acaba de avisar el motor, si la pregunta llega enseguida
+     * (4 s), y se gasta: no puede colgarse de una pregunta de dentro de un rato.
+     */
+    private CardView takeAskingCard() {
+        final CardView c = askingCard;
+        askingCard = null;
+        return c != null && System.currentTimeMillis() - askingAt < 4000 ? c : null;
+    }
+    @Override public void setPanelSelection(final CardView card) { }
+    @Override public void setPlayerAvatar(final LobbyPlayer player, final IHasIcon icon) { }
+    /**
+     * El motor dice que esa accion no vale ahi.
+     *
+     * <p>La suelta, por ejemplo, al clicar a un jugador al que no puedes
+     * atacar. Antes solo se anotaba en la consola: el jugador clicaba y no
+     * pasaba nada, sin explicacion.
+     */
+    @Override
+    public void flashIncorrectAction() {
+        trace("accion incorrecta");
+        // Y si se puede, DICIENDO POR QUE. "Ahi no se puede." no explica nada,
+        // y quien clica una carta que no responde concluye —con razon— que el
+        // juego esta roto: paso con Double Major, que apunta a un hechizo en la
+        // pila y con la pila vacia no tiene objetivo. Ver CantPlay.
+        final String why = CantPlay.reason(getGameController(), lastClicked);
+        showWhy(why != null ? why : NeoText.get("why.incorrect"));
+    }
+
+    @Override public void alertUser() { }
+
+    /**
+     * Un aviso del motor. <b>Y hay que ensenyarlo.</b>
+     *
+     * <p>Esto es por donde llega la explicacion de por que el motor no te deja
+     * terminar el combate, y se estaba tirando a la consola. Sintoma real, del
+     * usuario jugando:
+     *
+     * <blockquote>me pusieron goad a todas mis criaturas, se me olvido, y en mi
+     * fase de combate le estaba dando a OK todo el rato sin que pasara nada
+     * porque estoy obligado a atacar</blockquote>
+     *
+     * <p>Dos caminos llegan aqui, los dos del motor:
+     * <ul>
+     *   <li><b>Bloqueos</b>: {@code InputBlock.onOk} llama a
+     *       {@code CombatUtil.validateBlocks}, que devuelve una frase que
+     *       <i>nombra la carta</i> ("... cannot be blocked with 1 creatures you
+     *       have assigned"). Se ensenya tal cual: esta en ingles, pero dice
+     *       exactamente cual y por que.</li>
+     *   <li><b>Ataques</b>: el {@code PhaseHandler} manda un
+     *       "Attack declaration invalid" que no explica nada ni en ingles. Ese
+     *       se sustituye por algo que si sirve.</li>
+     * </ul>
+     */
+    @Override
+    public void message(final String message, final String title) {
+        log("[%s] %s", title, message);
+        if (message == null || message.isBlank()) {
+            return;
+        }
+        final forge.game.GameView gv = getGameView();
+
+        // --- El ataque: el motor no explica nada, asi que se CITA ---
+        //
+        // "Attack declaration invalid" y punto. Como no se puede afirmar cual
+        // criatura tiene la culpa — el goad ni siquiera llega al CardView —, se
+        // ensenya lo que el registro tenga escrito de hace poco. Es una cita, y
+        // se presenta como tal.
+        if (ATTACK_INVALID.equals(message.trim())) {
+            // Primero lo que el MOTOR calcula (WhyNot.explainAttack): que
+            // criaturas faltan y un ataque que si vale.  Solo sin Game (el
+            // cliente de una partida en red) se cae a citar el registro.
+            final forge.game.Game game = gv == null ? null : gv.getGame();
+            final java.util.List<String> engine = WhyNot.explainAttack(game == null ? null : game.getCombat());
+            if (!engine.isEmpty()) {
+                trace("por que no se puede: ataque | motor=%s", engine);
+                showWhy(NeoText.get("why.atk.head") + "\n" + String.join("\n", engine));
+                return;
+            }
+            final java.util.List<String> quoted = WhyNot.recentCompulsion(gv, 3);
+            trace("por que no se puede: ataque | registro=%d lineas", quoted.size());
+            showWhy(quoted.isEmpty()
+                    ? NeoText.get("why.attack")
+                    : NeoText.get("why.attack") + "\n\n"
+                            + NeoText.get("why.log", String.join("\n", quoted)));
+            return;
+        }
+
+        // --- El bloqueo: el motor SI explica, y nombra la carta ---
+        //
+        // Tres escalones, del que mas dice al que menos:
+        //   1. Una amenaza con un solo bloqueador: se puede decir la palabra.
+        //   2. Cualquiera de los siete motivos de validateBlocks, traducido.
+        //   3. Lo que diga el motor, en ingles pero nombrando la carta.
+        final String menaced = menacedWithOneBlocker(gv == null ? null : gv.getCombat());
+        final String translated = WhyNot.translate(message);
+        trace("por que no se puede: amenaza=%s | traducido=%s | motor=%s",
+                menaced == null ? "(ninguna)" : menaced,
+                translated == null ? "(no)" : "si", message.trim());
+
+        if (menaced != null) {
+            showWhy(NeoText.get("why.menace", menaced));
+        } else if (translated != null) {
+            showWhy(translated);
+        } else {
+            // Por AQUI llega tambien lo que NO es un error.
+            //
+            // `PlayerControllerHuman.notifyOfValue` usa este mismo metodo para
+            // contar lo que acaba de pasar: el resultado de una moneda ("Ganas"
+            // / "Cara"), el de un dado, el de una votacion, lo que revela un
+            // rival. Presentar eso como "no se puede declarar asi" es peor que
+            // no ensenyarlo: el jugador cree que ha hecho algo mal.
+            //
+            // No se intenta adivinar cual es cual — no hay forma de saberlo
+            // desde aqui, y cada intento acaba en una condicion mas. Se aplica
+            // la misma regla que WhyNot: afirmar SOLO lo que el motor afirma.
+            // Lo que reconocemos se explica; lo que no, se cita sin decir que
+            // sea un fallo.
+            showInfo(NeoText.get("engine.says", message.trim()));
+        }
+    }
+
+    /** Lo que dice el motor, sin llamarlo error. Ver el comentario de arriba. */
+    private void showInfo(final String text) {
+        if (!interactive() || table == null) {
+            return;
+        }
+        final UiDispatcher ui = uiDispatcher();
+        if (ui == null) {
+            return;
+        }
+        ui.runLater(() -> table.getActionBar().setWarning(text, false));
+    }
+
+    /**
+     * Atacantes con amenaza a los que les has puesto UN solo bloqueador.
+     *
+     * <p>Se saca de las vistas, sin adivinar nada: amenaza es una palabra clave
+     * de verdad ({@code Keyword.MENACE}, "no puede ser bloqueada excepto por
+     * dos o mas criaturas") y el {@code CombatView} dice cuantos bloqueadores
+     * llevas puestos en cada atacante.
+     *
+     * <p><b>Y no puede equivocarse.</b> Un atacante con amenaza y exactamente
+     * un bloqueador es ilegal SIEMPRE, asi que si aparece es de verdad un
+     * motivo por el que el motor te esta diciendo que no — aunque hubiera
+     * ademas otros. Cuando no aparece ninguno no se inventa nada: se ensenya lo
+     * que diga el motor.
+     *
+     * @return los nombres, o null si no hay ninguno en ese estado
+     */
+    public static String menacedWithOneBlocker(final forge.game.combat.CombatView combat) {
+        try {
+            if (combat == null || combat.getAttackers() == null) {
+                return null;
+            }
+            final StringBuilder names = new StringBuilder();
+            for (final CardView attacker : combat.getAttackers()) {
+                if (attacker == null || attacker.getCurrentState() == null) {
+                    continue;
+                }
+                if (!attacker.getCurrentState().hasKeyword(forge.game.keyword.Keyword.MENACE)) {
+                    continue;
+                }
+                if (blockerCount(combat, attacker) != 1) {
+                    continue;
+                }
+                if (names.length() > 0) {
+                    names.append(", ");
+                }
+                names.append(forge.neo.card.CardText.nameOf(attacker.getCurrentState()));
+            }
+            return names.length() == 0 ? null : names.toString();
+        } catch (final RuntimeException e) {
+            // Explicar mejor un fallo no vale una excepcion.
+            return null;
+        }
+    }
+
+    /** Cuantos bloqueadores lleva ese atacante, contando los que estas poniendo. */
+    private static int blockerCount(final forge.game.combat.CombatView combat,
+                                    final CardView attacker) {
+        // Mientras declaras, los tuyos van en "planned"; ya confirmados, en
+        // "blockers". Se mira el que tenga algo.
+        final var planned = combat.getPlannedBlockers(attacker);
+        if (planned != null && !planned.isEmpty()) {
+            return planned.size();
+        }
+        final var blockers = combat.getBlockers(attacker);
+        return blockers == null ? 0 : blockers.size();
+    }
+
+    /**
+     * Lo que manda el motor cuando la declaracion de ataque no vale.
+     *
+     * <p>Es una cadena literal de {@code PhaseHandler}, sin traducir, asi que
+     * reconocerla es estable. Y si algun dia cambiara, lo unico que pasaria es
+     * que se ensenyaria el texto del motor en vez del nuestro.
+     */
+    private static final String ATTACK_INVALID = "Attack declaration invalid";
+
+    /** Deja el aviso al lado del boton que acabas de pulsar. */
+    private void showWhy(final String text) {
+        if (!interactive() || table == null) {
+            return;
+        }
+        final UiDispatcher ui = uiDispatcher();
+        if (ui == null) {
+            return;
+        }
+        ui.runLater(() -> table.getActionBar().setWarning(text));
+    }
+
+    /**
+     * Un error del motor durante la partida, que hasta ahora sólo se veía en
+     * la traza — y {@code jugar.cmd} arranca sin consola (principio 6 de
+     * las notas de diseño: nunca dejar al jugador sin saber qué se espera de él).
+     *
+     * <p>Sin devolución de valor a propósito: el motor no espera respuesta, así
+     * que esto es {@code showWhy} y no {@code askOption} — se agenda en el hilo
+     * de UI y se vuelve enseguida, nunca bloquea el hilo del motor. Y por lo
+     * mismo, apagado sin ventana ({@code interactive()} en falso): no puede
+     * colgar {@code questcheck} ni {@code lobbycheck} esperando una pantalla
+     * que no existe.
+     */
+    @Override
+    public void showErrorDialog(final String message, final String title) {
+        System.err.println("  [ERROR] " + title + ": " + message);
+        if (!interactive() || table == null) {
+            return;
+        }
+        final UiDispatcher ui = uiDispatcher();
+        if (ui == null) {
+            return;
+        }
+        ui.runLater(() -> {
+            final ConfirmDialog dialog = new ConfirmDialog(
+                    title, message, List.of(NeoText.get("common.accept")), 0,
+                    index -> table.getOverlay().hide());
+            table.getOverlay().show(dialog);
+        });
+    }
+
+    /**
+     * Fases en las que SI queremos que el juego se pare.
+     *
+     * <p>En todas las demas se pasa solo. Es la clave de que jugar no sea
+     * pesado: sin esto hay que dar OK en cada paso del turno del rival.
+     *
+     * <p><b>Dos listas</b>, la de tus turnos y la de los del rival, como el
+     * Forge de siempre (pedido en r/forgeMTG el 15-09-2026). De fabrica las dos
+     * son las cuatro de antes, asi que quien no toque nada juega igual. Y se
+     * <b>guardan</b> ({@code NeoSettings.PHASE_STOPS_*}): antes volvian a las de
+     * fabrica en cada arranque, y marcar tus paradas cada vez es justo lo que
+     * no quiere quien las usa. Salvo en el tutorial, que pide poner una para
+     * probar y no tiene por que cambiarte las partidas de verdad.
+     */
+    private final java.util.Set<PhaseType> stops = loadStops(forge.neo.NeoSettings.PHASE_STOPS_MINE);
+    private final java.util.Set<PhaseType> theirStops = loadStops(forge.neo.NeoSettings.PHASE_STOPS_THEIRS);
+
+    private static final java.util.Set<PhaseType> DEFAULT_STOPS = java.util.EnumSet.of(
+            PhaseType.MAIN1,
+            PhaseType.MAIN2,
+            PhaseType.COMBAT_DECLARE_ATTACKERS,
+            PhaseType.COMBAT_DECLARE_BLOCKERS);
+
+    /** {@code "MAIN1,MAIN2"}; {@code "-"} es ninguna; sin valor, las de fabrica. */
+    private static java.util.Set<PhaseType> loadStops(final String key) {
+        final java.util.Set<PhaseType> set = java.util.EnumSet.noneOf(PhaseType.class);
+        final String raw = forge.neo.NeoSettings.get(key, null);
+        if (raw == null || raw.isBlank()) {
+            set.addAll(DEFAULT_STOPS);
+        } else {
+            for (final String name : raw.split(",")) {
+                try {
+                    set.add(PhaseType.valueOf(name.trim()));
+                } catch (final IllegalArgumentException ignored) {
+                    // "-" o una fase que ya no existe: se ignora
+                }
+            }
+        }
+        return java.util.Collections.synchronizedSet(set);
+    }
+
+    /** Marca o desmarca una parada de tus turnos ({@code mine}) o de los del rival. */
+    public void toggleStop(final boolean mine, final PhaseType phase) {
+        final java.util.Set<PhaseType> set = mine ? stops : theirStops;
+        if (!set.remove(phase)) {
+            set.add(phase);
+        }
+        if (eventSpy == null) {
+            final StringBuilder sb = new StringBuilder();
+            synchronized (set) {
+                for (final PhaseType p : set) {
+                    sb.append(sb.length() == 0 ? "" : ",").append(p.name());
+                }
+            }
+            forge.neo.NeoSettings.set(mine ? forge.neo.NeoSettings.PHASE_STOPS_MINE
+                    : forge.neo.NeoSettings.PHASE_STOPS_THEIRS, sb.length() == 0 ? "-" : sb.toString());
+            forge.neo.NeoSettings.save();
+        }
+    }
+
+    public boolean hasStop(final boolean mine, final PhaseType phase) {
+        return (mine ? stops : theirStops).contains(phase);
+    }
+
+    /**
+     * El motor pregunta: "esta fase la salto sin preguntarte?".
+     *
+     * <p>Cuidado con la logica de Forge ({@code YieldController}):
+     * <ul>
+     *   <li>Si el stack esta VACIO y decimos que si, se salta sin mas.</li>
+     *   <li>Si el stack tiene algo, esto se ignora y manda
+     *       {@code hasAvailableActions()}: si puedes responder, te para.</li>
+     * </ul>
+     * O sea que decir "salta" nunca te impide reaccionar a un hechizo del
+     * rival. Es justo el comportamiento de Arena.
+     */
+    @Override
+    public boolean isUiSetToSkipPhase(final PlayerView player, final PhaseType phase) {
+        if (phase == null) {
+            return false;
+        }
+        // El motor pasa el jugador del TURNO (PlayerControllerHuman), no a quien
+        // pregunta: con eso se elige la lista.
+        final boolean mine = player == null || isLocalPlayer(player);
+        if ((mine ? stops : theirStops).contains(phase)) {
+            // Con parada ya tienes prioridad: solo se apunta lo que se puede
+            // lanzar desde fuera de la mano, para no parar luego por ello.
+            if (!forge.gui.FThreads.isGuiThread()
+                    && getGameController() instanceof forge.player.PlayerControllerHuman human) {
+                NewlyCastable.observe(human.getPlayer());
+                // Y cuanto llevabas al entrar en la fase principal, para no
+                // preguntar al dejarla si ya has jugado algo.
+                MainPhaseActivity.observe(human.getPlayer());
+            }
+            return false;
+        }
+        // Una fase sin parada se salta... salvo que tengas algo que SOLO se puede
+        // activar en ella (Desert y el final del combate): si no, esa carta no
+        // se podria usar nunca. Solo desde el hilo del motor, que es el que
+        // pregunta antes de dar prioridad y el unico que puede leer la partida.
+        return !(!forge.gui.FThreads.isGuiThread()
+                && getGameController() instanceof forge.player.PlayerControllerHuman human
+                && (PhaseOnlyAbilities.worthStopping(human.getPlayer(), phase)
+                        // Y si acaba de aparecer algo que lanzar desde el
+                        // cementerio o el exilio (Ebondeath): una vez.
+                        || NewlyCastable.worthStopping(human.getPlayer())));
+    }
+
+    // ---------------------------------------------------------------
+    // Zonas que hay que ABRIR para poder contestar
+    // ---------------------------------------------------------------
+
+    /** El visor de zona lo abrio {@link #setSelectables}: lo cierra {@link #clearSelectables}. */
+    private final AtomicBoolean selectionZoneShown = new AtomicBoolean();
+
+    /**
+     * "El jugador tiene que clicar dentro de estas zonas."
+     *
+     * <p><b>Esto no es decoracion: es el unico camino para contestar a media
+     * Magic.</b> Cuando un hechizo tiene por objetivo una carta que no esta en
+     * la mesa — <i>"devuelve como objetivo una carta de criatura de tu
+     * cementerio"</i>, y con ella Regrowth, Eternal Witness, Regenerar y
+     * cientos mas — el motor <b>no</b> levanta ningun dialogo. Lo que hace es
+     * un {@code InputSelectTargets}, que marca las cartas con
+     * {@code setSelectables} y <b>se queda esperando un click sobre ellas</b>,
+     * alli donde esten.
+     *
+     * <p>Sin abrir la zona, esas cartas no se pintaban en ningun sitio, no
+     * habia forma de clicarlas, OK no se activaba nunca y el jugador veia esto:
+     * <i>"lance la carta que devuelve algo del cementerio, le di a OK y no paso
+     * nada, y tenia criaturas en el cementerio"</i>.
+     *
+     * <p>Hasta el 28-09-2026 lo pedia el motor con {@code openZones} desde
+     * {@code TargetSelection}, y lo cerraba con {@code restoreOldZones}. Desde
+     * el <i>"IGuiGame cleanup"</i> de Forge (#12056) esas llamadas ya no
+     * existen: la interfaz abre ella misma las zonas de lo que se le marca, y
+     * un maximo de 0 significa "solo resaltar, no abras nada". Es lo que hace
+     * ahora {@code CMatchUI.setSelectables}.
+     *
+     * <p>Se ignoran la mesa, la mano y el stack porque ya estan pintados y ya
+     * se clican. Lo demas se abre en el visor de zona, que sabe marcar y
+     * elegir. No bloquea: solo publica el panel y vuelve.
+     */
+    private boolean showSelectionZone(final Iterable<CardView> cards) {
+        if (!interactive() || cards == null) {
+            return false;
+        }
+        for (final CardView c : cards) {
+            final ZoneType zone = c == null ? null : c.getZone();
+            if (zone == null || c.getOwner() == null || zone == ZoneType.Battlefield
+                    || zone == ZoneType.Hand || zone == ZoneType.Stack) {
+                continue;
+            }
+            // Se abre UNA. Con objetivos repartidos entre varias zonas, el visor
+            // se cierra con un click y la pila de cada zona lo vuelve a abrir,
+            // que tambien deja elegir: no queda nada inalcanzable.
+            final PlayerView owner = c.getOwner();
+            final UiDispatcher ui = uiDispatcher();
+            if (ui != null) {
+                ui.runLater(() -> table.showZone(owner, zone));
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Lo que queda de {@code openZones}: el aviso de que hay objetivos validos
+     * en el exilio ({@code FControlGameEventHandler}). No se cierra solo: no va
+     * atado a ninguna eleccion.
+     */
+    @Override
+    public void openZones(final PlayerView controller, final Collection<ZoneType> zones,
+                          final Map<PlayerView, Object> players) {
+        if (!interactive() || zones == null || players == null) {
+            return;
+        }
+        for (final ZoneType zone : zones) {
+            if (zone == null || zone == ZoneType.Battlefield || zone == ZoneType.Hand
+                    || zone == ZoneType.Stack) {
+                continue;
+            }
+            for (final PlayerView owner : players.keySet()) {
+                if (owner != null && owner.getZoneSize(zone) > 0) {
+                    final UiDispatcher ui = uiDispatcher();
+                    if (ui != null) {
+                        ui.runLater(() -> table.showZone(owner, zone));
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}

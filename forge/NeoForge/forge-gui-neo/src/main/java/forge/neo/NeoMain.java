@@ -1,0 +1,1455 @@
+package forge.neo;
+
+import java.util.Locale;
+
+import forge.deck.Deck;
+import forge.deck.DeckSection;
+import forge.gui.GuiBase;
+import forge.item.PaperCard;
+import forge.model.FModel;
+import forge.neo.match.NeoGame;
+import forge.neo.match.NeoMatchUI;
+import forge.neo.platform.ConsoleUiDispatcher;
+import forge.neo.platform.FxUiDispatcher;
+import forge.neo.platform.NeoGuiBase;
+
+/**
+ * Punto de entrada de la interfaz Neo.
+ *
+ * <pre>
+ *   (sin argumentos)   lista los mazos de Commander        [fase 0]
+ *   play               partida humano-automatico vs IA     [fase 1]
+ *   watch              partida IA vs IA, solo observar     [fase 1]
+ * </pre>
+ *
+ * Opciones: {@code --deck=nombre} {@code --opponents=N} {@code --timeout=S} {@code -v}
+ */
+public final class NeoMain {
+
+    private NeoMain() {
+    }
+
+    public static void main(final String[] args) {
+        // UN .frp DE DOBLE CLIC (Discord, 03-11-2026; ver ReplayFileAssoc). El
+        // .exe de jpackage, si le pasan un fichero, SUSTITUYE sus argumentos de
+        // fabrica ("ui") por la ruta: sin esto se arrancaria el modo de consola.
+        if (args.length > 0 && replayArg(args) != null && !"ui".equalsIgnoreCase(args[0])) {
+            final String[] withUi = new String[args.length + 1];
+            withUi[0] = "ui";
+            System.arraycopy(args, 0, withUi, 1, args.length);
+            main(withUi);
+            return;
+        }
+        // Lo PRIMERO: las -D de la linea de comandos.
+        //
+        // Los lanzadores pasan todos los argumentos DESPUES de la clase, asi
+        // que una -D llega como argumento del programa y la JVM ni la mira.
+        // Sin esto, todas las banderas de traza y de prueba documentadas
+        // (-Dneo.images.debug, -Dneo.quest.demoCredits...) se ignoraban en
+        // silencio, que es la peor forma de no funcionar.
+        applySystemProperties(args);
+
+        // Y justo despues, ANTES del registro: donde van los datos del jugador.
+        // Con -Dneo.dataDir se quedan dentro de la carpeta del juego, que es lo
+        // que hace que se pueda dar a alguien en un zip. En cuanto alguien toca
+        // ForgeConstants ya no hay vuelta atras, y el registro es de los
+        // primeros en necesitar una carpeta. Ver NeoPortable.
+        NeoPortable.apply();
+
+        // Bajo Wine, las letras dibujadas por JavaFX y no por Direct2D: tiene
+        // que ser antes de que arranque JavaFX, que lee la propiedad una vez.
+        // Ver NeoFonts.
+        forge.neo.platform.NeoFonts.beforeJavaFx();
+        // Y mas presupuesto de video para JavaFX: sin el, la pantalla se
+        // quedaba en blanco tras varios duelos (ver PrismGuard).
+        forge.neo.platform.PrismGuard.beforeJavaFx();
+
+        final String cmd = args.length > 0 && !args[0].startsWith("-") ? args[0].toLowerCase(Locale.ROOT) : "list";
+
+        // Y aqui mismo, antes que nada mas: la prueba del propio NeoPortable.
+        //
+        // Va delante del cerrojo, del registro y del motor a proposito. Lo que
+        // comprueba es el fichero que le dejamos a Forge ANTES de que arranque,
+        // asi que necesita mandar ella sobre forge.assetsDir y neo.dataDir; y
+        // no le hacen falta las cartas, que son once segundos. Ver PortableCheck.
+        if ("portablecheck".equals(cmd)) {
+            banner("Perfil portable: que las rutas con acentos vuelvan igual");
+            try {
+                PortableCheck.run();
+            } catch (final java.io.IOException e) {
+                throw new IllegalStateException("no se ha podido montar el banco de pruebas", e);
+            }
+            return;
+        }
+
+        // Los atajos de teclado: tampoco necesitan motor ni cartas, y trabajan
+        // sobre un almacen en memoria. Ver ShortcutCheck.
+        if ("shortcutcheck".equals(cmd)) {
+            banner("Atajos de teclado: teclas de fabrica, estilos y guardado");
+            ShortcutCheck.run();
+            return;
+        }
+
+        // Las reglas del reparto de dano de combate (arrollar, orden): Java
+        // puro, sin motor ni ventana. Ver forge.neo.ui.DamageCheck.
+        if ("damagecheck".equals(cmd)) {
+            banner("Reparto de dano: arrollar y orden de bloqueadores");
+            forge.neo.ui.DamageCheck.run();
+            return;
+        }
+
+        // El reescalado de las cartas: Java puro, sin ventana. Ver ImageScaleCheck.
+        if ("imagecheck".equals(cmd)) {
+            banner("Cartas nitidas: el reescalado Lanczos");
+            ImageScaleCheck.run();
+            return;
+        }
+
+        // La presencia de Discord: solo cadenas, ni tuberia ni motor ni cartas.
+        // Aqui arriba con las otras tres baratas. Ver DiscordCheck.
+        if ("discordcheck".equals(cmd)) {
+            banner("Discord: la presencia, sin Discord");
+            forge.neo.discord.DiscordCheck.run();
+            return;
+        }
+
+        // El aviso de version nueva: comparar, leer a itch.io, los canales y
+        // que sin linea no pase nada. Sin motor. Ver forge.neo.update.UpdateCheck.
+        if ("updatecheck".equals(cmd)) {
+            banner("Version nueva: itch.io, sin romper el offline");
+            forge.neo.update.UpdateCheck.run();
+            return;
+        }
+        // El sonido de Linux (SteamOS): decodificar todos los MP3 sin JavaFX.
+        // Sin motor. Ver forge.neo.sound.AudioCheck.
+        if ("audiocheck".equals(cmd)) {
+            banner("Sonido sin JavaFX: los MP3 de Linux");
+            forge.neo.sound.AudioCheck.run();
+            return;
+        }
+        if ("backupcheck".equals(cmd)) {
+            banner("Exportar e importar tus datos (carpetas temporales)");
+            forge.neo.data.BackupCheck.run();
+            return;
+        }
+
+        // La Aventura (el Adventure de Forge) en su propio proceso, lanzado desde
+        // el menu. Va ANTES del cerrojo de instancia unica: el NeoForge que la
+        // abre sigue vivo, y con el cerrojo este proceso se cerraria solo. En el
+        // .exe es la unica forma de lanzarla: su Java no trae java.exe. Ver
+        // forge.neo.adventure.AdventureLauncher.
+        if ("adventure".equals(cmd)) {
+            forge.neo.adventure.AdventureNeoMain.main(new String[0]);
+            return;
+        }
+
+        // Un solo NeoForge abierto, y lo PRIMERO de todo: si ya hay uno, este
+        // proceso no tiene que hacer absolutamente nada, ni siquiera abrir el
+        // registro. Rotar el neo.log que el otro tiene abierto no se puede, y
+        // se veia: cada doble clic de mas dejaba una linea de error en el
+        // registro DEL OTRO. Ver NeoLock.
+        //
+        // Se puede preguntar aqui porque el cerrojo solo necesita saber donde
+        // van los datos (NeoPortable, ya aplicado): no toca ForgeConstants.
+        final boolean windowed = "ui".equals(cmd);
+        if (windowed && wantsSingleInstance(args) && !NeoLock.acquire()) {
+            // Con un .frp, que lo abra el que ya esta abierto.
+            final String replay = replayArg(args);
+            if (replay != null) {
+                NeoLock.handOver(replay);
+            }
+            System.exit(0);
+        }
+
+        // El registro, a fichero, ANTES de que nada escriba nada. Es lo que
+        // permite que jugar.cmd arranque sin ventana negra y que aun asi se
+        // pueda mirar lo que paso. Ver NeoLog.
+        NeoLog.start();
+
+        // Una importacion de datos preparada desde Ajustes ("Tus datos"): se
+        // aplica AQUI, con el cerrojo ya cogido y antes de que el motor o los
+        // ajustes lean nada. Con el juego abierto no se podia: al cerrarse
+        // volvia a guardar lo que tenia cargado encima de lo importado.
+        if (windowed && forge.neo.data.NeoBackup.hasPending(forge.neo.data.DataPlaces.desktop().root)) {
+            System.out.println("[neo] importando los datos preparados...");
+            forge.neo.data.NeoBackup.applyPending(forge.neo.data.DataPlaces.desktop());
+        }
+
+        final boolean verbose = has(args, "-v");
+        final String deckName = opt(args, "--deck", null);
+        final int opponents = Integer.parseInt(opt(args, "--opponents", "1"));
+        final int timeout = Integer.parseInt(opt(args, "--timeout", "300"));
+
+        banner("NeoForge");
+
+        // 1. Adaptador de plataforma. OBLIGATORIO antes de tocar el motor:
+        //    ForgeConstants resuelve el directorio de assets en su init estatico.
+        //
+        //    El hilo de interfaz depende del modo: con ventana es el de JavaFX,
+        //    sin ventana uno dedicado. Es lo unico que cambia entre fase 1 y 2.
+        //    (El cerrojo de instancia unica ya se pidio arriba, ANTES del
+        //    registro: NeoLock.acquire() no se puede llamar dos veces desde
+        //    el mismo proceso sin perder el cerrojo original — ver su
+        //    javadoc, "el cerrojo vive mientras viva el canal".)
+
+        GuiBase.setInterface(new NeoGuiBase(
+                windowed ? new FxUiDispatcher() : new ConsoleUiDispatcher()));
+        System.out.println("[1/2] IGuiBase registered -> NeoGuiBase ("
+                + (windowed ? "JavaFX thread" : "dedicated thread") + ")");
+
+        // Actualizar desde dentro: el cambio y su marcha atras, sobre una
+        // instalacion de mentira. Sin motor, pero con GuiBase (los textos lo
+        // necesitan). Ver forge.neo.update.SelfUpdateCheck.
+        // El modo streamer: que tape las IP (tambien en el chat, que necesita los
+        // textos y por eso va despues de GuiBase) y nada mas. Sin motor ni red.
+        if ("streamercheck".equals(cmd)) {
+            banner("Modo streamer: las IP no salen en pantalla");
+            forge.neo.net.StreamerCheck.run();
+            System.exit(0);
+        }
+        if ("selfupdatecheck".equals(cmd)) {
+            banner("Actualizar desde dentro: cambiar de version sin perder datos");
+            try {
+                forge.neo.update.SelfUpdateCheck.run();
+            } catch (final Exception e) {
+                throw new IllegalStateException(e);
+            }
+            System.exit(0);
+        }
+
+        // 2. Motor: base de cartas, ediciones, mazos, preferencias.
+        //
+        // ⚠️ CON VENTANA NO SE CARGA AQUI. Son once segundos largos, y hacerlos
+        // antes de Application.launch dejaba la pantalla vacia todo ese rato:
+        // sin ventana, sin icono en la barra de tareas y sin forma de saber si
+        // el doble clic habia funcionado. Ahora lo hace NeoApp en un hilo de
+        // fondo, con la pantalla de carga ya puesta. Ver NeoBoot.
+        //
+        // Sin ventana (play, watch, los comprobadores) se carga aqui de
+        // siempre: no hay a quien enseñarle una barra.
+        // artlesscheck arranca el motor con las cartas sin arte fuera: el
+        // ajuste solo se lee al montar la base de cartas. Ver ArtlessCards.
+        if ("artlesscheck".equals(cmd)) {
+            System.setProperty(forge.neo.card.ArtlessCards.FORCE_PROPERTY, "true");
+        }
+        if (!windowed) {
+            NeoBoot.loadEngine(null);
+        }
+
+        switch (cmd) {
+            case "play":
+                runGame(deckName, opponents, NeoMatchUI.Mode.AUTO_PLAY, timeout, verbose);
+                break;
+            case "watch":
+                runGame(deckName, opponents, NeoMatchUI.Mode.OBSERVE, timeout, verbose);
+                break;
+            case "ui":
+                banner("PHASE 2 - JavaFX interface");
+                // Los textos del motor, antes de construir NeoApp: hay campos
+                // suyos que tocan GameType, y GameType pide el Localizer nada
+                // mas cargarse. Ver NeoBoot.prepareTexts.
+                NeoBoot.prepareTexts();
+                // A partir de aqui el hilo de interfaz es el de JavaFX.
+                // Application.launch() no vuelve hasta que se cierra la ventana.
+                javafx.application.Application.launch(NeoApp.class, args);
+                break;
+            case "import":
+                importDeck(opt(args, "--file", null), opt(args, "--name", null));
+                break;
+            case "diag":
+                diagnoseImages(deckName);
+                break;
+            case "refreshartcheck":
+                // Volver a bajar una imagen SOLO si Scryfall la tiene en HD.
+                // Necesita red. Ver forge.neo.card.RefreshArtCheck.
+                banner("Volver a bajar la imagen: solo si hay HD");
+                forge.neo.card.RefreshArtCheck.run();
+                break;
+            case "deckgencheck":
+                // Las tablas del generador de mazos, leidas con bufer (FastDeckGen),
+                // iguales que las de Forge, y generando mazos. Sin red.
+                banner("Generador de mazos: tablas con bufer");
+                forge.neo.deck.FastDeckGenCheck.run();
+                break;
+            case "qualitycheck":
+                // La calidad de imagen elegida (normal/alta) es la que se VE, y
+                // cambiarla se nota sin reiniciar. Necesita red. Ver QualityCheck.
+                banner("Calidad de imagen: la elegida es la que se pinta");
+                forge.neo.card.QualityCheck.run();
+                break;
+            case "artecheck":
+                // El arte sin conexion (OfflineArt) se encuentra por NOMBRE, y
+                // el nombre lo calculan igual dos sitios: este codigo y el
+                // script que lo baja. Si se desalinean no hay error, solo
+                // cartas dibujadas donde deberia haber foto.
+                banner("Arte sin conexion: cuantas cartas lo encuentran");
+                checkOfflineArt();
+                break;
+            case "textcheck":
+                // El aviso de elegir objetivo lo escribe el motor en ingles a
+                // la fuerza y lo traducimos componiendolo (EngineText). Falla
+                // en silencio - se queda en ingles -, asi que sin esta prueba
+                // no hay forma de distinguir "falta traducir" de "lo rompi".
+                // No necesita las cartas, solo res/languages.
+                banner("Avisos de objetivo: que se traduzcan enteros");
+                TextCheck.run();
+                break;
+            case "langcheck":
+                // Los idiomas: el arabe (que pone NeoForge, no Forge) sin
+                // tocar los diez de siempre. Solo res/languages, sin cartas.
+                banner("Idiomas: el arabe sin tocar los diez de Forge");
+                LanguageCheck.run();
+                break;
+            case "deckcheck":
+                // Las reglas de construccion no se ven en una captura: hay que
+                // intentar romperlas para saber que se aplican.
+                banner("Reglas del deck builder");
+                forge.neo.deck.DeckRulesCheck.run();
+                break;
+            case "librarycheck":
+                // La enciclopedia: que cada filtro ensenye lo que dice y nada
+                // mas (una rara en Pauper, una reliquia de Ascenso...).
+                banner("Enciclopedia: expansiones, formatos y coleccion");
+                forge.neo.deck.LibraryCheck.run();
+                break;
+            case "artlesscheck":
+                // "Ocultar las cartas sin arte": ninguna en el juego, y lo
+                // demas intacto. Discord, 10-10-2026. Ver ArtlessCards.
+                banner("Las cartas sin arte, fuera del juego");
+                forge.neo.card.ArtlessCheck.run();
+                break;
+            case "packcheck":
+                // Lo que dice "Que puede salir" de un sobre de la tienda es lo
+                // que sale de verdad. Discord, 09-10-2026. Ver PackContentsCheck.
+                banner("Tienda: lo que puede salir en cada sobre");
+                forge.neo.quest.PackContentsCheck.run();
+                break;
+            case "draftcheck":
+                // El ciclo de un draft entero (3 sobres x 15 picks, los siete
+                // rivales eligiendo a la vez) no se ve en una captura.
+                banner("Draft completo, sin ventana");
+                forge.neo.draft.DraftCheck.run();
+                break;
+            case "cantplaycheck":
+                banner("Por que no se puede lanzar esa carta");
+                forge.neo.match.CantPlayCheck.run();
+                break;
+            case "stackblockcheck":
+                banner("Bloquear con varias fichas de una pila");
+                forge.neo.match.StackBlockCheck.run();
+                break;
+            case "commandercheck":
+                banner("Elegir comandante para la proxima partida");
+                forge.neo.deck.CommanderCheck.run();
+                break;
+            case "phantomlandcheck":
+                banner("Grenzo: las tierras del cementerio rival no se juegan");
+                forge.neo.match.PhantomLandCheck.run();
+                break;
+            case "chaosorbcheck":
+                banner("Chaos Orb: la errata de Old School, solo en Old School");
+                forge.neo.match.ChaosOrbCheck.run();
+                break;
+            case "lifegaincheck":
+                banner("Spike Feeder y Light of Promise");
+                forge.neo.match.LifeGainCheck.run();
+                break;
+            case "filtercheck":
+                banner("Mana: las fuentes que el motor no ve");
+                forge.neo.match.FilterCheck.run();
+                break;
+            case "preparecheck":
+                // Las criaturas que "se preparan": el hechizo NO se lanza
+                // desde la criatura, se lanza desde una copia que el motor
+                // deja en el EXILIO. Casi todas piden una condicion que no se
+                // provoca a voluntad, asi que la mesa se fabrica.
+                banner("Criaturas preparadas: donde acaba su hechizo");
+                forge.neo.match.PrepareCheck.run();
+                break;
+            case "actionscheck":
+                // Que el barrido de "que puedes hacer ahora" no mate la
+                // partida. El sintoma no es un fallo visible: el juego se
+                // CIERRA entero, sin ganador y sin una palabra. Hacen falta
+                // tres cosas a la vez (Coram + Henzie + algo que haya entrado
+                // este turno), asi que la mesa se fabrica. Ver SafeActions.
+                banner("Acciones: que el barrido no mate la partida");
+                forge.neo.match.ActionsCheck.run();
+                break;
+            case "devotioncheck":
+                // Que el auto-pass no se salte tu turno con Nyx Lotus: el motor
+                // cuenta su devocion a cero. Ver HiddenMana.
+                banner("Auto-pass: el mana que el motor no cuenta");
+                forge.neo.match.DevotionCheck.run();
+                break;
+            case "xtargetcheck":
+                // Que el auto-pass no pase con Chthonian Nightmare: el motor
+                // cuenta sus objetivos con X = 0. Ver XTargets.
+                banner("Auto-pass: los objetivos que dependen de X");
+                forge.neo.match.XTargetCheck.run();
+                break;
+            case "emergecheck":
+                // Reproduccion: emerge en el turno del rival con destello (Discord). No es de la bateria.
+                banner("Emerge con destello: lo que ofrece el motor");
+                forge.neo.match.EmergeCheck.run();
+                break;
+            case "autopaycheck":
+                // Reproduccion: "Auto" que gira de menos y deja mana flotando (Discord). No es de la bateria.
+                banner("Pago automatico: tierras giradas y reserva");
+                forge.neo.match.AutoPayCheck.run();
+                break;
+            case "electrocheck":
+                // Reproduccion: Electro en la zona de mando dando {R} (Discord). No es de la bateria.
+                banner("Electro en la zona de mando: el mana que entra");
+                forge.neo.match.ElectroCheck.run();
+                break;
+            case "persistcheck":
+                // Reproduccion: Cauldron of Souls + Atsushi contra Zodiark (Discord). No es de la bateria.
+                banner("Persistencia y sacrificio: lo que hace el motor");
+                forge.neo.match.PersistCheck.run();
+                break;
+            case "phaseguardcheck":
+                // La pregunta de dejar tu fase principal, leida del motor (Android). Ver PhaseGuard.
+                banner("Dejar la fase principal: la pregunta de Android");
+                forge.neo.match.PhaseGuardCheck.run();
+                break;
+            case "floatingcheck":
+                // Con mana flotante, el pago automatico deja elegir. Ver FloatingManaChoice.
+                banner("Mana flotante: el pago automatico deja elegir");
+                forge.neo.match.FloatingManaCheck.run();
+                break;
+            case "affordablexcheck":
+                // Elegir X: los botones, hasta lo que puedes pagar. Ver AffordableX.
+                banner("Elegir X: hasta lo que puedes pagar");
+                forge.neo.match.AffordableXCheck.run();
+                break;
+            case "improvisecheck":
+                // Que el auto-pass no pase con un hechizo de improvisar o
+                // convocar: la IA no cuenta lo que se gira. Ver TapToPay.
+                banner("Auto-pass: improvisar y convocar");
+                forge.neo.match.ImproviseCheck.run();
+                break;
+            case "aistallcheck":
+                // El vigia de la IA atascada pensando. Ver AiStallWatch.
+                banner("La IA atascada: el vigia avisa una vez");
+                try {
+                    forge.neo.match.AiStallCheck.run();
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+                break;
+            case "cmddraftcheck":
+                // Un Commander Draft de punta a punta. Ver CommanderDraft.
+                banner("Commander Draft: draft, editor y partida");
+                forge.neo.draft.CommanderDraftCheck.run();
+                break;
+            case "copycheck":
+                // Una copia en la mesa dice que carta hay debajo. Ver CopyOf.
+                banner("Copias: la carta de verdad debajo");
+                forge.neo.card.CopyOfCheck.run();
+                break;
+            case "sacoutletcheck":
+                // Un altar de sacrificio te deja la prioridad con algo del rival
+                // en el stack. Ver SacOutlets.
+                banner("Altar de sacrificio: responder en el turno del rival");
+                forge.neo.match.SacOutletCheck.run();
+                break;
+            case "anytypecheck":
+                // Lo robado con "mana de cualquier tipo" (Gonti, Black Cat)
+                // brilla cuando llega el mana. Ver AnyTypeMana.
+                banner("Mana de cualquier tipo: lo robado brilla");
+                forge.neo.match.AnyTypeCheck.run();
+                break;
+            case "ascentdraftcheck":
+                banner("Ascenso: el mazo de salida drafteado de sobres");
+                forge.neo.ascent.AscentDraftCheck.run();
+                break;
+            case "seedcheck":
+                // La misma semilla, la misma run: en este proceso y en otro.
+                // Ver AscentSeed y AscentSeedCheck.
+                banner("Ascenso: la semilla y el codigo de una run");
+                forge.neo.ascent.AscentSeedCheck.run();
+                break;
+            case "seed":
+                // Una semilla para el canal de Discord, con su ficha. Ver
+                // AscentSeedCheck.describe.
+                forge.neo.ascent.AscentSeedCheck.describe();
+                break;
+            case "seedprint":
+                // El segundo proceso de seedcheck: solo las huellas.
+                forge.neo.ascent.AscentSeedCheck.print();
+                break;
+            case "extracombatcheck":
+                // Un combate extra (Relentless Assault) desde la segunda fase
+                // principal: por que fases pasa y si pregunta atacantes.
+                banner("Combate extra: Relentless Assault");
+                forge.neo.match.ExtraCombatCheck.run();
+                break;
+            case "planechasecheck":
+                // Planechase jugado: el plano, la etiqueta de las fases y el
+                // dado clicado como en la mesa. Ver Planechase.
+                banner("Planechase: el plano y el dado planar");
+                forge.neo.match.PlanechaseCheck.run();
+                break;
+            case "archenemycheck":
+                // Archenemy jugado: los esquemas al azar, y una partida por
+                // cada forma de elegir al archienemigo. Ver Archenemy.
+                banner("Archenemy: quien es, sus esquemas y los equipos");
+                forge.neo.match.ArchenemyCheck.run();
+                break;
+            case "twopilescheck":
+                // Las pilas con varios rivales (Curator of Destinies): quien
+                // decide, por botones, y el efecto resuelto. Ver PlayerPick.
+                banner("Pilas: quien decide, con varios rivales");
+                forge.neo.match.TwoPilesCheck.run();
+                break;
+            case "mulligancheck":
+                // El mulligan amistoso: siempre a siete, tambien para la IA.
+                // Ver FriendlyMulligan.
+                banner("Mulligan: la regla amistosa");
+                forge.neo.match.MulliganCheck.run();
+                break;
+            case "phasestopcheck":
+                // Que te pare en una fase sin parada cuando tienes algo que solo
+                // vale ahi (Desert y el final del combate). Ver PhaseOnlyAbilities.
+                banner("Auto-pass: lo que solo se puede activar en una fase");
+                forge.neo.match.PhaseStopCheck.run();
+                break;
+            case "leakcheck":
+                // Varias partidas seguidas en la misma escena, y que las
+                // acabadas se suelten. La pantalla en blanco de la Aventura
+                // (25-09-2026) era una mesa retenida por duelo. Ver LeakCheck.
+                banner("Memoria: las mesas de partidas acabadas se sueltan");
+                try {
+                    forge.neo.match.LeakCheck.run();
+                } catch (final RuntimeException e) {
+                    throw e;
+                } catch (final Exception e) {
+                    throw new IllegalStateException(e);
+                }
+                break;
+            case "attackcheck":
+                // Que el piloto automatico no se quede dando OK para siempre a
+                // un ataque obligado (Juggernaut). Colgo questcheck 90 minutos
+                // el 14-09-2026, y solo con mazos al azar. Ver autoPressOk.
+                banner("Piloto automatico: el ataque obligado");
+                forge.neo.match.AttackCheck.run();
+                break;
+            case "blockcheck":
+                // El gemelo: el piloto pulsaba OK sin bloquear a una criatura
+                // obligada (Lure, Watchdog), InputBlock lo rechazaba y se
+                // quedaba esperando para siempre. Corto questcheck a los 300 s
+                // el 15-09-2026. Ver NeoMatchUI.answerInvalidBlock.
+                banner("Piloto automatico: el bloqueo obligado");
+                forge.neo.match.BlockCheck.run();
+                break;
+            case "attachcheck":
+                // A quien va una maldicion y a quien protege una batalla: estan
+                // en la mesa de su controlador (Discord, 03-10-2026). Ver
+                // AttachedToPlayer.
+                banner("Maldiciones y batallas: a quien van");
+                forge.neo.match.AttachCheck.run();
+                break;
+            case "topcheck":
+                // Jugar desde lo alto de la biblioteca (Bolas's Citadel y
+                // familia): que el motor deje MIRAR esa carta y JUGARLA, que
+                // son dos permisos distintos. Ver TopOfLibraryCheck.
+                banner("Lo alto de la biblioteca: mirarla y jugarla");
+                forge.neo.match.TopOfLibraryCheck.run();
+                break;
+            case "plotcheck":
+                // Lanzar una carta planeada (Plot): el motor la sabe lanzar
+                // pero no la publica como lanzable desde el exilio. Reportado
+                // en itch.io el 27-09-2026. Ver PlotCheck y NeoMatchUI.plotted.
+                banner("Lo planeado: lanzarlo desde el exilio");
+                forge.neo.match.PlotCheck.run();
+                break;
+            case "mayhemcheck":
+                // Lanzar con Caos (Mayhem) desde el cementerio: el mismo
+                // olvido del motor que lo planeado. Reportado en itch.io el
+                // 28-09-2026. Ver MayhemCheck y OutsideCasts.
+                banner("El caos: lanzarlo desde el cementerio");
+                forge.neo.match.MayhemCheck.run();
+                break;
+            case "exilecastcheck":
+                // Jugar desde el exilio y el cementerio, en la mesa de quien lo
+                // perdia a mitad de partida (Discord, 31-10-2026). Ver ExileCastCheck.
+                banner("Jugar desde el exilio: la mesa de Meria");
+                forge.neo.match.ExileCastCheck.run();
+                break;
+            case "commandercolorcheck":
+                // El color elegido antes de empezar (Clara Oswald, The
+                // Prismatic Piper) se perdia al cambiar de zona y All Is Dust
+                // se la saltaba. Discord, 11-10-2026. Ver CommanderColorKeeper.
+                banner("El color elegido del comandante");
+                forge.neo.match.CommanderColorCheck.run();
+                break;
+            case "optionalpaycheck":
+                // Un pago opcional ("puede pagar {4}", Paralyze) no se paga
+                // solo. Discord, 02-10-2026. Ver OptionalPayCheck.
+                banner("Un pago opcional no se paga solo");
+                forge.neo.match.OptionalPayCheck.run();
+                break;
+            case "handabilitycheck":
+                // Ciclar sin querer: una carta de la mano que no se puede lanzar
+                // y que tocarla la ciclaria pregunta antes. Ver HandAbilityCheck.
+                banner("Ciclar sin querer");
+                forge.neo.match.HandAbilityCheck.run();
+                break;
+            case "loglinkscheck":
+                // Las cartas del registro: que trozos de una linea son una carta.
+                banner("Las cartas del registro");
+                forge.neo.match.LogLinksCheck.run();
+                break;
+            case "menucheck":
+                // El orden del menu: mover, esconder y casillas nuevas.
+                banner("El orden del menu");
+                forge.neo.MenuLayoutCheck.run();
+                break;
+            case "handlogcheck":
+                // Tu mano en el registro cada turno (HandLog).
+                banner("Tu mano en el registro");
+                forge.neo.match.HandLogCheck.run();
+                break;
+            case "banlistcheck":
+                // Tu lista de prohibidas de cada formato (BanList).
+                banner("Las cartas prohibidas, editables");
+                forge.neo.deck.BanListCheck.run();
+                break;
+            case "devmodecheck":
+                // El modo desarrollador: las trampas de Forge, desde el menu Dev.
+                banner("Modo desarrollador: las trampas de Forge");
+                forge.neo.match.DevModeCheck.run();
+                break;
+            case "destroysoundcheck":
+                // Destruir suena segun el tipo de carta (Discord: el Sol Ring gritaba).
+                banner("Destruir: el sonido segun el tipo");
+                forge.neo.sound.DestroySoundCheck.run();
+                break;
+            case "soundcheck":
+                // Los sonidos de Neo Forge: que salen del jar, el azar y el ajuste.
+                banner("Los sonidos de Neo Forge");
+                forge.neo.sound.SoundCheck.run();
+                break;
+            case "affectedcheck":
+                // Lo que otras cartas le hacen a esta (Collector Ouphe, Arrest, provocar).
+                banner("Lo que afecta a una carta");
+                forge.neo.card.AffectedCheck.run();
+                break;
+            case "outcheck":
+                // Has caido en una mesa de 3+: terminar la partida en vez de mirar a las IA.
+                banner("Has caido: terminar la partida");
+                forge.neo.match.OutCheck.run();
+                break;
+            case "foreachcheck":
+                // "Uno por jugador" tambien cuando elige la IA (Nils, Discipline Enforcer).
+                banner("Uno por jugador, tambien la IA");
+                forge.neo.match.ForEachCheck.run();
+                break;
+            case "friendlycheck":
+                // "Agresividad de la IA contigo": en Commander, con el ajuste,
+                // la IA ataca a otra IA si no eres claramente la mayor amenaza.
+                banner("La IA amable");
+                forge.neo.match.FriendlyCheck.run();
+                break;
+            case "bo3check":
+                // Al mejor de 3 fuera del draft: Estandar con banquillo y
+                // Commander, enteros y sin ventana. Ver Bo3Check.
+                banner("Al mejor de 3");
+                forge.neo.match.Bo3Check.run();
+                break;
+            case "replaycheck":
+                // Las repeticiones (Forge #12255): se graban segun el ajuste,
+                // la lista las lee y sus botones se traducen. Ver ReplayCheck.
+                banner("Las repeticiones");
+                forge.neo.match.ReplayCheck.run();
+                break;
+            case "askingcardcheck":
+                // Una eleccion que no es disparo dice de que carta viene
+                // (Archangel of Strife, Discord 16-10-2026). Ver AskingCardCheck.
+                banner("Una eleccion dice de que carta viene");
+                forge.neo.match.AskingCardCheck.run();
+                break;
+            case "triggerdetailcheck":
+                // El modo de un disparo dice de QUIEN habla ("Damaged:
+                // Lisian"). Discord, 09-10-2026. Ver TriggerDetailCheck.
+                banner("El modo de un disparo dice de quien habla");
+                forge.neo.match.TriggerDetailCheck.run();
+                break;
+            case "wardcheck":
+                // Que se vea el Ward al apuntar (Discord, 29-10-2026). Ver WardGuard.
+                banner("Apuntar a algo con Ward: se ve su coste");
+                forge.neo.match.WardGuardCheck.run();
+                break;
+            case "tapcheck":
+                // Que tierras giraria "Auto", con la carta en la mano (Discord,
+                // 29-10-2026). Ver TapPreview.
+                banner("La prevision del pago, con la carta en la mano");
+                forge.neo.match.TapPreviewCheck.run();
+                break;
+            case "moxchaincheck":
+                // Girar fuentes de mana en cadena y rapido (Mox Opal sin su
+                // mana, Discord 01-10-2026). Ver MoxChainCheck.
+                banner("Fuentes de mana en cadena: el Mox no pierde su mana");
+                forge.neo.match.MoxChainCheck.run();
+                break;
+            case "abilitygroupcheck":
+                // El menu de habilidades junta las iguales con "xN" (Marvin,
+                // Murderous Mimic). Pedido en Discord el 01-10-2026. Ver
+                // AbilityGroupCheck y AbilityMenu.Grouped.
+                banner("El menu de habilidades junta las iguales");
+                forge.neo.match.AbilityGroupCheck.run();
+                break;
+            case "bannercheck":
+                // El cartel central (espejo del stack) una cosa por linea:
+                // quien, que carta, que hace, a quien. Pedido en Discord el
+                // 01-10-2026. Ver BannerCheck y TableScreen.bannerText.
+                banner("El cartel central, una cosa por linea");
+                forge.neo.match.BannerCheck.run();
+                break;
+            case "harmonizecheck":
+                // Lanzar con Armonizar (Harmonize) desde el cementerio: el
+                // mismo olvido que el caos. Reportado el 30-09-2026 (Nature's
+                // Rhythm). Ver HarmonizeCheck y OutsideCasts.
+                banner("Armonizar: lanzarlo desde el cementerio");
+                forge.neo.match.HarmonizeCheck.run();
+                break;
+            case "readingcheck":
+                // La pausa mientras lees una carta: que el motor se pare DE
+                // VERDAD (no solo la pantalla), que vuelva al cerrarla y que
+                // el tope la suelte pase lo que pase. Ver ReadingCheck.
+                banner("Pausa por lectura: el motor se para mientras lees");
+                forge.neo.match.ReadingCheck.run();
+                break;
+            case "macrocheck":
+                // Las macros de Forge (grabar / repetir), jugadas: un click en
+                // un Bosque grabado en un turno y repetido en el siguiente.
+                banner("Macros: grabar y repetir como el Forge de escritorio");
+                forge.neo.match.MacroCheck.run();
+                break;
+            case "yieldcheck":
+                // "Pasar turno" y "control total": que lleguen al controlador
+                // que consulta el motor (el relevo de ManaColor), no solo al
+                // de la interfaz. Ver YieldCheck.
+                banner("Pase automatico: pasar turno y control total");
+                forge.neo.match.YieldCheck.run();
+                break;
+            case "questprefscheck":
+                // Las preferencias de la Quest (las de Forge): rotulos en los
+                // once idiomas, validacion y volver a como venian. Ver QuestPrefsCheck.
+                banner("Quest: las preferencias de Forge");
+                forge.neo.quest.QuestPrefsCheck.run();
+                break;
+            case "relicpasscheck":
+                // Los disparos de TUS reliquias de Ascenso se dejan pasar solos;
+                // los del rival, no. Ver RelicPassCheck.
+                banner("Reliquias: sus disparos pasan solos");
+                forge.neo.match.RelicPassCheck.run();
+                break;
+            case "manacheck":
+                // Que una tierra de dos colores pregunte cual da. La mesa que
+                // lo provoca (dos montanyas + una dual, y un coste de {R}{G})
+                // no sale cuando quieres en una partida, y el fallo es mudo.
+                banner("Mana: que la dual pregunte el color");
+                forge.neo.match.ManaCheck.run();
+                break;
+            case "combatcheck":
+                // Las pistas de combate: por que el motor no te deja terminar.
+                // Un menace bloqueado con una sola criatura no se provoca a
+                // voluntad en una partida, asi que el combate se fabrica.
+                banner("Combate: por que no se puede");
+                forge.neo.match.CombatCheck.run();
+                break;
+            case "lookcheck":
+                // Trocear la hoja de sprites, copiar lo importado y dejar la
+                // musica donde el motor la busca. Nada de eso se ve en una
+                // captura: o sale un numero, o no sale.
+                banner("Personalizacion: avatares, importar y musica");
+                forge.neo.look.LookCheck.run();
+                break;
+            case "netcheck":
+                // Los mazos de internet. Es la UNICA prueba que necesita
+                // linea: sin ella avisa y se salta la descarga, en vez de
+                // fallar — que es exactamente lo que tiene que hacer la
+                // pantalla.
+                banner("Mazos de internet");
+                forge.neo.deck.NetCheck.run();
+                break;
+            case "questcheck":
+                // El progreso de la aventura y, sobre todo, que los rivales
+                // suban contigo. Eso no se ve jugando sin ganar veinte duelos.
+                banner("Aventura: progreso y nivel de los rivales");
+                forge.neo.quest.QuestCheck.run();
+                break;
+            case "questdraftcheck":
+                // El torneo de draft de la Quest entero: entrar, draftear,
+                // montar, una partida de verdad, el cuadro, los premios y
+                // devolver la entrada si se abandona.
+                banner("Quest: torneo de draft");
+                forge.neo.quest.QuestDraftCheck.run();
+                break;
+            case "dailypackcheck":
+                // El sobre del dia de la Quest: uno al dia (UTC), de las
+                // expansiones de la Quest, apuntado junto a ella.
+                banner("Quest: el sobre del dia");
+                forge.neo.quest.DailyPackCheck.run();
+                break;
+            case "colosseumcheck":
+                // El Coliseo de la Quest de Commander: precio y rivales que
+                // suben con la Quest, mazos legales, premio, y una partida a
+                // cuatro de verdad (con tope).
+                banner("Quest: el Coliseo");
+                forge.neo.quest.ColosseumCheck.run();
+                break;
+            case "questunlockcheck":
+                // Desbloquear expansiones en una Quest con expansiones elegidas.
+                banner("Quest: desbloquear expansiones");
+                forge.neo.quest.QuestUnlockCheck.run();
+                break;
+            case "questcupcheck":
+                // El torneo de la Quest: niveles, cuadro, guardado a medias,
+                // premio, final perdida y una partida de cada formato.
+                banner("Quest: el torneo");
+                forge.neo.quest.QuestCupCheck.run();
+                break;
+            case "tournamentcheck":
+                // El torneo entero sin ventana: generar rivales, jugar ronda
+                // a ronda hasta perder o completarlo, y que se guarde, se
+                // recargue y se borre en el momento correcto.
+                banner("Torneo: rondas y persistencia");
+                forge.neo.tournament.TournamentCheck.run();
+                break;
+            case "sealedcheck":
+                // Un sellado entero sin ventana: que los seis sobres sean seis
+                // y no seis copias del mismo, y que el mazo salga jugable.
+                banner("Sellado: seis sobres y siete rivales");
+                forge.neo.draft.SealedCheck.run();
+                break;
+            case "lobbycheck":
+                // Una partida privada entera: servidor y invitado en el mismo
+                // proceso, por localhost. Es la unica forma de comprobar la red
+                // desde aqui, y coge lo que una captura no puede: que el mazo
+                // del invitado viaje, que le lleguen los deltas y que las dos
+                // interfaces contesten.
+                banner("Partida privada: anfitrion e invitado");
+                forge.neo.net.LobbyCheck.run();
+                break;
+            case "neteventcheck":
+                // El draft y el sellado EN RED, enteros y sin ventana. Cabe en
+                // un solo proceso porque aqui no se juega ninguna partida: el
+                // draft es puro mensaje, y el anfitrion recibe sus sobres por
+                // el mismo sitio que un invitado.
+                banner("Draft y sellado en red");
+                forge.neo.net.NetEventCheck.run();
+                break;
+            case "lobbyguest":
+                // El invitado de lobbycheck. No se usa jugando: existe para que
+                // la prueba pueda tener las dos partes en procesos distintos,
+                // que es la unica forma de que no compartan el hilo de interfaz.
+                forge.neo.net.LobbyGuest.run(args);
+                break;
+            case "tutorialcheck":
+                // El tutorial se rompe en silencio: un nombre de carta mal
+                // escrito deja la mano vacia, un texto que falta ensenya la
+                // clave, y un gesto inventado deja un paso que no se puede
+                // terminar. Nada de eso se ve en una captura.
+                banner("Tutorial: posiciones, textos y gestos");
+                forge.neo.tutorial.TutorialCheck.run();
+                break;
+            case "ascentcheck":
+                // La sonda de la fase 0 de Ascenso. Las cinco cosas sobre las
+                // que descansa el modo entero — mazo corto, vida arrastrada,
+                // jefe con esquemas, una reliquia nuestra y que esa reliquia no
+                // se cuele en el catalogo — fallarian en silencio o muy tarde.
+                banner("Ascenso: la sonda de la fase 0");
+                forge.neo.ascent.AscentProbe.run();
+                // Y el bucle del modo: una run entera, sin ventana. Va detras
+                // porque no tiene sentido medir el recorrido si el motor no
+                // deja hacer lo que el modo supone — si la sonda falla, revienta
+                // aqui mismo y esto no llega a correr.
+                banner("Ascenso: una run entera, sin ventana");
+                forge.neo.ascent.AscentCheck.run();
+                break;
+            case "deckgenseed":
+                // Si el generador de Forge da el mismo mazo con la misma semilla (medida).
+                banner("Ascenso: el generador de mazos, sembrado");
+                forge.neo.ascent.AscentDeckgenProbe.run(Long.parseLong(opt(args, "--seed", "20261028")),
+                        Integer.parseInt(opt(args, "--bracket", "3")));
+                break;
+            case "ascentpartner":
+                // Que la run de Ascenso empiece con la pareja de mando (medida).
+                banner("Ascenso: la pareja de mando en el mazo de salida");
+                forge.neo.ascent.AscentDeckgenProbe.partners();
+                break;
+            case "ascenttable":
+                // Las mesas de cuatro de Ascenso, MEDIDAS: la misma casilla a 1
+                // contra 1 y a cuatro, con una IA llevando tu mazo. No es un
+                // comprobador: tarda, y lo que dice es un numero para afinar.
+                banner("Ascenso: las mesas de cuatro, medidas");
+                if (has(args, "--fall")) {
+                    // Que al caer en una mesa la partida se cierra (AscentTableEnd).
+                    if (!forge.neo.ascent.AscentTableProbe.fall()) {
+                        throw new IllegalStateException("la mesa no se cierra al caer");
+                    }
+                } else {
+                    forge.neo.ascent.AscentTableProbe.run(Integer.parseInt(opt(args, "--games", "3")),
+                            has(args, "--final"));
+                }
+                break;
+            case "reliccheck":
+                // Las 37 reliquias, JUGADAS: una partida por cada una, mirando
+                // en la mesa que el efecto ocurre de verdad. Va aparte de
+                // ascentcheck porque es lo unico del modo que tarda minutos, y
+                // porque lo que caza es de otra naturaleza: no que el modo se
+                // recorra, sino que un script mal escrito NO hace nada y Forge
+                // no lo dice por ningun sitio.
+                banner("Ascenso: las reliquias, jugadas una a una");
+                forge.neo.ascent.AscentRelicCheck.run(opt(args, "--solo", null));
+                break;
+            case "questmake":
+                // Una aventura de pruebas con dinero de sobra. La tienda y los
+                // drops no se pueden mirar sin creditos, y conseguirlos jugando
+                // son veinte duelos.
+                banner("Aventura de pruebas");
+                forge.neo.quest.QuestSandbox.run(args);
+                break;
+            default:
+                listDecks();
+                System.out.println();
+                System.out.println("  Comandos: play | watch     (--deck=nombre --opponents=N --timeout=S -v)");
+                break;
+        }
+
+        System.exit(0);
+    }
+
+    // ---------------------------------------------------------------
+
+    /**
+     * {@code -Dclave=valor} de la linea de comandos a propiedades de sistema.
+     *
+     * <p>Sin valor vale "true", que es como se usan las banderas de traza.
+     */
+    private static void applySystemProperties(final String[] args) {
+        for (final String arg : args) {
+            if (arg == null || !arg.startsWith("-D") || arg.length() <= 2) {
+                continue;
+            }
+            final String body = arg.substring(2);
+            final int eq = body.indexOf('=');
+            final String key = eq < 0 ? body : body.substring(0, eq);
+            final String value = eq < 0 ? "true" : body.substring(eq + 1);
+            if (!key.isEmpty()) {
+                System.setProperty(key, value);
+            }
+        }
+    }
+
+    private static void runGame(final String deckName, final int opponents,
+                                final NeoMatchUI.Mode mode, final int timeout, final boolean verbose) {
+
+        final Deck deck = deckName == null ? NeoGame.firstCommanderDeck() : NeoGame.commanderDeck(deckName);
+        if (deck == null) {
+            System.out.println();
+            System.out.println("  No se ha encontrado ningun mazo de Commander"
+                    + (deckName == null ? "" : " llamado '" + deckName + "'") + ".");
+            System.out.println("  Buscados en %APPDATA%\\Forge\\decks\\commander\\");
+            return;
+        }
+
+        banner("FASE 1 - partida de Commander");
+        final long t0 = System.currentTimeMillis();
+        final NeoGame.Result r = NeoGame.play(deck, opponents, mode, timeout, verbose);
+        final long secs = (System.currentTimeMillis() - t0) / 1000;
+
+        System.out.println();
+        if (r.completed) {
+            banner("OK - partida completada");
+            System.out.printf(Locale.ROOT,
+                    "  Turnos: %d | decisiones contestadas: %d | duracion: %ds%n",
+                    r.turns, r.decisions, secs);
+            if (r.winner != null && !r.winner.isEmpty()) {
+                System.out.println("  Ganador: " + r.winner);
+            }
+            System.out.println();
+            System.out.println("  El motor ha jugado una partida entera conducida por NeoMatchUI,");
+            System.out.println("  sin Swing. Camino de lectura y de escritura validados.");
+            System.out.println("  Siguiente: FASE 2 - ventana JavaFX y render de carta.");
+        } else {
+            banner("FALLO - la partida no termino");
+            System.out.printf(Locale.ROOT, "  Turnos alcanzados: %d | decisiones: %d%n",
+                    r.turns, r.decisions);
+        }
+    }
+
+    /** Quita la extension de un nombre de fichero. */
+    private static String stripExtension(final String fileName) {
+        final int dot = fileName.lastIndexOf('.');
+        return dot > 0 ? fileName.substring(0, dot) : fileName;
+    }
+
+    /** Importa una decklist pegada y la guarda como mazo de Commander. */
+    private static void importDeck(final String file, final String name) {
+        if (file == null) {
+            System.out.println("  Uso: import --file=lista.txt [--name=nombre]");
+            return;
+        }
+        final java.io.File f = new java.io.File(file);
+        if (!f.exists()) {
+            System.out.println("  No existe el fichero: " + f.getAbsolutePath());
+            return;
+        }
+        banner("IMPORTAR MAZO");
+        try {
+            final String text = forge.neo.deck.DeckImporter.readFile(f);
+            final String deckName = name != null ? name : stripExtension(f.getName());
+
+            final var result = forge.neo.deck.DeckImporter.importCommander(text, deckName);
+            final Deck deck = result.deck;
+            if (deck == null) {
+                System.out.println("  El importador no ha devuelto ningun mazo.");
+                return;
+            }
+
+            System.out.printf(Locale.ROOT, "  Reconocidas: %d cartas%n", result.accepted);
+            if (result.unknown > 0) {
+                System.out.printf(Locale.ROOT, "  NO reconocidas: %d%n", result.unknown);
+                for (final String p : result.problems) {
+                    System.out.println("     - " + p);
+                }
+            }
+
+            System.out.printf(Locale.ROOT, "  Mazo principal: %d%n", deck.getMain().countAll());
+            if (deck.has(DeckSection.Commander)) {
+                for (final java.util.Map.Entry<PaperCard, Integer> e : deck.get(DeckSection.Commander)) {
+                    System.out.println("  Comandante: " + e.getKey().getName()
+                            + " [" + e.getKey().getEdition() + "]");
+                }
+            } else {
+                System.out.println("  AVISO: el mazo no tiene comandante.");
+            }
+
+            forge.neo.deck.DeckImporter.save(deck);
+            System.out.println();
+            System.out.println("  Guardado como '" + deck.getName() + "'.");
+        } catch (final Exception e) {
+            System.out.println("  Fallo al importar: " + e);
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * Diagnostico de imagenes: para una carta real del mazo, muestra la clave
+     * de imagen, si el fichero esta en disco y que pasa al pedir la descarga.
+     */
+    private static void diagnoseImages(final String deckName) {
+        final Deck deck = deckName == null ? NeoGame.firstCommanderDeck() : NeoGame.commanderDeck(deckName);
+        if (deck == null) {
+            System.out.println("  No hay mazo.");
+            return;
+        }
+        banner("DIAGNOSTICO DE IMAGENES");
+        System.out.println("  CACHE_CARD_PICS_DIR = "
+                + forge.localinstance.properties.ForgeConstants.CACHE_CARD_PICS_DIR);
+        System.out.println();
+
+        int n = 0;
+        for (final java.util.Map.Entry<PaperCard, Integer> e : deck.getMain()) {
+            final PaperCard pc = e.getKey();
+            final forge.game.card.CardView cv = forge.game.card.CardView.getCardForUi(pc);
+            final String key = cv.getCurrentState().getImageKey();
+            final java.io.File f = forge.ImageKeys.getImageFile(key);
+
+            System.out.println("  " + pc.getName() + " [" + pc.getEdition() + "]");
+            System.out.println("     clave  : " + key);
+            System.out.println("     fichero: " + (f == null ? "(no encontrado en disco)" : f.getAbsolutePath()));
+            System.out.println("     hasImage: " + forge.ImageKeys.hasImage(pc));
+
+            if (f == null) {
+                final java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+                // fetchImage exige el hilo de interfaz (assertExecutedByEdt).
+                GuiBase.getInterface().invokeInEdtLater(
+                        () -> GuiBase.getInterface().getImageFetcher().fetchImage(key, done::countDown));
+                try {
+                    final boolean ok = done.await(25, java.util.concurrent.TimeUnit.SECONDS);
+                    forge.ImageKeys.clearMissingCards();
+                    final java.io.File after = forge.ImageKeys.getImageFile(key);
+                    System.out.println("     descarga: " + (ok ? "callback OK" : "TIMEOUT")
+                            + " | ahora en disco: " + (after != null));
+                } catch (final InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            System.out.println();
+            if (++n >= 3) {
+                break;
+            }
+        }
+    }
+
+    private static void listDecks() {
+        System.out.println();
+        System.out.println("  Mazos de Commander:");
+        int count = 0;
+        for (final Deck deck : FModel.getDecks().getCommander()) {
+            count++;
+            System.out.println();
+            System.out.println("  -- " + deck.getName() + "  (" + deck.getMain().countAll() + " cartas)");
+            if (deck.has(DeckSection.Commander)) {
+                for (final java.util.Map.Entry<PaperCard, Integer> e : deck.get(DeckSection.Commander)) {
+                    final PaperCard c = e.getKey();
+                    System.out.println("     Comandante: " + c.getName() + " [" + c.getEdition() + "]"
+                            + "  " + c.getRules().getManaCost());
+                }
+            }
+        }
+        if (count == 0) {
+            System.out.println("     (ninguno)");
+        }
+    }
+
+    /**
+     * Si esta ejecucion tiene que ser la unica.
+     *
+     * <p>Lo normal es que si. Las dos excepciones son de verdad excepciones:
+     *
+     * <ul>
+     *   <li><b>Las pruebas de partida privada</b> ({@code --lobby} y
+     *       {@code --lobby-join}) necesitan dos ventanas en el mismo
+     *       ordenador — anfitrion e invitado — y sin esto la segunda se
+     *       cerraria sola. El fallo seria ademas de los que no se entienden:
+     *       una prueba de red que no arranca sin decir nada.</li>
+     *   <li>{@code -Dneo.singleInstance=false}, la valvula de escape de
+     *       siempre para cuando haga falta abrir dos a proposito.</li>
+     * </ul>
+     */
+    /** La ruta de un .frp que exista entre los argumentos, o null. */
+    static String replayArg(final String[] args) {
+        for (final String a : args) {
+            if (a != null && a.toLowerCase(Locale.ROOT).endsWith(forge.neo.match.ReplayShare.EXTENSION)
+                    && new java.io.File(a).isFile()) {
+                return new java.io.File(a).getAbsolutePath();
+            }
+        }
+        return null;
+    }
+
+    private static boolean wantsSingleInstance(final String[] args) {
+        if ("false".equalsIgnoreCase(System.getProperty("neo.singleInstance"))) {
+            return false;
+        }
+        for (final String a : args) {
+            if (a.equals("--lobby") || a.startsWith("--lobby-join")) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean has(final String[] args, final String flag) {
+        for (final String a : args) {
+            if (a.equals(flag)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String opt(final String[] args, final String key, final String def) {
+        for (final String a : args) {
+            if (a.startsWith(key + "=")) {
+                return a.substring(key.length() + 1);
+            }
+        }
+        return def;
+    }
+
+    /**
+     * Recorre todas las cartas del motor con su clave de imagen de verdad -
+     * delantera y, si la tiene, trasera - y cuenta cuantas encuentra
+     * {@link forge.neo.card.OfflineArt}. Sin red y sin tocar la cache normal.
+     */
+    private static void checkOfflineArt() {
+        final java.io.File dir = forge.neo.card.OfflineArt.dir();
+        System.out.println("  carpeta: " + dir.getAbsolutePath() + (dir.isDirectory() ? "" : "  (NO EXISTE)"));
+        int caras = 0;
+        int conArte = 0;
+        int conRecorte = 0;
+        final java.util.List<String> faltan = new java.util.ArrayList<>();
+        for (final PaperCard pc : forge.StaticData.instance().getCommonCards().getUniqueCards()) {
+            for (final boolean atras : new boolean[] {false, true}) {
+                if (atras && !pc.hasBackFace()) {
+                    continue;
+                }
+                final String key = pc.getImageKey(atras);
+                caras++;
+                if (forge.neo.card.OfflineArt.find(key, false) != null) {
+                    conArte++;
+                } else if (!pc.getName().startsWith("A-")) {
+                    faltan.add(key);
+                }
+                if (forge.neo.card.OfflineArt.find(key, true) != null) {
+                    conRecorte++;
+                }
+            }
+        }
+        System.out.printf("  caras: %d   con arte: %d (%.1f%%)   con recorte: %d%n",
+                caras, conArte, 100.0 * conArte / Math.max(1, caras), conRecorte);
+        System.out.println("  sin arte (sin contar Alchemy): " + faltan.size());
+        faltan.stream().limit(25).forEach(k -> System.out.println("     " + k));
+        checkArtDownloadTargets();
+        checkArtDownloadFilters();
+        if (Integer.getInteger("neo.art.testLimit", 0) > 0) {
+            checkArtDownloadRuns();
+            checkEveryPrintingRuns();
+        }
+        if (Integer.getInteger("neo.tokens.testLimit", 0) > 0) {
+            checkTokenArtRuns();
+        }
+    }
+
+    /**
+     * El arte de las fichas, bajado de verdad y en pequenyo
+     * ({@code run.cmd artecheck -Dneo.tokens.testLimit=3}): que la direccion
+     * de Scryfall sirva y que el juego encuentre la ficha por el camino del
+     * jugador ({@code ImageKeys.getImageFile} con una impresion cualquiera).
+     */
+    private static void checkTokenArtRuns() {
+        final java.util.Map<String, String[]> all = forge.neo.card.TokenArtDownload.newestPrintingsForTest();
+        System.out.println("  fichas distintas: " + all.size() + " (Gingerbrute: "
+                + java.util.Arrays.toString(all.get("gingerbrute")) + ")");
+        final boolean ok = forge.neo.platform.NeoDownloads.runAndWait(
+                new forge.neo.card.TokenArtDownload(), 120);
+        forge.neo.card.TokenArtDownload.afterDownload();
+        int found = 0;
+        int tried = 0;
+        for (final String name : all.keySet()) {
+            final java.io.File f = new java.io.File(
+                    forge.localinstance.properties.ForgeConstants.CACHE_TOKEN_PICS_DIR, name + ".jpg");
+            if (!f.exists()) {
+                continue;
+            }
+            tried++;
+            // Por una impresion que NO es la bajada: el ultimo recurso de ImageKeys.
+            if (forge.ImageKeys.getImageFile("t:" + name + "|ZZZ|999") != null) {
+                found++;
+            }
+            if (tried >= 10) {
+                break;
+            }
+        }
+        System.out.println("  descarga de fichas terminada: " + ok + " | el juego encuentra " + found + " de " + tried);
+    }
+
+    /**
+     * La descarga de verdad, con red y en pequenyo
+     * ({@code run.cmd artecheck -Dneo.art.testLimit=3}).
+     *
+     * <p>Lo de arriba comprueba que los dos apuntan al mismo sitio; esto
+     * comprueba lo otro que puede romperse y no depende de nosotros: que la
+     * URL de Scryfall siga sirviendo esa imagen. Baja tres y pregunta luego
+     * por el <b>camino del jugador</b> ({@code OfflineArt.find}), que es la
+     * unica respuesta que vale.
+     *
+     * <p>Fuera de la bateria a proposito: quiere linea, como {@code netcheck}.
+     */
+    private static void checkArtDownloadRuns() {
+        final forge.neo.card.ArtDownload service =
+                new forge.neo.card.ArtDownload(forge.neo.card.ArtDownload.Scope.ALL);
+        System.out.println("  bajando de verdad " + Integer.getInteger("neo.art.testLimit", 0)
+                + " cartas de Scryfall...");
+        final boolean ok = forge.neo.platform.NeoDownloads.runAndWait(service, 120);
+        System.out.println("  descarga terminada: " + ok + " (" + service.getCount() + " pedidas)");
+        // Por el MISMO camino que la pantalla: si esto no estuviera, el
+        // comprobador diria que todo va bien y el jugador no veria una foto.
+        forge.neo.card.ArtDownload.afterDownload();
+        // Se miran LAS QUE SE PIDIERON, no las primeras del catalogo: la lista
+        // se salta lo que ya estaba en disco, asi que no son las mismas.
+        final java.util.List<PaperCard> pedidas = service.getQueued();
+        int encontradas = 0;
+        final java.util.List<String> sin = new java.util.ArrayList<>();
+        for (final PaperCard pc : pedidas) {
+            if (forge.neo.card.OfflineArt.find(pc.getImageKey(false), false) != null) {
+                encontradas++;
+            } else {
+                sin.add(pc.getName());
+            }
+        }
+        System.out.println("  y el lector las encuentra: " + encontradas + " de " + pedidas.size());
+        sin.stream().limit(10).forEach(n -> System.out.println("     sin foto: " + n));
+        // No se exige el 100%: Scryfall no tiene imagen para todo lo que trae
+        // el motor (cartas de prueba, rebalanceadas de Arena, alguna promo), y
+        // esas el servicio las cuenta como saltadas y sigue. Lo que se vigila
+        // es que la inmensa mayoria llegue y se encuentre; si eso se cae, es
+        // que se ha roto la URL o el nombre del fichero.
+        // Dos fallos, o el 10% si son muchas: Scryfall no tiene imagen para
+        // todo lo que trae el motor, y con ocho cartas de muestra una sola
+        // laguna suya pondria esto en rojo sin que hubieramos roto nada.
+        final int permitidos = Math.max(2, pedidas.size() / 10);
+        if (pedidas.isEmpty() || pedidas.size() - encontradas > permitidos) {
+            throw new IllegalStateException("se pidieron " + pedidas.size()
+                    + " artes y OfflineArt solo encuentra " + encontradas);
+        }
+    }
+
+    /**
+     * "Todas las cartas y todos los artes", en pequenyo: el descargador de
+     * Forge ({@code ArtDownload.everyPrinting}) con UNA carta de muchas
+     * ediciones, y luego se mira que cada impresion este donde la busca el
+     * motor ({@code pics/cards/<clave>.jpg} o {@code .fullborder.jpg}, la
+     * misma cuenta que hace el descargador). Quiere linea.
+     */
+    private static void checkEveryPrintingRuns() {
+        final String name = System.getProperty("neo.art.everyCard", "Skullclamp");
+        // Por NUESTRO envoltorio, no por la clase de Forge a pelo: es donde se
+        // arregla la ruta ("+2 Mace" se guardaba como " 2 Mace"). Con
+        // -Dneo.art.everyCard="+2 Mace" se prueba justo eso.
+        final forge.gui.download.GuiDownloadService service =
+                forge.neo.card.ArtDownload.everyPrinting(c -> name.equals(c.getName()));
+        System.out.println("  todas las impresiones de " + name + " (descargador de Forge)...");
+        final boolean ok = forge.neo.platform.NeoDownloads.runAndWait(service, 300);
+        forge.neo.card.ArtDownload.afterDownload();
+        int total = 0;
+        int found = 0;
+        // Con otra calidad (imageQuality en el -Dneo.settingsFile), en SU carpeta
+        // y a SU tamanyo: hasta el 14-10-2026 bajaba la normal a la normal.
+        final forge.neo.card.ImageQuality quality = forge.neo.card.ImageQuality.current();
+        for (final PaperCard pc : forge.model.FModel.getMagicDb().getCommonCards().getAllCards(name)) {
+            final String key = forge.util.ImageUtil.getImageKey(pc, "", true);
+            if (key == null) {
+                continue;
+            }
+            total++;
+            if (quality != forge.neo.card.ImageQuality.NORMAL) {
+                final java.io.File f = quality.exactFile(key);
+                if (f != null) {
+                    found++;
+                    try {
+                        final java.awt.image.BufferedImage img = javax.imageio.ImageIO.read(f);
+                        System.out.println("     " + f.getName() + ": "
+                                + (img == null ? "?" : img.getWidth() + "x" + img.getHeight()));
+                        if (img != null && img.getWidth() <= 488) {
+                            throw new IllegalStateException(f + " es de " + img.getWidth()
+                                    + " de ancho: no es la calidad " + quality.scryfall);
+                        }
+                    } catch (final java.io.IOException e) {
+                        throw new IllegalStateException("no se lee " + f, e);
+                    }
+                }
+                continue;
+            }
+            final java.io.File full = new java.io.File(
+                    forge.localinstance.properties.ForgeConstants.CACHE_CARD_PICS_DIR, key + ".jpg");
+            final String fb = key.contains(".full") ? key.replace(".full", ".fullborder") : key + ".fullborder";
+            final java.io.File border = new java.io.File(
+                    forge.localinstance.properties.ForgeConstants.CACHE_CARD_PICS_DIR, fb + ".jpg");
+            if (full.exists() || border.exists()) {
+                found++;
+            }
+        }
+        System.out.println("  descarga terminada: " + ok + " | impresiones en disco (" + quality.scryfall + "): "
+                + found + " de " + total);
+        if (total == 0 || total - found > Math.max(2, total / 10)) {
+            throw new IllegalStateException("de " + total + " impresiones de " + name
+                    + " solo hay " + found + " en disco");
+        }
+    }
+
+    /**
+     * <b>Que el que baja y el que lee apunten al mismo fichero.</b>
+     *
+     * <p>Es lo unico de la descarga de arte que puede romperse <b>en
+     * silencio</b>: si {@code ArtDownload} escribiera en un sitio y
+     * {@code OfflineArt} mirara en otro, se bajarian dos gigas que nadie
+     * encuentra, sin un solo error, y el jugador diria que el boton no hace
+     * nada. Por eso los dos calculan el nombre con los MISMOS dos metodos, y
+     * por eso esto lo comprueba carta a carta.
+     *
+     * <p>Sin red: solo se compara a donde apuntaria cada uno.
+     */
+    private static void checkArtDownloadTargets() {
+        int mirados = 0;
+        int mal = 0;
+        for (final PaperCard pc : forge.neo.card.ArtDownload.sample(400)) {
+            final String nombre = pc.getRules().getMainPart().getName();
+            final java.io.File destino = forge.neo.card.ArtDownload.destination(nombre);
+            if (destino == null) {
+                continue;
+            }
+            mirados++;
+            // Lo que leeria OfflineArt para esa misma carta: su nombre limpio y
+            // su carpeta. Si el destino no termina ahi, estan desalineados.
+            // La carpeta es la de la calidad elegida: CardImages la busca con
+            // OfflineArt.find(key, crop, quality.artDir()).
+            final String limpio = forge.neo.card.OfflineArt.fileName(nombre);
+            final java.io.File esperado = new java.io.File(
+                    new java.io.File(forge.neo.card.ImageQuality.current().artDir(),
+                            forge.neo.card.OfflineArt.folder(limpio)), limpio + ".jpg");
+            if (!destino.getAbsolutePath().equals(esperado.getAbsolutePath())) {
+                mal++;
+                if (mal <= 5) {
+                    System.out.println("     DESALINEADO: " + nombre);
+                    System.out.println("       baja a: " + destino.getAbsolutePath());
+                    System.out.println("       lee de: " + esperado.getAbsolutePath());
+                }
+            }
+        }
+        System.out.printf("  destino de la descarga: %d cartas miradas, %d desalineadas%n",
+                mirados, mal);
+        if (mal > 0) {
+            throw new IllegalStateException(mal + " carta(s) se bajarian donde nadie las lee");
+        }
+    }
+
+    /**
+     * Bajar por expansion o por formato (Discord, 02-10-2026), sin red: que la
+     * lista de expansiones venga de la mas nueva a la mas vieja, y que la de
+     * un formato pida SOLO cartas legales en el — y menos que "todas", o el
+     * filtro no estaria haciendo nada.
+     */
+    private static void checkArtDownloadFilters() {
+        final java.util.List<forge.card.CardEdition> eds = forge.neo.card.ArtDownload.editions();
+        boolean ordered = true;
+        for (int i = 1; i < eds.size(); i++) {
+            final java.util.Date a = eds.get(i - 1).getDate();
+            final java.util.Date b = eds.get(i).getDate();
+            if (a != null && b != null && a.before(b)) {
+                ordered = false;
+            }
+        }
+        forge.game.GameFormat pauper = null;
+        for (final forge.game.GameFormat f : forge.neo.card.ArtDownload.formats()) {
+            if ("Pauper".equals(f.getName())) {
+                pauper = f;
+            }
+        }
+        if (eds.isEmpty() || !ordered || pauper == null) {
+            throw new IllegalStateException("listas de la descarga: " + eds.size() + " expansiones, ordenadas="
+                    + ordered + ", Pauper=" + (pauper != null));
+        }
+        final forge.neo.card.ArtDownload byFormat = forge.neo.card.ArtDownload.forFormat(pauper);
+        final int pending = byFormat.countPending();
+        int illegal = 0;
+        for (final PaperCard c : byFormat.getQueued()) {
+            if (!pauper.getFilterRules().test(c)) {
+                illegal++;
+            }
+        }
+        final int all = forge.neo.card.ArtDownload.missing(forge.neo.card.ArtDownload.Scope.ALL);
+        System.out.printf("  por formato: Pauper pide %d (de %d sin filtro), %d ilegales; %d expansiones, la primera %s%n",
+                pending, all, illegal, eds.size(), eds.get(0).getCode());
+        // Con -Dneo.art.testLimit las dos listas se cortan en N ("3 de 3"):
+        // "pide tantas como sin filtro" no dice nada, solo las ilegales.
+        if (illegal > 0 || (all > 0 && pending >= all && Integer.getInteger("neo.art.testLimit", 0) <= 0)) {
+            throw new IllegalStateException("el filtro por formato no filtra: " + illegal + " ilegales");
+        }
+    }
+
+    private static void banner(final String text) {
+        final String line = "=".repeat(Math.max(60, text.length() + 4));
+        System.out.println();
+        System.out.println(line);
+        System.out.println("  " + text);
+        System.out.println(line);
+    }
+}

@@ -1,0 +1,710 @@
+package forge.neo.ui;
+
+import forge.neo.NeoText;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Consumer;
+
+import forge.game.card.CardView;
+import forge.game.card.CardView.CardStateView;
+import forge.neo.card.CardNode;
+import javafx.scene.layout.Pane;
+
+/**
+ * El campo de batalla de un jugador, con la disposicion de Arena.
+ *
+ * <p>Dos filas, pero la de atras partida en dos columnas:
+ *
+ * <pre>
+ *   +-------------------------------------------------------+
+ *   |       tierras       |  artefactos / encantamientos / PW |   fila de atras
+ *   +-------------------------------------------------------+
+ *   |              c r i a t u r a s                        |   fila de delante
+ *   +-------------------------------------------------------+
+ *                    ^ linea de combate
+ * </pre>
+ *
+ * <p>La clave es que los permanentes que no son criaturas comparten FILA con
+ * las tierras pero no se mezclan con ellas: van en su propio grupo, separados
+ * por un hueco. Asi se distinguen de un vistazo sin gastar una tercera fila,
+ * que en pantallas pequenas dejaria las cartas diminutas.
+ *
+ * <p>Las criaturas van siempre pegadas a la linea de combate. Para el oponente
+ * el orden se invierte, de modo que sus criaturas quedan enfrentadas a las
+ * tuyas.
+ *
+ * <p>Un grupo vacio no ocupa espacio: si no hay artefactos, las tierras usan
+ * todo el ancho; si no hay nada detras, las criaturas usan todo el alto.
+ *
+ * <p>En el borde exterior van el cementerio y el exilio, siempre visibles con
+ * su contador.
+ */
+public class PlayerField extends Pane {
+
+    private static final double ROW_GAP = 5;
+
+    private final BattlefieldPane creatureRow;
+    private final BattlefieldPane permanentRow;
+    private final BattlefieldPane landRow;
+    private final ZonePile graveyard;
+    private final ZonePile exile;
+
+    /**
+     * <b>Tu mazo, en la mesa.</b>
+     *
+     * <p>Solo en TU campo, y a proposito: la tira de pilas cuesta ancho de
+     * mesa (ver {@code setPilesOnBoard}), y la funda del rival no dice nada
+     * que su contador de la barra no diga ya. En el tuyo si: es donde sale
+     * <b>boca arriba</b> la primera carta cuando algo te deja mirarla
+     * (Bolas's Citadel y familia). Ver {@code ZonePile.setTopCard}.
+     */
+    private final ZonePile library;
+
+    /**
+     * La zona de mando del RIVAL, con su comandante boca arriba (Discord,
+     * 15-10-2026: "no se ve la zona de comando rival en commander"). Antes
+     * solo salia el numero "CMD" en su barra. Va SIEMPRE debajo del cementerio
+     * y nunca le quita ancho a las cartas: como tercera pila, a 2K con tres
+     * rivales las cartas bajaban de 92 a 40 px. Si no cabe entera se encoge, y
+     * si ni asi cabe no se pinta (queda el "CMD" de la barra, que se clica).
+     * Vacia no ocupa nada. Para quitarla: {@link #SHOW_OPPONENT_COMMAND}.
+     */
+    private final ZonePile command;
+
+    /**
+     * Interruptor de la zona de mando del rival en la mesa. Para quitarla basta
+     * con ponerlo a false (o {@code -Dneo.oppCommand=false} para probar sin
+     * ella): todo lo demas se queda como estaba.
+     */
+    static final boolean SHOW_OPPONENT_COMMAND = !"false".equals(System.getProperty("neo.oppCommand"));
+
+    /** Si la pila de mando del rival se esta ensenyando (hay algo en la zona). */
+    private boolean commandShown;
+    private final boolean opponent;
+    private final double baseCardWidth;
+
+    /**
+     * Si el cementerio y el exilio se pintan EN la mesa, en el borde exterior.
+     *
+     * <p>Por defecto si, que es lo de siempre. Se puede apagar porque esa tira
+     * cuesta {@code baseCardWidth * 1.24 + 18} px de ancho — con una carta de
+     * 125 px son 173 — y eso es asumible cuando un jugador ocupa la pantalla
+     * entera, pero no cuando tres se reparten el mismo ancho. Con los rivales
+     * en fila esa tira sola se come el 36% de lo que le toca a cada uno.
+     *
+     * <p>Apagarla no esconde nada: el contador de las dos zonas sigue en la
+     * barra del jugador, y clicarlo abre el mismo {@link ZoneViewer}.
+     */
+    private boolean pilesOnBoard = true;
+
+    public PlayerField(final double baseCardWidth, final boolean opponent) {
+        this.opponent = opponent;
+        this.baseCardWidth = baseCardWidth;
+        this.creatureRow = new BattlefieldPane(baseCardWidth);
+        this.permanentRow = new BattlefieldPane(baseCardWidth);
+        this.landRow = new BattlefieldPane(baseCardWidth);
+        this.graveyard = new ZonePile(NeoText.get("zone.graveyard"), baseCardWidth * 0.62);
+        this.exile = new ZonePile(NeoText.get("zone.exile"), baseCardWidth * 0.62);
+        this.library = new ZonePile(NeoText.get("zone.library"), baseCardWidth * 0.62);
+        this.library.setVisible(!opponent);
+        this.library.setManaged(!opponent);
+        this.command = new ZonePile(NeoText.get("zone.command"), baseCardWidth * 0.62);
+        this.command.setVisible(false);
+        this.command.setManaged(false);
+
+        setPickOnBounds(false);
+        landRow.getStyleClass().add("arena-lands");
+        permanentRow.getStyleClass().add("arena-permanents");
+        creatureRow.getStyleClass().add("arena-creatures");
+        // Las criaturas avanzan hacia la linea de combate al atacar o bloquear:
+        // el campo propio empuja hacia arriba y el del rival hacia abajo, de
+        // modo que las dos lineas se acercan como en Arena.
+        creatureRow.setCombatDirection(opponent ? 1 : -1);
+        // Las criaturas se pintan las ULTIMAS, o sea por encima de la fila de
+        // atras. Importa por dos cosas que se salen de su fila: el paso
+        // adelante del atacante, y lo que lleven enganchado, que asoma por
+        // debajo. Con la fila de atras pintada despues, un equipo quedaba
+        // escondido detras de una tierra: visible en la maqueta y en el campo
+        // del rival, invisible justo en el tuyo.
+        getChildren().addAll(permanentRow, landRow, creatureRow, graveyard, exile, library, command);
+    }
+
+    public void setOnCardHover(final Consumer<CardNode> handler) {
+        creatureRow.setOnCardHover(handler);
+        permanentRow.setOnCardHover(handler);
+        landRow.setOnCardHover(handler);
+        command.setOnTopHover(handler);
+    }
+
+    /** Que fichas estan ya elegidas: parte las pilas. Ver BattlefieldPane. */
+    /** Ver {@link BattlefieldPane#setSelectableTest}. */
+    public void setSelectableTest(final java.util.function.Predicate<CardView> test) {
+        creatureRow.setSelectableTest(test);
+        permanentRow.setSelectableTest(test);
+        landRow.setSelectableTest(test);
+    }
+
+    public void setPickedTest(final java.util.function.Predicate<CardView> test) {
+        creatureRow.setPickedTest(test);
+        permanentRow.setPickedTest(test);
+        landRow.setPickedTest(test);
+    }
+
+    /** Ver {@link BattlefieldPane#setTargetedTest}. */
+    public void setTargetedTest(final java.util.function.Predicate<CardView> test) {
+        creatureRow.setTargetedTest(test);
+        permanentRow.setTargetedTest(test);
+        landRow.setTargetedTest(test);
+    }
+
+    public void setOnAttachPeek(
+            final java.util.function.BiConsumer<CardView, java.util.List<CardView>> handler) {
+        creatureRow.setOnAttachPeek(handler);
+        permanentRow.setOnAttachPeek(handler);
+        landRow.setOnAttachPeek(handler);
+    }
+
+    public void setOnCardClick(final Consumer<CardNode> handler) {
+        creatureRow.setOnCardClick(handler);
+        permanentRow.setOnCardClick(handler);
+        landRow.setOnCardClick(handler);
+    }
+
+    /** El "xN" de una pila de fichas, en cualquiera de las filas. */
+    public void setOnStackCountClick(final Consumer<java.util.List<forge.game.card.CardView>> handler) {
+        creatureRow.setOnStackCountClick(handler);
+        permanentRow.setOnStackCountClick(handler);
+        landRow.setOnStackCountClick(handler);
+    }
+
+    /**
+     * Reparte los permanentes entre las zonas.
+     *
+     * <p>Lo enganchado (equipamientos, auras, fortificaciones) NO ocupa hueco
+     * propio: viaja con la carta a la que esta pegado, como en Arena.
+     *
+     * @param cards      los permanentes de ESTE jugador
+     * @param everywhere todos los permanentes de la mesa, de los dos lados
+     */
+    public void setCards(final List<CardView> cards, final List<CardView> everywhere) {
+        // A que esta enganchado cada cosa. Se pregunta AL REVES — a cada carta
+        // de esta mesa, que lleva encima — y eso es lo que arregla el caso que
+        // fallaba: un aura del RIVAL sobre una criatura MIA.
+        //
+        // Antes se recorrian solo las cartas de este jugador buscando su
+        // anfitrion, asi que un aura enemiga nunca encontraba a quien encantaba
+        // y se quedaba suelta en la fila de encantamientos del rival, como si
+        // no hubiera encantado nada. Y eso es justo la mitad de las auras que
+        // importan: las de quitarte una criatura.
+        //
+        // El motor publica las dos direcciones. {@code getAttachedCards()} da
+        // todo lo enganchado a una carta, lo controle quien lo controle.
+        final Map<Integer, List<CardView>> attachedTo = new HashMap<>();
+        for (final CardView cv : cards) {
+            if (cv == null) {
+                continue;
+            }
+            final List<CardView> on = cv.getAttachedCards();
+            if (on != null && !on.isEmpty()) {
+                attachedTo.put(cv.getId(), new ArrayList<>(on));
+            }
+            // Y lo que tiene EXILIADO (Banishing Light, Oblivion Ring...),
+            // asomando igual que un equipo pero desvaido: CardStackNode lo
+            // distingue por la zona (Discord, 29-10-2026, del Forge de movil).
+            if (forge.neo.NeoSettings.linkedExile()) {
+                final List<CardView> exiled = linkedExile(cv);
+                if (!exiled.isEmpty()) {
+                    attachedTo.computeIfAbsent(cv.getId(), k -> new ArrayList<>()).addAll(exiled);
+                }
+            }
+        }
+
+        // Y lo que se pinta enganchado en algun sitio de la mesa no ocupa
+        // ademas su propio hueco aqui. Se mira contra la mesa ENTERA: si el
+        // anfitrion no esta en ninguna parte, la carta se queda con su sitio en
+        // vez de desaparecer.
+        final Set<Integer> hosts = new HashSet<>();
+        final List<CardView> board = everywhere == null ? cards : everywhere;
+        for (final CardView cv : board) {
+            if (cv != null) {
+                hosts.add(cv.getId());
+            }
+        }
+        final Set<Integer> isAttachment = new HashSet<>();
+        for (final CardView cv : cards) {
+            if (cv == null) {
+                continue;
+            }
+            final CardView host = cv.getAttachedTo();
+            if (host != null && hosts.contains(host.getId())) {
+                isAttachment.add(cv.getId());
+            }
+        }
+
+        final List<CardView> creatures = new ArrayList<>();
+        final List<CardView> permanents = new ArrayList<>();
+        final List<CardView> lands = new ArrayList<>();
+
+        for (final CardView cv : cards) {
+            final CardStateView st = cv == null ? null : cv.getCurrentState();
+            if (st == null || isAttachment.contains(cv.getId())) {
+                continue;
+            }
+            // Una criatura manda sobre el resto de tipos: un artefacto-criatura
+            // o un vehiculo tripulado combaten, asi que van con las criaturas.
+            if (st.isCreature() || st.isBattle()) {
+                creatures.add(cv);
+            } else if (st.isLand()) {
+                lands.add(cv);
+            } else {
+                permanents.add(cv);
+            }
+        }
+
+        creatureRow.setCards(creatures, attachedTo);
+        permanentRow.setCards(permanents, attachedTo);
+        // Las tierras, juntas por el color que dan y luego por nombre, no en
+        // el orden en que se jugaron (Discord, 11-10-2026). Ver LandOrder.
+        landRow.setCards(forge.neo.card.LandOrder.sorted(lands), attachedTo);
+        requestLayout();
+    }
+
+    /**
+     * Lo que este permanente tiene enlazado en el exilio: lo que vuelve cuando
+     * se vaya, y lo exiliado con el si su texto lo vuelve a usar (no el
+     * cementerio que exilio Bojuka Bog). Ver {@link forge.neo.card.LinkedExile}.
+     */
+    static List<CardView> linkedExile(final CardView cv) {
+        return forge.neo.card.LinkedExile.of(cv);
+    }
+
+    /** Sin el resto de la mesa: para las maquetas, que solo tienen un lado. */
+    public void setCards(final List<CardView> cards) {
+        setCards(cards, null);
+    }
+
+    /** La pila del cementerio de este campo. */
+    public ZonePile getGraveyardPile() {
+        return graveyard;
+    }
+
+    /** La pila del exilio de este campo. */
+    public ZonePile getExilePile() {
+        return exile;
+    }
+
+    /**
+     * La funda de este jugador, en las dos pilas a la vez.
+     *
+     * <p>Cementerio y exilio son "un monton de cartas boca abajo" — {@link
+     * ZonePile} —, que hasta ahora se pintaba con un rectangulo liso porque
+     * nadie le pasaba nada mejor. Es justo el sitio donde una funda elegida en
+     * Personalizar por fin se ve en la mesa: cada jugador con la suya.
+     */
+    public void setSleeveImage(final javafx.scene.image.Image image) {
+        graveyard.setSleeveImage(image);
+        exile.setSleeveImage(image);
+        library.setSleeveImage(image);
+        command.setSleeveImage(image);
+    }
+
+    /**
+     * La zona de mando de este rival: el comandante (o lo primero que haya)
+     * boca arriba y cuantas cartas hay. En tu campo no hace nada: la tuya va
+     * al lado de la mano ({@code CommandZone}).
+     */
+    public void setCommand(final List<CardView> cards) {
+        if (!opponent || !SHOW_OPPONENT_COMMAND) {
+            return;
+        }
+        final int n = cards == null ? 0 : cards.size();
+        CardView shown = null;
+        if (n > 0) {
+            for (final CardView c : cards) {
+                if (c != null && c.isCommander()) {
+                    shown = c;
+                    break;
+                }
+            }
+            if (shown == null) {
+                shown = cards.get(0);
+            }
+        }
+        command.setCount(n);
+        command.setTopCard(shown);
+        wireZone(command, forge.game.zone.ZoneType.Command, n);
+        final boolean show = n > 0;
+        if (show != commandShown) {
+            commandShown = show;
+            command.setVisible(show && pilesOnBoard);
+            command.setManaged(show && pilesOnBoard);
+            requestLayout();
+        }
+    }
+
+    public void setZoneCounts(final int graveyardSize, final int exileSize) {
+        setZoneCounts(graveyardSize, exileSize, false, false);
+    }
+
+    /**
+     * @param gravePlayable hay algo en el cementerio que se puede lanzar ya
+     * @param exilePlayable idem en el exilio
+     */
+    public void setZoneCounts(final int graveyardSize, final int exileSize,
+                              final boolean gravePlayable, final boolean exilePlayable) {
+        graveyard.setCount(graveyardSize);
+        exile.setCount(exileSize);
+        graveyard.setHasPlayable(gravePlayable);
+        exile.setHasPlayable(exilePlayable);
+        // Una pila vacia no responde: no hay nada que ensenyar y un cursor de
+        // mano sobre algo que no hace nada confunde mas que ayuda.
+        wireZone(graveyard, forge.game.zone.ZoneType.Graveyard, graveyardSize);
+        wireZone(exile, forge.game.zone.ZoneType.Exile, exileSize);
+    }
+
+    /**
+     * El mazo: cuantas cartas quedan y, si el motor lo permite, la de arriba
+     * <b>destapada</b>.
+     *
+     * <p>Quien decide si se puede ver es la mesa, que es quien tiene el
+     * {@code mayView} del motor. Aqui llega ya decidido: una carta, o nada.
+     */
+    /** El monton de la biblioteca (solo el tuyo se ve): de ahi salen las que robas. */
+    public ZonePile libraryPile() {
+        return library;
+    }
+
+    public void setLibrary(final int size, final CardView top) {
+        library.setCount(size);
+        library.setTopCard(top);
+        // El borde de acento cuando hay algo que lanzar desde ahi, igual que
+        // en el cementerio y el exilio.
+        library.setHasPlayable(top != null);
+        wireZone(library, forge.game.zone.ZoneType.Library, size);
+    }
+
+    private void wireZone(final ZonePile pile, final forge.game.zone.ZoneType zone,
+                          final int count) {
+        pile.setOnClick(count > 0 && onZone != null && owner != null
+                ? () -> onZone.accept(owner, zone) : null);
+    }
+
+    /**
+     * De quien es este campo y que hacer al clicar sus pilas.
+     *
+     * <p>El campo del rival se REUTILIZA para los tres oponentes al cambiar de
+     * pestanya, asi que el duenyo se actualiza en cada vuelco en vez de fijarse
+     * al construirlo.
+     */
+    public void setZoneOwner(final forge.game.player.PlayerView player) {
+        this.owner = player;
+    }
+
+    public void setOnZoneClicked(
+            final java.util.function.BiConsumer<forge.game.player.PlayerView,
+                    forge.game.zone.ZoneType> handler) {
+        this.onZone = handler;
+    }
+
+    private forge.game.player.PlayerView owner;
+    private java.util.function.BiConsumer<forge.game.player.PlayerView,
+            forge.game.zone.ZoneType> onZone;
+
+    /** Ver {@link BattlefieldPane#skipRemovalAnimation()}. */
+    public void skipRemovalAnimation() {
+        creatureRow.skipRemovalAnimation();
+        permanentRow.skipRemovalAnimation();
+        landRow.skipRemovalAnimation();
+    }
+
+    /** Ver {@link BattlefieldPane#setGroupingEnabled(boolean)}. */
+    public void setGroupingEnabled(final boolean on) {
+        creatureRow.setGroupingEnabled(on);
+        permanentRow.setGroupingEnabled(on);
+        landRow.setGroupingEnabled(on);
+    }
+
+    public void refreshAll() {
+        creatureRow.refreshAll();
+        permanentRow.refreshAll();
+        landRow.refreshAll();
+    }
+
+    /** Ver {@link BattlefieldPane#holdGhost}. */
+    public void holdGhost(final forge.game.card.CardView card) {
+        creatureRow.holdGhost(card);
+        permanentRow.holdGhost(card);
+        landRow.holdGhost(card);
+    }
+
+    /** Ver {@link BattlefieldPane#lastSceneBoundsOf}. */
+    public javafx.geometry.Bounds lastSceneBoundsOf(final forge.game.card.CardView card) {
+        for (final BattlefieldPane row : List.of(creatureRow, permanentRow, landRow)) {
+            final javafx.geometry.Bounds b = row.lastSceneBoundsOf(card);
+            if (b != null) {
+                return b;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * El fantasma de esa carta si se esta yendo, o la pila que la lleva dentro.
+     * Ver {@link BattlefieldPane#ghostOf} y {@link BattlefieldPane#stackHolding}.
+     */
+    public CardNode ghostOf(final forge.game.card.CardView card) {
+        for (final BattlefieldPane row : List.of(creatureRow, permanentRow, landRow)) {
+            final CardNode g = row.ghostOf(card);
+            if (g != null) {
+                return g;
+            }
+        }
+        for (final BattlefieldPane row : List.of(creatureRow, permanentRow, landRow)) {
+            final CardNode g = row.stackHolding(card);
+            if (g != null) {
+                return g;
+            }
+        }
+        return null;
+    }
+
+    public List<CardNode> nodes() {
+        final List<CardNode> out = new ArrayList<>(creatureRow.nodes());
+        out.addAll(permanentRow.nodes());
+        out.addAll(landRow.nodes());
+        return out;
+    }
+
+    // ---------------------------------------------------------------
+
+    @Override
+    protected void layoutChildren() {
+        final double w = getWidth();
+        final double h = getHeight();
+
+        // Dos pilas en el campo del rival (cementerio y exilio) y tres en el
+        // tuyo, que ademas lleva el mazo. Se cuenta, no se da por hecho: este
+        // ancho es lo que se le quita a las cartas.
+        // La de mando del rival va debajo del cementerio: no cuenta aqui.
+        final int piles = pilesOnBoard ? (opponent ? 2 : 3) : 0;
+        final double stripW = piles == 0 ? 0 : graveyard.getCardWidth() * piles + 6 * (piles + 1);
+        final double rowsW = Math.max(1, w - stripW - 20);
+
+        final int nCreatures = creatureRow.slotCount();
+        final int nPermanents = permanentRow.slotCount();
+        final int nLands = landRow.slotCount();
+
+        // --- ancho de los dos grupos de la fila de atras ---
+        // Se reparte a proporcion de cuantas cartas tiene cada uno, con un
+        // hueco en medio que es lo que hace que se lean como grupos distintos.
+        final double groupGap = Math.max(20, baseCardWidth * 0.24);
+        double permW = 0;
+        double landW = 0;
+        if (nPermanents > 0 && nLands > 0) {
+            final double avail = Math.max(80, rowsW - groupGap);
+            permW = avail * nPermanents / (double) (nPermanents + nLands);
+            landW = avail - permW;
+            // Suelo de un ancho de carta por grupo.
+            //
+            // El reparto a proporcion de cuantas cartas tiene cada grupo se
+            // rompe justo en el caso mas normal: un encantamiento suelto al
+            // lado de diez tierras se lleva 1/11 de la fila, o sea menos de lo
+            // que mide UNA carta. Entonces o sale cortado o encoge a todas las
+            // demas para caber, que es peor todavia. Fallo real jugando.
+            final double minGroup = Math.min(avail / 2, baseCardWidth + 12);
+            if (permW < minGroup) {
+                permW = minGroup;
+                landW = avail - permW;
+            } else if (landW < minGroup) {
+                landW = minGroup;
+                permW = avail - landW;
+            }
+        } else if (nPermanents > 0) {
+            permW = rowsW;
+        } else if (nLands > 0) {
+            landW = rowsW;
+        }
+
+        final boolean hasBack = nPermanents > 0 || nLands > 0;
+        final int visible = (nCreatures > 0 ? 1 : 0) + (hasBack ? 1 : 0);
+        if (visible == 0) {
+            creatureRow.resizeRelocate(0, 0, rowsW, 0);
+            permanentRow.resizeRelocate(0, 0, 0, 0);
+            landRow.resizeRelocate(0, 0, 0, 0);
+            layoutPiles(w, h, stripW);
+            return;
+        }
+
+        // --- un unico tamano de carta para toda la mesa del jugador ---
+        double cardW = Double.MAX_VALUE;
+        if (nCreatures > 0) {
+            cardW = Math.min(cardW, creatureRow.desiredCardWidth(rowsW));
+        }
+        if (nPermanents > 0) {
+            cardW = Math.min(cardW, permanentRow.desiredCardWidth(permW));
+        }
+        if (nLands > 0) {
+            cardW = Math.min(cardW, landRow.desiredCardWidth(landW));
+        }
+
+        // El MISMO suelo que usa BattlefieldPane al dibujar.
+        //
+        // Si aqui se calcula con una carta mas pequenya que la que alli se va a
+        // pintar, esta fila sale mas baja que su contenido y el recorte lo
+        // siega. `desiredCardWidth` puede devolver 13 px con seis tierras en un
+        // hueco estrecho; alli el suelo lo sube a 28 y las cartas ya no caben
+        // en el alto que se les acaba de dar. Lo que hay que hacer con las que
+        // no caben a lo ancho es SOLAPARLAS, y de eso ya se encarga
+        // BattlefieldPane — pero solo puede si la fila tiene el alto correcto.
+        cardW = Math.max(cardW, BattlefieldPane.MIN_CARD_WIDTH);
+
+        // --- el hueco de lo enganchado ---
+        //
+        // Un equipo o un aura cuelgan por debajo de su criatura. El recorte de
+        // la fila se abre para dejarlos asomar (si no, ni se ven ni se pueden
+        // clicar), pero eso solo permite DIBUJAR fuera: el sitio no se lo
+        // quitaba a nadie, asi que caian encima de la fila de atras — o sea,
+        // encima de tus tierras. Y como el recorte tambien deja pasar el
+        // raton, ahi se peleaban por el click dos cartas de filas distintas.
+        //
+        // Reportado en itch.io el 20-09-2026 (<i>"cuesta seleccionar el equipo
+        // o el aura con la mesa llena"</i>), y es la mitad de ese problema que
+        // NO depende de ningun ajuste: lo que cuelga tiene que tener su sitio.
+        // Lo que no cabe, encoge — que es lo que hace toda esta mesa.
+        //
+        // Apilado (NeoSettings.ATTACHMENTS_STACKED) no cuelga nada, y entonces
+        // este hueco no existe: la cuenta sale de attachOverhang().
+        final boolean attachedUp = forge.neo.NeoSettings.attachmentsStacked() ? false
+                : (opponent ? (permanentRow.hasAttachments() || landRow.hasAttachments())
+                            : creatureRow.hasAttachments());
+        // El alto que pide lo enganchado, en proporcion al de la carta: sale
+        // de la misma cuenta que lo pinta, no de un numero copiado.
+        final double attachRatio = attachedUp && visible > 1
+                ? CardStackNode.overhangFor(1) / CardNode.ASPECT : 0;
+
+        final double gaps = ROW_GAP * (visible - 1);
+        if (cardW * CardNode.ASPECT * (visible + attachRatio) + gaps > h) {
+            cardW = Math.max(BattlefieldPane.MIN_CARD_WIDTH,
+                    (h - gaps) / (visible + attachRatio) / CardNode.ASPECT);
+        }
+
+        final double cardH = cardW * CardNode.ASPECT;
+        // El hueco de lo enganchado va DENTRO de lo que ocupa la mesa, o al
+        // centrarla se quedaria colgando por debajo.
+        final double attachH = cardH * attachRatio;
+        final double usedH = cardH * visible + gaps + attachH;
+        double y = Math.max(0, (h - usedH) / 2);
+
+        // El oponente lleva la fila de atras arriba; tu, abajo. En ambos casos
+        // las criaturas quedan pegadas a la linea de combate.
+        final double backY;
+        final double creatureY;
+        if (opponent) {
+            backY = y;
+            creatureY = hasBack ? y + cardH + ROW_GAP + attachH : y;
+        } else {
+            creatureY = y;
+            backY = nCreatures > 0 ? y + cardH + ROW_GAP + attachH : y;
+        }
+
+        if (nCreatures > 0) {
+            creatureRow.setMaxCardWidth(cardW);
+            // Hueco para el paso adelante del atacante, solo hacia el combate.
+            final double step = cardH * 0.30;
+            creatureRow.setOverflow(opponent ? 0 : step, opponent ? step : 0);
+            creatureRow.resizeRelocate(0, creatureY, rowsW, cardH);
+        } else {
+            creatureRow.resizeRelocate(0, creatureY, rowsW, 0);
+        }
+
+        // Tierras a la izquierda, resto de permanentes a la derecha (Arena).
+        if (nLands > 0) {
+            landRow.setMaxCardWidth(cardW);
+            landRow.resizeRelocate(0, backY, landW, cardH);
+        } else {
+            landRow.resizeRelocate(0, backY, 0, 0);
+        }
+
+        if (nPermanents > 0) {
+            permanentRow.setMaxCardWidth(cardW);
+            final double permX = nLands > 0 ? landW + groupGap : 0;
+            permanentRow.resizeRelocate(permX, backY, permW, cardH);
+        } else {
+            permanentRow.resizeRelocate(0, backY, 0, 0);
+        }
+
+        layoutPiles(w, h, stripW);
+    }
+
+    private void layoutPiles(final double w, final double h, final double stripW) {
+        if (!pilesOnBoard) {
+            return;
+        }
+        final double pileW = graveyard.getCardWidth();
+        final double pileH = graveyard.prefHeight(pileW);
+        final double x = w - stripW - 6;
+        // La de mando, debajo y a la escala que quepa (como mucho la de las
+        // otras pilas). Por debajo de MIN_COMMAND_SCALE no se lee: fuera.
+        double scale = 0;
+        if (opponent && commandShown) {
+            scale = Math.min(1, (h - pileH - PILE_GAP) / pileH);
+            if (scale < MIN_COMMAND_SCALE) {
+                scale = 0;
+            }
+        }
+        final boolean below = scale > 0;
+        command.setVisible(below);
+        final double cmdW = pileW * scale;
+        if (below && Math.abs(command.getCardWidth() - cmdW) > 0.5) {
+            command.setCardWidth(cmdW);
+        }
+        final double cmdH = below ? command.prefHeight(cmdW) : 0;
+        final double y = below
+                ? Math.max(0, (h - pileH - PILE_GAP - cmdH) / 2)
+                : Math.max(0, (h - pileH) / 2);
+        graveyard.resizeRelocate(x, y, pileW + 6, pileH);
+        exile.resizeRelocate(x + pileW + 12, y, pileW + 6, pileH);
+        if (!opponent) {
+            library.resizeRelocate(x + (pileW + 12) * 2, y, pileW + 6, pileH);
+        } else if (below) {
+            command.resizeRelocate(x, y + pileH + PILE_GAP, cmdW + 6, cmdH);
+        }
+    }
+
+    private static final double PILE_GAP = 8;
+
+    /** Por debajo de esta escala la carta del comandante no se lee y no se pinta. */
+    private static final double MIN_COMMAND_SCALE = 0.45;
+
+    /**
+     * Pinta (o no) el cementerio y el exilio en el borde de la mesa.
+     *
+     * <p>Aditivo y con el valor de siempre por defecto: quien no lo llame se
+     * comporta exactamente igual que antes. Ver {@link #pilesOnBoard}.
+     */
+    public void setPilesOnBoard(final boolean on) {
+        if (pilesOnBoard == on) {
+            return;
+        }
+        pilesOnBoard = on;
+        graveyard.setVisible(on);
+        graveyard.setManaged(on);
+        exile.setVisible(on);
+        exile.setManaged(on);
+        library.setVisible(on && !opponent);
+        library.setManaged(on && !opponent);
+        command.setVisible(on && commandShown);
+        command.setManaged(on && commandShown);
+        requestLayout();
+    }
+
+    public double getBaseCardWidth() {
+        return baseCardWidth;
+    }
+}
+
+

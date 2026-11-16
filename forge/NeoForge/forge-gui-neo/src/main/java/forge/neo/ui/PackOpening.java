@@ -1,0 +1,341 @@
+package forge.neo.ui;
+
+import forge.neo.NeoText;
+import forge.neo.card.CardNode;
+import forge.game.card.CardView;
+import forge.item.PaperCard;
+import javafx.animation.*;
+import javafx.util.Duration;
+import javafx.geometry.*;
+import javafx.scene.Node;
+import javafx.scene.control.*;
+import javafx.scene.layout.*;
+import javafx.scene.paint.Color;
+import javafx.scene.shape.Circle;
+import java.util.*;
+import java.util.function.Predicate;
+
+/** Presentation of an already committed purchase. Never generates or awards cards. */
+public final class PackOpening extends StackPane {
+    private final List<PaperCard> cards;
+    private final Predicate<PaperCard> isNew;
+    private final boolean[] revealed;
+    private final GridPane grid = new GridPane();
+    private final StackPane stage = new StackPane();
+    private final Pane sparks = new Pane();
+    private final Label progress = new Label();
+    /** "Te faltaba en tus mazos: ...", con las ya reveladas. Ver {@link #setWanted}. */
+    private final Label wantedNote = new Label();
+    /** A que mazos les faltaba cada carta; null si quien abre no lo sabe. */
+    private java.util.function.Function<PaperCard, List<String>> wantedIn;
+    /** Lo que te dan por cada carta al venderla; null si no hay tienda (fuera de la Quest). */
+    private java.util.function.ToIntFunction<PaperCard> valueOf;
+    private final Button reveal = new Button(NeoText.get("opening.revealAll"));
+    /** "Otro sobre": solo sale si quien abre lo pide. Ver {@link #setAgain}. */
+    private final Button again = new Button();
+    private final Pager pager;
+    private final List<Animation> animations = new ArrayList<>();
+    private boolean opened, closed;
+    private final Runnable onDone;
+    private final double cardWidth;
+    private final int columns;
+
+    public PackOpening(String title, String subtitle, List<PaperCard> contents,
+                       Predicate<PaperCard> isNew, double availW, double availH, Runnable onDone) {
+        this.cards = new ArrayList<>(contents);
+        // A box is a haul, not a fabricated sequence of packs. Keep every physical copy.
+        if (cards.size() > 24) cards.sort(Comparator.comparingInt(PackOpening::weight).reversed());
+        this.isNew = isNew;
+        this.onDone = onDone;
+        revealed = new boolean[cards.size()];
+        double width = Math.max(400, availW - 96), height = Math.max(320, availH - 96);
+        setPrefSize(width, height); setMaxSize(width, height); setMinSize(0, 0);
+        // Ordinary packs fit on one page, in two rows (14 cards = 7 by 2).
+        // Larger hauls keep bounded pages so boxes remain readable and cheap to render.
+        final int pageSize = cards.size() <= 20 ? Math.max(1, cards.size()) : 8;
+        columns = Math.max(1, (int) Math.ceil(pageSize / 2.0));
+        final int rows = (int) Math.ceil(pageSize / (double) columns);
+        // El tope de 220 px es de 1080p y crece con la letra (UiScale.px): fijo,
+        // en 2K las cartas del sobre salian del mismo tamanyo que en 1080p.
+        cardWidth = Math.max(40, Math.min(UiScale.px(220), Math.min(
+                (width - 48 - (columns - 1) * 16) / columns,
+                (height - 175) / (rows * CardNode.ASPECT))));
+        getStyleClass().add("pack-opening");
+        setId("pack-opening");
+        Label heading = new Label(title); heading.getStyleClass().add("opening-title"); UiScale.fixedFont(heading, 24);
+        heading.setWrapText(true);
+        Label detail = new Label(subtitle); detail.getStyleClass().add("opening-detail"); UiScale.fixedFont(detail, 12); detail.setWrapText(true);
+        VBox head = new VBox(5, heading, detail); head.setAlignment(Pos.CENTER);
+        head.setPadding(new Insets(18, 20, 8, 20));
+        pager = new Pager(pageSize, this::showPage); pager.setTotal(cards.size());
+        pager.setVisible(false); pager.setManaged(false);
+        reveal.setId("opening-reveal-all"); reveal.getStyleClass().add("btn-primary");
+        reveal.setOnAction(e -> revealAll());
+        Button done = new Button(NeoText.get("haul.done")); done.setId("opening-done");
+        done.getStyleClass().add("btn-secondary"); done.setOnAction(e -> close());
+        progress.getStyleClass().add("opening-detail"); UiScale.fixedFont(progress, 12);
+        again.setId("opening-again"); again.getStyleClass().add("btn-primary");
+        again.setVisible(false); again.setManaged(false);
+        HBox buttons = new HBox(12, pager, reveal, again, done); buttons.setAlignment(Pos.CENTER);
+        wantedNote.getStyleClass().add("opening-wanted-note"); UiScale.fixedFont(wantedNote, 13);
+        wantedNote.setWrapText(true); wantedNote.setVisible(false); wantedNote.setManaged(false);
+        VBox footer = new VBox(8, wantedNote, progress, buttons); footer.setAlignment(Pos.CENTER);
+        footer.setPadding(new Insets(8, 16, 16, 16));
+        BorderPane content = new BorderPane(stage, head, null, footer, null);
+        sparks.setMouseTransparent(true);
+        getChildren().addAll(content, sparks);
+        grid.setAlignment(Pos.CENTER); grid.setHgap(16); grid.setVgap(10);
+        showSealed(); updateProgress();
+        parentProperty().addListener((o, before, after) -> { if (after == null) stopAnimations(); });
+    }
+
+    private void showSealed() {
+        Label crest = new Label("✦"); crest.getStyleClass().add("opening-crest"); UiScale.fixedFont(crest, 90);
+        Label name = new Label(NeoText.get("opening.sealed")); name.getStyleClass().add("opening-pack-label"); UiScale.fixedFont(name, 11);
+        Button seal = new Button(); seal.setId("opening-seal");
+        VBox face = new VBox(14, crest, name); face.setAlignment(Pos.CENTER);
+        seal.setGraphic(face); seal.getStyleClass().add("opening-seal");
+        seal.setPrefSize(UiScale.px(180), UiScale.px(240)); seal.setMaxSize(UiScale.px(180), UiScale.px(240));
+        seal.setOnAction(e -> open());
+        Label hint = new Label(NeoText.get("opening.hint")); hint.getStyleClass().add("opening-detail"); UiScale.fixedFont(hint, 12);
+        Circle orbit = new Circle(150, Color.TRANSPARENT);
+        orbit.setStroke(Color.web("#d4aa5e", .32)); orbit.setStrokeWidth(1);
+        orbit.getStrokeDashArray().setAll(36.0, 18.0, 3.0, 18.0);
+        orbit.setMouseTransparent(true);
+        StackPane altar = new StackPane(orbit, seal); altar.setMaxHeight(UiScale.px(300));
+        VBox pack = new VBox(16, altar, hint); pack.setAlignment(Pos.CENTER);
+        if (CardNode.areAnimationsEnabled()) {
+            RotateTransition rotate = new RotateTransition(Duration.seconds(24), orbit);
+            rotate.setByAngle(360); rotate.setCycleCount(Animation.INDEFINITE); rotate.setInterpolator(Interpolator.LINEAR); play(rotate);
+            ScaleTransition pulse = new ScaleTransition(Duration.seconds(1.8), seal);
+            pulse.setToX(1.035); pulse.setToY(1.035); pulse.setAutoReverse(true); pulse.setCycleCount(Animation.INDEFINITE); play(pulse);
+        }
+        stage.getChildren().setAll(pack);
+    }
+
+    private void open() {
+        if (opened || closed) return;
+        opened = true;
+        // El rasgado del sobre (sonidos de Neo Forge); sin ellos, el barajar de siempre.
+        if (!forge.neo.platform.NeoSfx.play(forge.neo.sound.NeoSounds.PACK_OPEN)) {
+            sound(forge.sound.SoundEffectType.Shuffle);
+        }
+        showPage();
+        Circle wave = new Circle(getWidth() / 2, getHeight() / 2, 28, Color.TRANSPARENT);
+        wave.setStroke(Color.web("#f5ce88", .7)); wave.setStrokeWidth(2); sparks.getChildren().add(wave);
+        if (CardNode.areAnimationsEnabled()) {
+            ScaleTransition expand = new ScaleTransition(Duration.millis(650), wave); expand.setToX(10); expand.setToY(10);
+            FadeTransition fade = new FadeTransition(Duration.millis(650), wave); fade.setToValue(0);
+            ParallelTransition ripple = new ParallelTransition(expand, fade); ripple.setOnFinished(e -> sparks.getChildren().remove(wave)); play(ripple);
+        } else sparks.getChildren().remove(wave);
+        burst(getWidth() / 2, getHeight() / 2, Color.web("#e8b95e"), 32);
+    }
+
+    private void showPage() {
+        if (!opened) return;
+        stopAnimations(); grid.getChildren().clear();
+        pager.setTotal(cards.size());
+        for (int i = pager.from(); i < pager.to(); i++) {
+            final int index = i;
+            PaperCard card = cards.get(i);
+            StackPane tile = new StackPane(); tile.setId("opening-card-" + i);
+            tile.setPrefSize(cardWidth, cardWidth * CardNode.ASPECT);
+            tile.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+            paint(tile, index);
+            tile.setOnMouseClicked(e -> {
+                if (!revealed[index]) revealOne(tile, index, 0);
+                else CardZoom.show(tile, CardView.getCardForUi(card));
+                e.consume();
+            });
+            tile.setFocusTraversable(true);
+            tile.setOnKeyPressed(e -> {
+                if (e.getCode() == javafx.scene.input.KeyCode.ENTER || e.getCode() == javafx.scene.input.KeyCode.SPACE) {
+                    if (!revealed[index]) revealOne(tile, index, 0);
+                    else CardZoom.show(tile, CardView.getCardForUi(card));
+                    e.consume();
+                }
+            });
+            grid.add(tile, (i - pager.from()) % columns, (i - pager.from()) / columns);
+        }
+        stage.getChildren().setAll(grid);
+        updateProgress();
+    }
+
+    private void paint(StackPane tile, int index) {
+        tile.getChildren().clear(); tile.getStyleClass().setAll("opening-card");
+        if (!revealed[index]) {
+            Label rune = new Label("✧"); rune.getStyleClass().add("opening-rune"); UiScale.fixedFont(rune, 66);
+            tile.getStyleClass().add("opening-card-back"); tile.getChildren().add(rune);
+            tile.setAccessibleText(NeoText.get("opening.hint"));
+            return;
+        }
+        PaperCard card = cards.get(index);
+        CardNode face = new CardNode(cardWidth); face.setRotationEnabled(false);
+        face.setHoverEnabled(false); face.setBadgesVisible(false);
+        face.setCard(CardView.getCardForUi(card)); face.setMouseTransparent(true);
+        tile.getChildren().add(face);
+        if (weight(card) >= 3) tile.getStyleClass().add(weight(card) >= 5 ? "opening-mythic" : "opening-rare");
+        if (card.isFoil()) tile.getStyleClass().add("opening-foil");
+        if (isNew != null && isNew.test(card)) {
+            Label badge = new Label(NeoText.get("haul.new")); badge.getStyleClass().add("new-badge");
+            badge.setMouseTransparent(true); StackPane.setAlignment(badge, Pos.TOP_CENTER);
+            tile.getChildren().add(badge);
+        }
+        final List<String> decks = wanted(card);
+        if (!decks.isEmpty()) {
+            // Abajo, para no pisar "NUEVA" (arriba): las dos cosas pueden ser verdad.
+            tile.getStyleClass().add("opening-wanted");
+            Label badge = new Label(NeoText.get("opening.wanted.badge")); badge.getStyleClass().add("wanted-badge");
+            badge.setMouseTransparent(true); StackPane.setAlignment(badge, Pos.BOTTOM_CENTER);
+            StackPane.setMargin(badge, new Insets(0, 0, 6, 0));
+            tile.getChildren().add(badge);
+            Tooltip.install(tile, new Tooltip(NeoText.get("opening.wanted.tip", String.join(", ", decks))));
+        }
+        if (valueOf != null) {
+            // Abajo a la izquierda; si esta "PARA TU MAZO", por encima de el.
+            Label value = new Label(NeoText.get("shop.credits.short", valueOf.applyAsInt(card)));
+            value.getStyleClass().add("value-badge"); value.setMouseTransparent(true);
+            StackPane.setAlignment(value, Pos.BOTTOM_LEFT);
+            StackPane.setMargin(value, new Insets(0, 0, decks.isEmpty() ? 6 : 30, 6));
+            tile.getChildren().add(value);
+        }
+        tile.setAccessibleText(forge.neo.card.CardText.nameOf(card));
+    }
+
+    private List<String> wanted(final PaperCard card) {
+        if (wantedIn == null || card == null) return List.of();
+        final List<String> decks = wantedIn.apply(card);
+        return decks == null ? List.of() : decks;
+    }
+
+    /**
+     * <b>Lo que te faltaba en tus mazos de la Quest</b> (Discord, 21-10-2026:
+     * <i>"a booster pack can tell you if it give a card missing from one of your
+     * decks ... you got this card missing from this deck"</i>): esas cartas
+     * salen con "PARA TU MAZO" y, segun se revelan, una linea encima de los
+     * botones dice cual y para que mazo. No es una ventana que haya que cerrar:
+     * abrir sobres es muy repetitivo y un aviso por carta seria un clic de mas.
+     * La lista se calcula ANTES de comprar ({@code NeoQuestShop.Opened#wantedIn}).
+     */
+    public void setWanted(final java.util.function.Function<PaperCard, List<String>> wantedIn) {
+        this.wantedIn = wantedIn;
+        updateProgress();
+    }
+
+    /**
+     * <b>Lo que vale cada carta</b> (itch.io, 23-10-2026: <i>"always shows the
+     * value of a card ... when you open the pack itself"</i>): una pastilla
+     * "N cr." en cada carta revelada. Solo la Quest, que es donde se vende.
+     */
+    public void setValue(final java.util.function.ToIntFunction<PaperCard> valueOf) {
+        this.valueOf = valueOf;
+    }
+
+    private void revealOne(StackPane tile, int index, double delay) {
+        if (revealed[index] || closed) return;
+        revealed[index] = true; updateProgress();
+        if (delay == 0) sound(weight(cards.get(index)) >= 5 || !wanted(cards.get(index)).isEmpty()
+                ? forge.sound.SoundEffectType.Planeswalker : forge.sound.SoundEffectType.Draw);
+        if (!CardNode.areAnimationsEnabled()) { paint(tile, index); return; }
+        ScaleTransition out = new ScaleTransition(Duration.millis(130), tile);
+        out.setToX(0.03); out.setDelay(Duration.millis(delay));
+        ScaleTransition in = new ScaleTransition(Duration.millis(240), tile);
+        in.setToX(1); in.setInterpolator(Interpolator.EASE_OUT);
+        out.setOnFinished(e -> {
+            paint(tile, index);
+            final boolean wantedCard = !wanted(cards.get(index)).isEmpty();
+            if (weight(cards.get(index)) >= 3 || cards.get(index).isFoil() || wantedCard) {
+                Bounds b = sceneToLocal(tile.localToScene(tile.getBoundsInLocal()));
+                burst(b.getCenterX(), b.getCenterY(), wantedCard ? Color.web("#E0A63C")
+                        : weight(cards.get(index)) >= 5 ? Color.CORAL : Color.GOLD, 18);
+            }
+        });
+        play(new SequentialTransition(out, in));
+    }
+
+    private void revealAll() {
+        if (closed) return;
+        if (!opened) open();
+        // Only animate visible cards; boxes never allocate hundreds of image nodes.
+        int n = 0;
+        for (Node node : grid.getChildren()) revealOne((StackPane) node, pager.from() + n, n++ * 55);
+        Arrays.fill(revealed, true); updateProgress();
+    }
+
+    private void updateProgress() {
+        int count = 0; for (boolean value : revealed) if (value) count++;
+        progress.setText(NeoText.get("opening.progress", count, cards.size()));
+        reveal.setDisable(count == cards.size());
+        // Una vez por nombre, en el orden en que salen, y solo lo ya revelado:
+        // no se destripa el sobre antes de abrirlo.
+        final Map<String, List<String>> shown = new LinkedHashMap<>();
+        for (int i = 0; i < cards.size(); i++) {
+            if (!revealed[i]) continue;
+            final List<String> decks = wanted(cards.get(i));
+            if (!decks.isEmpty()) shown.putIfAbsent(forge.neo.card.CardText.nameOf(cards.get(i)), decks);
+        }
+        final List<String> parts = new ArrayList<>();
+        for (Map.Entry<String, List<String>> e : shown.entrySet()) {
+            if (parts.size() == 4) {
+                parts.add(NeoText.get("opening.wanted.more", shown.size() - 4));
+                break;
+            }
+            parts.add(e.getKey() + " (" + String.join(", ", e.getValue()) + ")");
+        }
+        wantedNote.setText(parts.isEmpty() ? "" : NeoText.get("opening.wanted.note", String.join(" \u00b7 ", parts)));
+        wantedNote.setVisible(!parts.isEmpty()); wantedNote.setManaged(!parts.isEmpty());
+    }
+
+    private void burst(double x, double y, Color color, int count) {
+        if (!CardNode.areAnimationsEnabled() || closed) return;
+        for (int i = 0; i < count; i++) {
+            double angle = i * Math.PI * 2 / count, distance = 70 + (i % 4) * 30;
+            Circle particle = new Circle(x, y, i % 3 + 1, color); sparks.getChildren().add(particle);
+            TranslateTransition move = new TranslateTransition(Duration.millis(700), particle);
+            move.setToX(Math.cos(angle) * distance); move.setToY(Math.sin(angle) * distance);
+            FadeTransition fade = new FadeTransition(Duration.millis(700), particle); fade.setToValue(0);
+            ParallelTransition effect = new ParallelTransition(move, fade);
+            effect.setOnFinished(e -> sparks.getChildren().remove(particle)); play(effect);
+        }
+    }
+    private static void sound(forge.sound.SoundEffectType effect) {
+        try { forge.sound.SoundSystem.instance.play(effect, true); }
+        catch (RuntimeException ex) { System.err.println("[opening] Audio unavailable: " + ex.getMessage()); }
+    }
+    private void play(Animation animation) {
+        animations.removeIf(a -> a.getStatus() == Animation.Status.STOPPED);
+        animations.add(animation); animation.play();
+    }
+    private void stopAnimations() { for (Animation a : animations) a.stop(); animations.clear(); sparks.getChildren().clear(); }
+    private void close() { if (closed) return; closed = true; stopAnimations(); onDone.run(); }
+
+    /**
+     * Un boton para <b>comprar y abrir otro igual</b>, justo a la izquierda de
+     * volver (Discord, 09-10-2026: <i>"after opening a pack, adding a button
+     * (next to the back button) to buy and open a new pack directly ... it is
+     * really annoying to moving the mouse around the complete monitor"</i>).
+     * Como "Revelar todo" tambien rompe el precinto, comprar, abrir y volver a
+     * comprar se hace todo en esta fila de abajo.
+     *
+     * <p>Se ensenya aunque no llegue el dinero, apagado: un boton que aparece y
+     * desaparece no se aprende. {@code action} devuelve si ha podido comprar; si
+     * no, esta apertura se cierra como con volver, para no dejarla muerta.
+     */
+    public void setAgain(final String label, final boolean enabled,
+                         final java.util.function.BooleanSupplier action) {
+        again.setText(label);
+        again.setDisable(!enabled || action == null);
+        again.setOnAction(e -> {
+            if (closed || action == null) return;
+            closed = true;
+            stopAnimations();
+            if (!action.getAsBoolean()) onDone.run();
+        });
+        again.setVisible(true);
+        again.setManaged(true);
+    }
+    private static int weight(PaperCard c) {
+        if (c.getRarity() == null) return 0;
+        switch (c.getRarity()) { case MythicRare: return 5; case Special: return 4; case Rare: return 3; case Uncommon: return 2; default: return 1; }
+    }
+}

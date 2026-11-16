@@ -1,0 +1,1119 @@
+package forge.neo.net;
+
+import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Locale;
+
+import forge.deck.Deck;
+import forge.game.GameType;
+import forge.gamemodes.match.GameLobby;
+import forge.gamemodes.match.LobbySlot;
+import forge.gamemodes.match.LobbySlotType;
+import forge.gamemodes.net.ChatMessage;
+import forge.gamemodes.net.client.ClientGameLobby;
+import forge.gamemodes.net.client.FGameClient;
+import forge.gamemodes.net.event.UpdateLobbyPlayerEvent;
+import forge.gamemodes.net.server.FServerManager;
+import forge.gamemodes.net.server.ServerGameLobby;
+import forge.gui.interfaces.IGuiGame;
+import forge.interfaces.ILobbyListener;
+import forge.localinstance.properties.ForgeNetPreferences;
+import forge.model.FModel;
+import forge.neo.match.NeoFormat;
+import forge.neo.platform.NeoGuiBase;
+
+/**
+ * La partida privada, envuelta.
+ *
+ * <p><b>Aqui no hay ni una linea de red.</b> Forge trae el cliente y el
+ * servidor enteros ({@code forge.gamemodes.net}, ~9.000 lineas mantenidas):
+ * netty, UPnP, sincronizacion por deltas con checksums, latidos, ventana de
+ * reconexion de 300 s y relevo por la IA si alguien no vuelve. Esto es la
+ * fachada que necesita nuestra interfaz para pedirselo, y nada mas.
+ *
+ * <p><b>El hallazgo que lo hace barato:</b> el protocolo <i>es</i>
+ * {@code IGuiGame}. {@code ProtocolMethod} enumera 46 metodos servidor→cliente
+ * — exactamente los que {@code NeoMatchUI} ya implementa — y 16
+ * cliente→servidor, que son {@code IGameController}, el que ya llamamos. No hay
+ * ninguna "API de red" que aprender: por el cable viaja la misma llamada
+ * bloqueante que ya atendemos en local.
+ *
+ * <p><b>Como se reparten los papeles.</b> El anfitrion tiene un
+ * {@link ServerGameLobby} y su propia {@code NeoMatchUI}; cada invitado tiene un
+ * {@link ClientGameLobby} y la suya. Del lado del anfitrion, cada asiento remoto
+ * recibe un {@code RemoteClientGuiGame} que convierte cada llamada de
+ * {@code IGuiGame} en un paquete. Eso lo monta Forge solo.
+ *
+ * <p><b>A que se juega lo decide el anfitrion</b> y viaja solo: las variantes
+ * van dentro del {@code GameLobbyData} que se reparte en cada cambio. Ver
+ * {@link #FORMATS}, {@link #setFormat} y {@link #formatOf} — esa ultima es la
+ * que hay que usar SIEMPRE para preguntar el modo, porque
+ * {@code lobby.getGameType()} miente en el invitado.
+ *
+ * <p><b>Lo que NO hace, y conviene saberlo:</b> no hay contrasenya, ni expulsar,
+ * ni banear — el lobby de Forge no los tiene. "Privada" aqui significa que solo
+ * entra quien conozca la direccion.
+ */
+public final class NeoLobby {
+
+    /** El tope que se ha decidido para esta aplicacion. El motor admite 8. */
+    public static final int MAX_SEATS = 6;
+
+    /** Minimo para que {@code GameLobby.startGame()} deje empezar. */
+    public static final int MIN_SEATS = 2;
+
+    private NeoLobby() {
+    }
+
+    /** El puerto configurado, que es el que hay que compartir. */
+    public static int port() {
+        return FModel.getNetPreferences().getPrefInt(ForgeNetPreferences.FNetPref.NET_PORT);
+    }
+
+    /**
+     * La direccion de la maquina en la red local.
+     *
+     * <p>Para jugar por internet hace falta la externa
+     * ({@code FServerManager.getExternalAddress()}), que sale de consultar a un
+     * servicio y puede tardar o no estar.
+     */
+    public static String localAddress() {
+        return FServerManager.getLocalAddress();
+    }
+
+    // ------------------------------------------------------------------
+    // Anfitrion
+    // ------------------------------------------------------------------
+
+    /**
+     * Levanta el servidor y devuelve el lobby que hay que pintar.
+     *
+     * <p>Se hace a mano y no con {@code NetConnectUtil.host(...)} por una razon
+     * concreta: aquel exige un {@code IOnlineLobby} y un
+     * {@code IOnlineChatInterface} montados de antemano, y ademas fija el
+     * oyente del lobby a un chat. Lo que hace de verdad son cuatro llamadas, y
+     * asi la pantalla decide cuando se engancha a que.
+     *
+     * <p><b>La fabrica de interfaces es lo delicado.</b> El asiento LOCAL del
+     * anfitrion no lo crea la pantalla: lo pide el motor con
+     * {@code IGuiBase.getNewGuiGame()} en mitad de {@code startGame()}. Y esa
+     * fabrica es un estatico que nadie limpia, asi que hay que dejarla puesta
+     * <b>aqui</b>, al hospedar — si se confiara en la que dejo la ultima
+     * partida suelta, el anfitrion jugaria con la {@code NeoMatchUI} de aquella
+     * partida, ya terminada.
+     *
+     * @param guiFactory crea una interfaz NUEVA cada vez que se la llama
+     */
+    public static ServerGameLobby host(final java.util.function.Supplier<IGuiGame> guiFactory) {
+        NeoGuiBase.setGuiGameFactory(guiFactory);
+        markHosting();
+
+        final FServerManager server = FServerManager.getInstance();
+        final ServerGameLobby lobby = new ServerGameLobby();
+        server.startServer(port());
+        server.setLobby(lobby);
+        System.out.printf(Locale.ROOT, "[lobby] hospedando en %s:%d%n", localAddress(), port());
+        return lobby;
+    }
+
+    /**
+     * Estamos hospedando una sala: la partida que monte el lobby es nuestra.
+     *
+     * <p>Una bandera propia y no "hay un servidor escuchando": quien la lee es
+     * {@code NeoGuiBase.hostMatch}, por el que pasan TODAS las partidas, y lo
+     * que pregunta es si la partida que va a montar es la de NUESTRA sala.
+     * (Antes se evitaba {@code FServerManager.getInstance().isHosting()} porque
+     * crea el singleton con sus hilos de netty; Forge lo quito el 10-10-2026 y
+     * lo de ahora, {@code HostingServer.isHosting()}, es estatico.)
+     */
+    private static volatile boolean hostingLobby;
+
+    /** Lo llaman los dos caminos que hospedan: este y {@code NeoOnline.host}. */
+    public static void markHosting() {
+        hostingLobby = true;
+    }
+
+    /** Si la partida que se va a montar sale de NUESTRA sala. Ver {@link NetHostedMatch}. */
+    public static boolean isHostingLobby() {
+        return hostingLobby;
+    }
+
+    /** Cierra el servidor. Idempotente: se puede llamar sin estar hospedando. */
+    public static void stopHosting() {
+        hostingLobby = false;
+        // HostingServer y no FServerManager.isHosting(), que Forge quito el
+        // 10-10-2026 (#12181, "Fix netplay host bugs"). Ademas es estatico y
+        // no crea el singleton con sus hilos de netty solo para preguntar.
+        if (forge.gamemodes.net.server.HostingServer.isHosting()) {
+            FServerManager.getInstance().stopServer();
+            System.out.println("[lobby] servidor cerrado");
+        }
+    }
+
+    public static boolean isHosting() {
+        return forge.gamemodes.net.server.HostingServer.isHosting();
+    }
+
+    // ------------------------------------------------------------------
+    // Invitado
+    // ------------------------------------------------------------------
+
+    /** Lo que le hace falta a la pantalla del invitado para seguir viva. */
+    public static final class Guest {
+        private final FGameClient client;
+        private final ClientGameLobby lobby;
+
+        Guest(final FGameClient client, final ClientGameLobby lobby) {
+            this.client = client;
+            this.lobby = lobby;
+        }
+
+        public FGameClient getClient() {
+            return client;
+        }
+
+        public ClientGameLobby getLobby() {
+            return lobby;
+        }
+
+        /** Cambiar mazo, nombre, "listo"... todo va por aqui. */
+        public void send(final UpdateLobbyPlayerEvent event) {
+            client.send(event);
+        }
+
+        public void close() {
+            client.close();
+        }
+    }
+
+    /**
+     * Se conecta a la partida de otro.
+     *
+     * <p>{@code gui} es la {@code NeoMatchUI} con la que jugara este invitado.
+     * No hay que engancharle el mando: cuando el anfitrion mande {@code openView},
+     * {@code GameClientHandler} llama solo a {@code setGameControllers(...)} y a
+     * {@code setNetGame()}.
+     *
+     * @param onLobby  se llama con cada actualizacion del lobby que manda el anfitrion
+     * @param onChat   mensajes del chat
+     * @param onClose  la conexion se ha ido
+     */
+    public static Guest join(final String host, final int port, final String username,
+                             final IGuiGame gui,
+                             final java.util.function.Consumer<ClientGameLobby> onLobby,
+                             final java.util.function.Consumer<ChatMessage> onChat,
+                             final Runnable onClose) {
+        final FGameClient client = new FGameClient(username, gui, host, port);
+        final ClientGameLobby lobby = new ClientGameLobby();
+
+        client.addLobbyListener(new ILobbyListener() {
+            @Override
+            public void update(final GameLobby.GameLobbyData state, final int slot) {
+                // El orden importa: primero quien soy yo, luego el estado. Al
+                // reves, la pantalla se pinta sin saber cual es su asiento y
+                // sale todo en gris (mayEdit compara con localPlayer).
+                lobby.setLocalPlayer(slot);
+                lobby.setData(state);
+                if (onLobby != null) {
+                    onLobby.accept(lobby);
+                }
+            }
+
+            @Override
+            public void message(final String source, final String message,
+                                final ChatMessage.MessageType type) {
+                if (onChat != null) {
+                    onChat.accept(new ChatMessage(source, message, type));
+                }
+            }
+
+            @Override
+            public void close() {
+                if (onClose != null) {
+                    onClose.run();
+                }
+            }
+
+            @Override
+            public ClientGameLobby getLobby() {
+                return lobby;
+            }
+        });
+
+        client.connect();
+        System.out.printf(Locale.ROOT, "[lobby] conectado a %s:%d como %s%n", host, port, username);
+        return new Guest(client, lobby);
+    }
+
+    // ------------------------------------------------------------------
+    // Cosas que valen para los dos lados
+    // ------------------------------------------------------------------
+
+    /**
+     * Deja el lobby en Commander. Ver {@link #setFormat}.
+     *
+     * <p><b>Esto es lo que hace que Commander sea Commander</b>, y el lobby lo
+     * hace bien por construccion: {@code applyVariant} escribe en los DOS sitios
+     * de {@code GameRules} — el tipo actual y el conjunto de variantes — que es
+     * justo la trampa que ya nos costo una tarde en {@code NeoGame}. Sin el
+     * conjunto no se pregunta por devolver el comandante a la zona de mando
+     * (CR 903.9a) ni se pierde por 21 de danyo de comandante.
+     */
+    public static void setCommander(final GameLobby lobby) {
+        setFormat(lobby, NeoFormat.COMMANDER);
+    }
+
+    // ------------------------------------------------------------------
+    // Que se juega
+    // ------------------------------------------------------------------
+
+    /**
+     * Los modos que se pueden elegir en una partida privada.
+     *
+     * <p>Son los cinco del menu principal ({@code isInMainMenu}) mas los dos
+     * que <b>no necesitan mazo</b>: Momir Basic y MoJhoSto montan el suyo solos
+     * ({@code GameType.autoGenerateDeck}), asi que dos amigos que no se hayan
+     * construido nada pueden jugar igualmente.
+     *
+     * <p>No estan ni el draft ni el sellado: en red esos no son un modo de la
+     * sala, son un <b>evento</b> entero de Forge (repartir sobres, pasar picks)
+     * con su propia maquinaria. Y los "otros formatos" (Modern, Pauper...)
+     * tampoco: no son un modo distinto — son el mismo Construido con menos
+     * cartas — y el lobby de Forge no sabe recortar el pozo, solo mira las
+     * reglas de construccion.
+     */
+    public static final List<NeoFormat> FORMATS = List.of(
+            NeoFormat.COMMANDER, NeoFormat.ESTANDAR, NeoFormat.BRAWL,
+            NeoFormat.OATHBREAKER, NeoFormat.TINY_LEADERS,
+            NeoFormat.MOMIR, NeoFormat.MOJHOSTO);
+
+    /**
+     * Que se esta jugando en esta sala, visto desde <b>cualquiera de los dos
+     * lados</b>.
+     *
+     * <p><b>Se lee de las variantes y no de {@code lobby.getGameType()}</b>, y
+     * esa es la trampa: {@code currentGameType} es un campo suelto del
+     * {@code GameLobby} y <b>no viaja por el cable</b> — lo que se reparte es el
+     * {@code GameLobbyData}, y ahi dentro solo esta el conjunto de variantes.
+     * Preguntandole el tipo al lobby del invitado contesta siempre
+     * {@code Constructed}, o sea que su pantalla diria "Estandar" en una partida
+     * de Commander y le dejaria elegir el mazo equivocado.
+     *
+     * <p>El orden de las preguntas es el MISMO que usa
+     * {@code GameLobby.startGame()} para decidir a que se juega, porque la
+     * respuesta tiene que ser la que va a aplicar el motor y no la nuestra.
+     */
+    public static NeoFormat formatOf(final GameLobby lobby) {
+        final EnumSet<GameType> applied = variants(lobby);
+        if (applied.contains(GameType.Oathbreaker)) {
+            return NeoFormat.OATHBREAKER;
+        }
+        if (applied.contains(GameType.TinyLeaders)) {
+            return NeoFormat.TINY_LEADERS;
+        }
+        if (applied.contains(GameType.Brawl)) {
+            return NeoFormat.BRAWL;
+        }
+        if (applied.contains(GameType.Commander)) {
+            return NeoFormat.COMMANDER;
+        }
+        if (applied.contains(GameType.MoJhoSto)) {
+            return NeoFormat.MOJHOSTO;
+        }
+        if (applied.contains(GameType.MomirBasic)) {
+            return NeoFormat.MOMIR;
+        }
+        // Sin variantes es Construido, que es como lo entiende el motor:
+        // startGame() hace new RegisteredPlayer(deck) cuando el conjunto esta
+        // vacio. "Estandar" no es una variante, es la ausencia de todas.
+        return NeoFormat.ESTANDAR;
+    }
+
+    /**
+     * Cambia el modo de la sala. <b>Solo el anfitrion.</b>
+     *
+     * <p>Lo primero que hace es <b>quitarle el mazo y el "listo" a todo el
+     * mundo</b>, y no es celo: un mazo de Commander en una sala de Estandar no
+     * es un mazo peor, es uno que el motor rechaza al empezar — y el aviso
+     * saldria minutos despues, al darle a EMPEZAR, cuando ya nadie recuerda que
+     * se cambio el modo. Ademas el invitado tenia el "Listo" puesto sobre una
+     * decision que ya no vale.
+     *
+     * <p><b>Estandar se pone poniendolo y quitandolo, y tiene su motivo.</b> Lo
+     * que hay que dejar es el conjunto de variantes <i>vacio</i>, pero
+     * {@code clearVariants()} no avisa a nadie — no llama a {@code updateView}
+     * — asi que el invitado se quedaria con el modo de antes hasta que alguien
+     * tocara otra cosa en la sala. {@code applyVariant} + {@code removeVariant}
+     * son los dos metodos publicos que si reparten el estado, y terminan justo
+     * donde hay que terminar: sin variantes y con el tipo en
+     * {@code Constructed}.
+     */
+    public static void setFormat(final GameLobby lobby, final NeoFormat format) {
+        // Archenemy es una variante MAS (va encima del modo), y clearVariants se
+        // la lleva: se apunta antes y se vuelve a poner si el modo nuevo la admite.
+        final Archenemy keep = archenemyOf(lobby);
+        final boolean again = keep != Archenemy.OFF && archenemyAllowed(format);
+        // Planechase igual: va encima del modo y clearVariants se lo lleva.
+        final boolean planes = planechaseOn(lobby) && planechaseAllowed(format);
+        clearDecksAndReady(lobby);
+        lobby.clearVariants();
+        if (planes) {
+            addVariantQuietly(lobby, GameType.Planechase);
+        }
+        if (again) {
+            // En el MISMO reparto que el modo, sin repartir antes: si fuera
+            // detras, el invitado veria un momento "ya no hay archienemigo" y
+            // justo despues "X es el archienemigo".
+            addVariantQuietly(lobby, keep == Archenemy.ALL ? GameType.ArchenemyRumble : GameType.Archenemy);
+        } else if (keep == Archenemy.ONE) {
+            // Se va (a Momir, por ejemplo): los equipos de uno contra todos no
+            // pueden quedarse puestos para la partida siguiente.
+            resetTeams(lobby);
+        }
+        if (format.getGameType() == GameType.Constructed) {
+            lobby.applyVariant(GameType.Constructed);
+            lobby.removeVariant(GameType.Constructed);
+        } else {
+            lobby.applyVariant(format.getGameType());
+        }
+        if (again && archenemyOf(lobby) != keep) {
+            // Si la variante no se pudo poner sin repartir, se pone ahora.
+            setArchenemy(lobby, keep);
+        }
+        if (planes && !planechaseOn(lobby)) {
+            setPlanechase(lobby, true);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Planechase en la sala (10-11-2026, Discord)
+    // ------------------------------------------------------------------
+
+    /**
+     * <b>Planechase en red</b> (Discord, 10-11-2026: <i>"planechase
+     * online?"</i>), despues de tenerlo en local
+     * ({@code forge.neo.match.Planechase}).
+     *
+     * <p>Como Archenemy, el lobby de Forge ya lo hace entero:
+     * {@code GameType.Planechase} es una variante de la sala (la casilla
+     * "Planechase" de su VLobby, en local y en red) y {@code startGame} le da a
+     * cada asiento <b>la seccion de planos de su mazo</b>. Lo que faltaba es lo
+     * mismo que con los esquemas: casi nadie tiene planos en el mazo, y sin
+     * ellos el motor se niega ("should have at least 10 planes") o empieza sin
+     * planos. {@link #preparePlanes} le da a cada uno un mazo planar al azar,
+     * como en local.
+     *
+     * <p>Un mazo por jugador, que es lo que hace la sala de Forge: el "mazo
+     * comun" del modo local ({@code Planechase.Shared}) no entra aqui.
+     */
+    public static boolean planechaseOn(final GameLobby lobby) {
+        return variants(lobby).contains(GameType.Planechase);
+    }
+
+    /**
+     * Los construidos, como Archenemy. En Momir y MoJhoSto no: el mazo lo
+     * genera el motor al empezar y no llevaria planos.
+     */
+    public static boolean planechaseAllowed(final NeoFormat format) {
+        return format != null && needsDeck(format)
+                && forge.neo.match.Planechase.appliesTo(format.getGameType());
+    }
+
+    /** Pone o quita Planechase. <b>Solo el anfitrion.</b> */
+    public static void setPlanechase(final GameLobby lobby, final boolean on) {
+        if (on) {
+            lobby.applyVariant(GameType.Planechase);
+        } else {
+            lobby.removeVariant(GameType.Planechase);
+        }
+    }
+
+    /**
+     * Justo antes de empezar, <b>en el anfitrion</b>: un mazo planar al azar
+     * para cada jugador que no traiga uno valido (lo mismo que
+     * {@code Planechase.seat} en local). Se le cambia el mazo por una COPIA,
+     * como en {@link #prepareSchemes}: el suyo no se toca.
+     *
+     * @return a cuantos se les ha dado un mazo planar
+     */
+    public static int preparePlanes(final GameLobby lobby) {
+        if (!planechaseOn(lobby) || NeoNetEvent.isLimited(lobby)) {
+            return 0;
+        }
+        int n = 0;
+        for (final LobbySlot s : activeSlots(lobby)) {
+            final Deck deck = s.getDeck();
+            if (deck == null) {
+                continue;
+            }
+            final forge.deck.CardPool own = deck.get(forge.deck.DeckSection.Planes);
+            // Los suyos se respetan; los que le dimos nosotros, se vuelven a
+            // sortear en cada partida.
+            if (own != null && !own.isEmpty() && !deck.getTags().contains(RANDOM_PLANES_TAG)
+                    && forge.deck.DeckFormat.getPlaneSectionConformanceProblem(own) == null) {
+                continue;
+            }
+            final Deck copy = new Deck(deck, deck.getName());
+            copy.getTags().add(RANDOM_PLANES_TAG);
+            copy.putSection(forge.deck.DeckSection.Planes, forge.deck.DeckgenUtil.generatePlanarPool());
+            s.setDeck(copy);
+            n++;
+        }
+        return n;
+    }
+
+    /** La marca de las copias con planos al azar (ver {@link #preparePlanes}). */
+    private static final String RANDOM_PLANES_TAG = "neo-random-planes";
+
+    /**
+     * Anyade una variante SIN repartir el estado: {@code getAppliedVariants}
+     * devuelve el conjunto de verdad del {@code GameLobbyData}, y el
+     * {@code applyVariant} que viene detras lo reparte todo junto. Si algun dia
+     * Forge devolviera una copia, no pasa nada: {@link #setFormat} la pone
+     * despues por el camino normal.
+     */
+    @SuppressWarnings("unchecked")
+    private static void addVariantQuietly(final GameLobby lobby, final GameType variant) {
+        final Iterable<GameType> applied = lobby.getAppliedVariants();
+        if (applied instanceof java.util.Set<?> set) {
+            ((java.util.Set<GameType>) set).add(variant);
+        }
+    }
+
+    /** Cada uno en su equipo, que es como nace un asiento (todos contra todos). */
+    private static void resetTeams(final GameLobby lobby) {
+        for (int i = 0; i < lobby.getNumberOfSlots(); i++) {
+            final LobbySlot s = lobby.getSlot(i);
+            if (s != null) {
+                s.setTeam(i);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Archenemy en la sala (12-10-2026, Discord)
+    // ------------------------------------------------------------------
+
+    /**
+     * <b>Archenemy en red.</b> Pedido en Discord el 12-10-2026, despues de
+     * tenerlo en local ({@code forge.neo.match.Archenemy}).
+     *
+     * <p>El lobby de Forge ya lo sabe hacer entero, y no hay ni una regla
+     * nuestra: {@code GameType.Archenemy} y {@code ArchenemyRumble} son
+     * variantes de la sala; cada asiento lleva su marca de archienemigo
+     * ({@code LobbySlot.isArchenemy}, que viaja por el cable con el resto del
+     * {@code GameLobbyData}); y {@code startGame} pone los equipos (el
+     * archienemigo en uno, los demas en otro) y le da los esquemas de <b>la
+     * seccion de esquemas de su mazo</b>. Lo unico que faltaba es lo que ya
+     * resolvia el modo local: casi nadie tiene un mazo con esquemas. Sin ellos
+     * el motor o se niega (con {@code ENFORCE_DECK_LEGALITY}: "must contain at
+     * least 20 schemes") o empieza con el mazo de esquemas vacio. Por eso
+     * {@link #prepareSchemes} le da 20 al azar, como en local, justo antes de
+     * empezar.
+     *
+     * <p>La partida la monta el ANFITRION, asi que al invitado no le hace falta
+     * nada: le llega jugada. Su pantalla solo lo ensenya.
+     */
+    public enum Archenemy {
+        /** Sin archienemigo. */
+        OFF,
+        /** Uno contra todos: el asiento marcado ({@link #setArchenemySeat}). */
+        ONE,
+        /** Archenemy Rumble: todos lo son, cada uno con sus esquemas. */
+        ALL
+    }
+
+    /** Lo que hay puesto en la sala, visto desde cualquiera de los dos lados (sale de las variantes). */
+    public static Archenemy archenemyOf(final GameLobby lobby) {
+        final EnumSet<GameType> applied = variants(lobby);
+        if (applied.contains(GameType.ArchenemyRumble)) {
+            return Archenemy.ALL;
+        }
+        return applied.contains(GameType.Archenemy) ? Archenemy.ONE : Archenemy.OFF;
+    }
+
+    /**
+     * Si se puede jugar con archienemigo en ese modo: los construidos, como en
+     * local. En Momir y MoJhoSto no: el mazo lo genera el motor al empezar y se
+     * llevaria los esquemas por delante.
+     */
+    public static boolean archenemyAllowed(final NeoFormat format) {
+        return format != null && needsDeck(format)
+                && forge.neo.match.Archenemy.appliesTo(format.getGameType());
+    }
+
+    /**
+     * Pone o quita el archienemigo. <b>Solo el anfitrion.</b> Con
+     * {@link Archenemy#ONE} lo es el asiento que ya lo fuera, y si no hay
+     * ninguno, el primero (el del anfitrion, que es lo que hace Forge).
+     */
+    public static void setArchenemy(final GameLobby lobby, final Archenemy mode) {
+        if (archenemyOf(lobby) == Archenemy.ONE && mode != Archenemy.ONE) {
+            // Los equipos de uno contra todos (0 y 1) no valen para lo demas:
+            // cada uno vuelve al suyo, que es como nace un asiento.
+            resetTeams(lobby);
+        }
+        lobby.removeVariant(GameType.Archenemy);
+        lobby.removeVariant(GameType.ArchenemyRumble);
+        if (mode == Archenemy.ONE) {
+            final int seat = archenemySeat(lobby);
+            markArchenemy(lobby, seat < 0 ? firstActive(lobby) : seat);
+            lobby.applyVariant(GameType.Archenemy);
+        } else if (mode == Archenemy.ALL) {
+            lobby.applyVariant(GameType.ArchenemyRumble);
+        }
+    }
+
+    /**
+     * El asiento {@code index} pasa a ser el archienemigo. <b>Solo el
+     * anfitrion.</b>
+     *
+     * <p>Se escribe en los asientos directamente, como {@link #clearDecksAndReady}:
+     * el anfitrion no puede mandar un evento a un asiento remoto
+     * ({@code mayEdit}). Y {@code applyVariant} es el metodo publico que
+     * reparte el estado ({@code updateView} es protegido): volver a poner la
+     * variante que ya esta no cambia nada mas.
+     */
+    public static void setArchenemySeat(final GameLobby lobby, final int index) {
+        if (archenemyOf(lobby) != Archenemy.ONE) {
+            return;
+        }
+        markArchenemy(lobby, index);
+        lobby.applyVariant(GameType.Archenemy);
+    }
+
+    /** El asiento ocupado que es el archienemigo, o -1. */
+    public static int archenemySeat(final GameLobby lobby) {
+        for (int i = 0; i < lobby.getNumberOfSlots(); i++) {
+            final LobbySlot s = lobby.getSlot(i);
+            if (s != null && s.getType() != LobbySlotType.OPEN && s.isArchenemy()) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Justo antes de empezar, <b>en el anfitrion</b>: el mazo de esquemas de
+     * cada archienemigo que no traiga uno valido, 20 al azar como en local
+     * ({@code forge.neo.match.Archenemy.randomSchemes}). Se le cambia el mazo
+     * por una COPIA con los esquemas: el suyo — que puede ser el mismo objeto
+     * que el guardado — no se toca.
+     *
+     * <p>Y con uno contra todos vuelve a poner los equipos (el que llega
+     * despues trae el suyo), y si el archienemigo se ha ido de la sala, lo
+     * pasa a ser el primero: sin nadie marcado, {@code startGame} los pondria a
+     * todos en el mismo equipo.
+     *
+     * @return a cuantos se les han dado esquemas
+     */
+    public static int prepareSchemes(final GameLobby lobby) {
+        final Archenemy mode = archenemyOf(lobby);
+        // En limitado nunca: la partida del draft es la del pool, y la fila de
+        // Archenemy ni se ve (LobbyScreen.toLimited ademas lo apaga).
+        if (mode == Archenemy.OFF || NeoNetEvent.isLimited(lobby)) {
+            return 0;
+        }
+        if (mode == Archenemy.ONE) {
+            // Otra vez, y no sobra: quien se sienta despues de ponerlo llega
+            // con su equipo de siempre (el de su asiento), no con el de los
+            // demas contra el archienemigo.
+            final int seat = archenemySeat(lobby);
+            markArchenemy(lobby, seat < 0 ? firstActive(lobby) : seat);
+        }
+        int n = 0;
+        for (final LobbySlot s : activeSlots(lobby)) {
+            final Deck deck = s.getDeck();
+            if (deck == null || (mode == Archenemy.ONE && !s.isArchenemy())) {
+                continue;
+            }
+            final forge.deck.CardPool own = deck.get(forge.deck.DeckSection.Schemes);
+            // Los suyos se respetan; los que le dimos NOSOTROS la partida
+            // anterior (la copia se queda en el asiento), no: se vuelven a
+            // sortear, como en local, que son otros en cada partida.
+            if (own != null && !own.isEmpty() && !deck.getTags().contains(RANDOM_SCHEMES_TAG)
+                    && forge.deck.DeckFormat.getSchemeSectionConformanceProblem(own) == null) {
+                continue;
+            }
+            final Deck copy = new Deck(deck, deck.getName());
+            copy.getTags().add(RANDOM_SCHEMES_TAG);
+            final forge.deck.CardPool schemes = new forge.deck.CardPool();
+            for (final forge.item.PaperCard c : forge.neo.match.Archenemy.randomSchemes()) {
+                schemes.add(c);
+            }
+            copy.putSection(forge.deck.DeckSection.Schemes, schemes);
+            s.setDeck(copy);
+            n++;
+        }
+        return n;
+    }
+
+    /**
+     * Marca al archienemigo y pone los equipos <b>como Forge</b>
+     * ({@code GameLobby.applyToSlot}): el en el 0 y los demas en el 1. Es
+     * {@code startGame} quien los lee, del asiento: la marca sola no basta, y
+     * sin esto salia cada uno en el suyo — todos contra todos con un
+     * archienemigo de 60 vidas.
+     */
+    /** La marca de las copias con esquemas al azar (ver {@link #prepareSchemes}). */
+    private static final String RANDOM_SCHEMES_TAG = "neo-random-schemes";
+
+    /**
+     * Quita un asiento, <b>sin</b> el fallo de Forge con el archienemigo.
+     *
+     * <p>{@code GameLobby.removeSlot}, si el asiento lleva la marca, se la pasa
+     * a {@code getSlot(lastArchenemy)} — un indice privado que solo cuida
+     * {@code applyToSlot} y que baja con cada asiento que se quita, asi que se
+     * queda en -1 y revienta con un {@code NullPointerException}. Con la marca
+     * siempre en el asiento 0 (el del anfitrion, que no se quita) no pasaba;
+     * desde que se puede marcar a cualquiera, si. Se le quita la marca antes, y
+     * si con uno contra todos se queda sin archienemigo, pasa al primero.
+     */
+    public static void removeSeat(final GameLobby lobby, final int index) {
+        final LobbySlot s = lobby.getSlot(index);
+        final boolean was = s != null && s.isArchenemy();
+        if (was) {
+            s.setIsArchenemy(false);
+        }
+        lobby.removeSlot(index);
+        if (was && archenemyOf(lobby) == Archenemy.ONE) {
+            setArchenemySeat(lobby, firstActive(lobby));
+        }
+    }
+
+    private static void markArchenemy(final GameLobby lobby, final int index) {
+        for (int i = 0; i < lobby.getNumberOfSlots(); i++) {
+            final LobbySlot s = lobby.getSlot(i);
+            if (s != null) {
+                s.setIsArchenemy(i == index);
+                s.setTeam(i == index ? 0 : 1);
+            }
+        }
+    }
+
+    private static int firstActive(final GameLobby lobby) {
+        for (int i = 0; i < lobby.getNumberOfSlots(); i++) {
+            final LobbySlot s = lobby.getSlot(i);
+            if (s != null && s.getType() != LobbySlotType.OPEN) {
+                return i;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Deja a todos sin mazo y sin marcar "listo".
+     *
+     * <p>Se escribe <b>directamente en el asiento</b>, como
+     * {@link #clearOpenSeats}, y no con un {@code UpdateLobbyPlayerEvent}: el
+     * anfitrion no puede editar un asiento remoto
+     * ({@code ServerGameLobby.mayEdit} dice que no) y aqui hace falta tocar
+     * precisamente esos. Vale porque lo que se reparte es el
+     * {@code GameLobbyData} entero, asientos incluidos, en el
+     * {@code updateView(true)} que viene detras.
+     *
+     * @return si ha cambiado algo
+     */
+    public static boolean clearDecksAndReady(final GameLobby lobby) {
+        boolean changed = false;
+        for (int i = 0; i < lobby.getNumberOfSlots(); i++) {
+            final LobbySlot s = lobby.getSlot(i);
+            if (s == null || s.getType() == LobbySlotType.OPEN) {
+                continue;
+            }
+            if (s.getDeck() != null) {
+                s.setDeck(null);
+                changed = true;
+            }
+            if (s.isReady()) {
+                s.setIsReady(false);
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /**
+     * Si en este modo hay que elegir mazo.
+     *
+     * <p>En Momir Basic y en MoJhoSto no: el mazo lo monta el motor
+     * ({@code GameType.autoGenerateDeck}) y {@code startGame()} ni lo pide. Un
+     * boton de "Elegir mazo" ahi seria un control que no hace nada (principio
+     * 1), y un "Listo" apagado esperando un mazo que no va a llegar nunca deja
+     * la sala muerta sin decir por que.
+     */
+    public static boolean needsDeck(final NeoFormat format) {
+        return !format.isAutoGenerated();
+    }
+
+    /**
+     * El evento que convierte un asiento libre en una IA, <b>con nombre</b>.
+     *
+     * <p><b>Sin el nombre la partida no empieza, y no dice por que.</b>
+     * {@code GameLobby.addSlot()} crea el asiento con el nombre a {@code null}
+     * — es lo normal, la GUI vieja lo rellena en cuanto marcas "IA" — y un
+     * {@code null} dentro de {@code UpdateLobbyPlayerEvent} significa "este
+     * campo no viene", asi que {@code LobbySlot.apply} lo ignora y el asiento
+     * se queda sin nombre para siempre.
+     *
+     * <p>Lo que pasa entonces al darle a EMPEZAR: el motor construye
+     * {@code new Player(null, ...)} y el constructor llama a
+     * {@code Player.chooseName}, que recorre a los ya sentados haciendo
+     * {@code p.getName().equals(...)}. El primero sin nombre no falla —
+     * todavia no hay nadie con quien compararlo — pero deja en la mesa un
+     * jugador con {@code getName() == null}, y <b>el siguiente</b> revienta con
+     * un NPE. Una sola IA sin nombre se lleva la partida entera. Y como salta
+     * en un hilo de fondo, lo que se ve es que el boton se apaga y no pasa
+     * nada.
+     *
+     * <p>La regla vive aqui y no en la pantalla para que el comprobador sin
+     * ventana pruebe <b>la misma</b>, que es la unica forma de que no vuelva a
+     * pasar.
+     *
+     * <p>El nombre sale del mismo sitio que en una partida normal
+     * ({@code NeoPlayers}), asi que tus rivales de siempre se llaman igual
+     * jugando con amigos. Se evita repetir uno que ya este en la sala: el motor
+     * sabe desempatar — pondria "2o Kaldar" — pero eso se lee peor que dos
+     * nombres distintos.
+     */
+    public static UpdateLobbyPlayerEvent aiSeatEvent(final GameLobby lobby) {
+        // Y con SU cara y SU forma de jugar (Discord, 03-10-2026: "AI
+        // customization for online play"): la ficha de ese rival en
+        // Personalizar -> Rivales, como en una partida normal. Solo lo que el
+        // jugador haya personalizado: un rival sin cara propia sigue con la de
+        // siempre (-1) y uno con "la general", sin perfil (null), igual que
+        // antes. Una cara importada no viaja por el cable: los invitados no
+        // tienen el fichero, asi que en red se queda la de siempre.
+        final int rival = freeAiRival(lobby);
+        // El asiento recien anyadido (el ultimo, aun sin nombre) queda atado a
+        // ese rival: con los nombres "al azar" o "su comandante" el nombre ya
+        // no dice quien es, y sin esto todas las IAs serian el rival 1.
+        final LobbySlot fresh = lobby.getNumberOfSlots() == 0 ? null
+                : lobby.getSlot(lobby.getNumberOfSlots() - 1);
+        if (fresh != null && fresh.getName() == null && rival >= 0) {
+            RIVAL_OF.put(fresh, rival);
+        }
+        int avatar = -1;
+        int sleeve = -1;
+        String profile = null;
+        if (rival >= 0) {
+            // Su funda, si es de la hoja de Forge: el indice viaja por el cable.
+            // Una importada no existe en el otro ordenador; ahi, la de siempre.
+            sleeve = forge.neo.look.RivalSetup.sleeveSpriteIndexOf(forge.neo.look.RivalSetup.sleeve(rival));
+            final int sprite = forge.neo.look.RivalSetup.spriteIndexOf(forge.neo.look.RivalSetup.avatar(rival));
+            if (sprite >= 0) {
+                avatar = sprite;
+            }
+            final String own = forge.neo.look.RivalSetup.mode(rival);
+            if (!own.isEmpty()) {
+                profile = forge.neo.look.RivalSetup.resolve(own, rival, SEAT_RANDOM);
+            }
+        }
+        // El nombre, como en una partida normal segun Personalizar -> Rivales
+        // (Discord, 05-11-2026: "AI names don't correlate with Customize").
+        // "Su comandante" se pone cuando llega el mazo (aiNameForDeck); hasta
+        // entonces, el de siempre.
+        String name = null;
+        if (forge.neo.NeoSettings.AI_NAMES_RANDOM.equals(forge.neo.NeoSettings.aiNames())) {
+            name = uniqueIn(lobby, -1, forge.neo.look.NeoPlayers.randomName(Math.max(rival, 0)));
+        }
+        return UpdateLobbyPlayerEvent.create(LobbySlotType.AI, name != null ? name
+                        : rival >= 0 ? forge.neo.look.NeoPlayers.aiName(rival) : freeAiName(lobby),
+                avatar, sleeve, -1, false, false, java.util.Collections.emptySet(), profile);
+    }
+
+    /** Que rival de Personalizar es cada asiento de IA (identidad del asiento). */
+    private static final java.util.Map<LobbySlot, Integer> RIVAL_OF =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    /** El rival de Personalizar de este asiento: el atado al sentarlo, o el de su nombre guardado. -1 si ninguno. */
+    static int rivalOf(final LobbySlot slot) {
+        if (slot == null) {
+            return -1;
+        }
+        final Integer bound = RIVAL_OF.get(slot);
+        if (bound != null) {
+            return bound;
+        }
+        for (int i = 0; i < MAX_SEATS; i++) {
+            if (slot.getName() != null && slot.getName().equals(forge.neo.look.NeoLook.aiName(i))) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * El nombre que le toca a la IA del asiento {@code index} ahora que juega
+     * con {@code deck}, o null si no cambia. Solo con "su comandante": el
+     * nombre corto del comandante ("Krenko"), y sin comandante el de su rival.
+     * Nunca repite el de otro asiento.
+     */
+    public static String aiNameForDeck(final GameLobby lobby, final int index, final Deck deck) {
+        final LobbySlot slot = lobby.getSlot(index);
+        if (slot == null || slot.getType() != LobbySlotType.AI
+                || !forge.neo.NeoSettings.AI_NAMES_COMMANDER.equals(forge.neo.NeoSettings.aiNames())) {
+            return null;
+        }
+        String name = forge.neo.look.NeoPlayers.commanderName(deck);
+        if (name == null || name.isBlank()) {
+            final int rival = rivalOf(slot);
+            name = rival >= 0 ? forge.neo.look.NeoPlayers.aiName(rival) : slot.getName();
+        }
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        final String unique = uniqueIn(lobby, index, name);
+        return unique.equals(slot.getName()) ? null : unique;
+    }
+
+    /**
+     * Un nombre nuevo al azar para la IA del asiento {@code index}, al empezar
+     * cada partida, o null si el modo no es "al azar en cada partida".
+     */
+    public static String rerolledAiName(final GameLobby lobby, final int index) {
+        final LobbySlot slot = lobby.getSlot(index);
+        if (slot == null || slot.getType() != LobbySlotType.AI
+                || !forge.neo.NeoSettings.AI_NAMES_RANDOM.equals(forge.neo.NeoSettings.aiNames())) {
+            return null;
+        }
+        return uniqueIn(lobby, index, forge.neo.look.NeoPlayers.randomName(Math.max(rivalOf(slot), 0)));
+    }
+
+    /** {@code name}, o "name 2", "name 3"... si ya lo lleva otro asiento distinto de {@code index}. */
+    private static String uniqueIn(final GameLobby lobby, final int index, final String name) {
+        final List<String> taken = new ArrayList<>();
+        for (int i = 0; i < lobby.getNumberOfSlots(); i++) {
+            final LobbySlot s = lobby.getSlot(i);
+            if (i != index && s != null && s.getName() != null) {
+                taken.add(s.getName());
+            }
+        }
+        String unique = name;
+        for (int n = 2; taken.contains(unique); n++) {
+            unique = name + " " + n;
+        }
+        return unique;
+    }
+
+    private static final java.util.Random SEAT_RANDOM = new java.util.Random();
+
+    /**
+     * El numero del rival cuyo nombre esta libre en la sala (el mismo que
+     * escoge {@link #freeAiName}), o -1 si estan todos cogidos.
+     */
+    public static int freeAiRival(final GameLobby lobby) {
+        final List<String> taken = new ArrayList<>();
+        final List<Integer> bound = new ArrayList<>();
+        for (int i = 0; i < lobby.getNumberOfSlots(); i++) {
+            final LobbySlot s = lobby.getSlot(i);
+            if (s != null && s.getName() != null) {
+                taken.add(s.getName());
+                final Integer r = RIVAL_OF.get(s);
+                if (r != null) {
+                    bound.add(r);
+                }
+            }
+        }
+        for (int i = 0; i < MAX_SEATS; i++) {
+            final String candidate = forge.neo.look.NeoPlayers.aiName(i);
+            if (candidate != null && !candidate.isBlank() && !taken.contains(candidate) && !bound.contains(i)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** Un nombre de IA que no este ya cogido en esta sala. Nunca null. */
+    public static String freeAiName(final GameLobby lobby) {
+        final List<String> taken = new ArrayList<>();
+        for (int i = 0; i < lobby.getNumberOfSlots(); i++) {
+            final LobbySlot s = lobby.getSlot(i);
+            if (s != null && s.getName() != null) {
+                taken.add(s.getName());
+            }
+        }
+        for (int i = 0; i < MAX_SEATS; i++) {
+            final String candidate = forge.neo.look.NeoPlayers.aiName(i);
+            if (candidate != null && !candidate.isBlank() && !taken.contains(candidate)) {
+                return candidate;
+            }
+        }
+        // Con todos cogidos da igual cual salga, pero NUNCA null.
+        return "IA-" + lobby.getNumberOfSlots();
+    }
+
+    /**
+     * Si el anfitrion puede quitar este asiento con la cruz.
+     *
+     * <p>{@code ServerGameLobby.mayRemove} solo dice "a partir del tercero", y
+     * eso no basta: el servidor apunta a cada invitado <b>por su posicion</b>
+     * en la lista ({@code RemoteClient.getIndex()}) y {@code removeSlot}
+     * desplaza la lista sin avisarle. Quitar el asiento de un amigo lo deja
+     * conectado y sin sitio; quitar uno que tenga un amigo DETRAS le cambia la
+     * posicion a ese amigo, y a partir de ahi lo que el cambie en su asiento
+     * revienta en el servidor y al empezar se queda sin interfaz. Asi que solo
+     * se quitan IAs y huecos libres, y solo si ningun invitado viene detras.
+     */
+    public static boolean mayRemoveSeat(final GameLobby lobby, final int index) {
+        if (!lobby.mayRemove(index)) {
+            return false;
+        }
+        final LobbySlot slot = lobby.getSlot(index);
+        if (slot == null || slot.getType() == LobbySlotType.REMOTE
+                || slot.getType() == LobbySlotType.LOCAL) {
+            return false;
+        }
+        for (int i = index + 1; i < lobby.getNumberOfSlots(); i++) {
+            final LobbySlot after = lobby.getSlot(i);
+            if (after != null && after.getType() == LobbySlotType.REMOTE) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Lo que hay que mandar para cambiar el mazo de un asiento: DOS eventos.
+     *
+     * <p><b>Con el mazo solo no basta, y era el fallo mas gordo de la sala.</b>
+     * {@code LobbySlot.apply} guarda el mazo pero no lo cuenta como cambio (su
+     * {@code changed} solo mira los campos de arriba), asi que
+     * {@code applyToSlot} no avisa y el servidor <b>no reparte el estado</b>. El
+     * invitado elegia mazo y no le constaba a nadie: ni a el — su "Listo" pide
+     * mazo y se quedaba apagado — ni al anfitrion, hasta que alguien tocara
+     * otra cosa en la sala. La GUI Swing no lo nota porque no ata "Listo" al
+     * mazo; la de movil lo resuelve igual que aqui: detras del mazo manda su
+     * NOMBRE ({@code setDeckSchemePlaneVanguard}), que si cuenta como cambio.
+     * El orden importa y lo garantiza el canal: cuando llega el nombre, el
+     * mazo ya esta puesto, y el reparto que provoca ya lo lleva.
+     */
+    public static List<UpdateLobbyPlayerEvent> deckEvents(final Deck deck) {
+        return List.of(UpdateLobbyPlayerEvent.deckUpdate(deck),
+                UpdateLobbyPlayerEvent.setDeckSchemePlaneVanguard(
+                        deck == null ? null : deck.getName(), null, null, null));
+    }
+
+    /**
+     * Un mazo al azar de este modo, para la IA que se acaba de sentar.
+     *
+     * <p>Se prefieren los que <b>no son tuyos</b> (los preconstruidos que trae
+     * Forge): sentar a la IA con tu propio mazo no es un rival, es un espejo.
+     * Pero si el modo no trae ninguno — Brawl, Oathbreaker y Tiny Leaders no
+     * tienen preconstruidos — vale cualquiera antes que dejar el asiento a
+     * medias, y si tampoco hay, se le genera uno de verdad. El ultimo recurso
+     * es null: la IA se queda sin mazo y se le elige a mano.
+     */
+    public static Deck randomAiDeck(final NeoFormat format) {
+        if (!needsDeck(format)) {
+            return null;   // el motor lo monta solo
+        }
+        final List<Deck> stock = new ArrayList<>();
+        final List<Deck> any = new ArrayList<>();
+        for (final Deck d : format.decks()) {
+            any.add(d);
+            if (!format.isMine(d)) {
+                stock.add(d);
+            }
+        }
+        final List<Deck> pool = stock.isEmpty() ? any : stock;
+        if (!pool.isEmpty()) {
+            return pool.get(java.util.concurrent.ThreadLocalRandom.current().nextInt(pool.size()));
+        }
+        return generateDeck(format);
+    }
+
+    /**
+     * Un mazo montado por el generador de Forge, para cuando no hay ninguno.
+     *
+     * <p>Es la misma fachada que usa la pantalla de inicio para "Generame uno"
+     * ({@code HomeScreen.generateOpponentDeck}). Solo sabe de formatos con
+     * comandante; en Estandar hay 505 preconstruidos y nunca se llega aqui.
+     * Limpio de Gleemox ({@code GeneratedDecks}): aqui ademas el
+     * {@code GameLobby} de Forge SI mira la legalidad, y el anfitrion se
+     * encontraba un "este mazo no es legal" de un mazo que no ha montado.
+     */
+    public static Deck generateDeck(final NeoFormat format) {
+        if (!format.isCommanderStyle()) {
+            return null;
+        }
+        try {
+            return forge.neo.deck.GeneratedDecks.commanderDeck(true, format.getGameType());
+        } catch (final RuntimeException | LinkageError e) {
+            System.out.println("[lobby] no se ha podido generar un mazo: " + e);
+            return null;
+        }
+    }
+
+    /**
+     * Quita el mazo de los huecos libres.
+     *
+     * <p>Cuando un amigo se va, el servidor deja su asiento en OPEN
+     * ({@code ServerGameLobby.disconnectPlayer}) pero no le quita el mazo, y el
+     * siguiente en entrar se lo encontraba puesto: se sentaba con el mazo de
+     * otro, y podia darle a "Listo" sin haber elegido nada.
+     *
+     * @return si ha cambiado algo
+     */
+    public static boolean clearOpenSeats(final GameLobby lobby) {
+        boolean changed = false;
+        for (int i = 0; i < lobby.getNumberOfSlots(); i++) {
+            final LobbySlot s = lobby.getSlot(i);
+            if (s != null && s.getType() == LobbySlotType.OPEN && s.getDeck() != null) {
+                s.setDeck(null);
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /** Los asientos ocupados, o sea los que van a jugar. */
+    public static List<LobbySlot> activeSlots(final GameLobby lobby) {
+        final List<LobbySlot> out = new ArrayList<>();
+        for (int i = 0; i < lobby.getNumberOfSlots(); i++) {
+            final LobbySlot s = lobby.getSlot(i);
+            if (s != null && s.getType() != LobbySlotType.OPEN) {
+                out.add(s);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Un resumen del lobby en una linea, para el registro.
+     *
+     * <p>Sale en {@code neo.log} cada vez que cambia algo. Es lo unico que
+     * queda cuando un amigo dice "no me deja empezar" y no estas delante.
+     */
+    public static String describe(final GameLobby lobby) {
+        final StringBuilder sb = new StringBuilder();
+        // El modo se saca de las variantes, no de getGameType(): en el invitado
+        // ese campo dice siempre Constructed. Ver formatOf.
+        sb.append(formatOf(lobby)).append(" [");
+        for (int i = 0; i < lobby.getNumberOfSlots(); i++) {
+            final LobbySlot s = lobby.getSlot(i);
+            if (i > 0) {
+                sb.append(", ");
+            }
+            if (s == null || s.getType() == LobbySlotType.OPEN) {
+                sb.append("libre");
+                continue;
+            }
+            final Deck d = s.getDeck();
+            sb.append(s.getType()).append(':').append(s.getName())
+              .append(s.isReady() ? " listo" : " NO listo")
+              .append(d == null ? " sin mazo" : " (" + d.getName() + ")");
+        }
+        return sb.append(']').toString();
+    }
+
+    /** Las variantes puestas, para comprobar que Commander llego a las dos partes. */
+    public static EnumSet<GameType> variants(final GameLobby lobby) {
+        final EnumSet<GameType> out = EnumSet.noneOf(GameType.class);
+        for (final GameType t : lobby.getAppliedVariants()) {
+            out.add(t);
+        }
+        return out;
+    }
+}

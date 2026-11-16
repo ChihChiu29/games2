@@ -1,0 +1,526 @@
+package forge.neo.platform;
+
+import java.util.function.Consumer;
+
+import forge.gui.UiCommand;
+import forge.gui.download.GuiDownloadService;
+import forge.gui.interfaces.IButton;
+import forge.gui.interfaces.IComponent;
+import forge.gui.interfaces.IProgressBar;
+import forge.gui.interfaces.ITextField;
+import forge.localinstance.skin.FSkinProp;
+
+/**
+ * Las descargas del motor, sin ventana.
+ *
+ * <p>{@code GuiDownloadService} es el descargador de Forge — el que trae las
+ * imagenes, las actualizaciones y los <b>mazos de internet</b>. Esta escrito
+ * contra un dialogo: espera una caja de texto para el proxy, una barra de
+ * progreso y un boton que el usuario pulsa dos veces (una para empezar y otra
+ * para cerrar cuando acaba).
+ *
+ * <p>Aqui se le dan esos cuatro widgets sin pintar nada. <b>El boton se pulsa
+ * solo</b>: cuando el servicio deja una orden dentro y lo habilita, esa orden
+ * se ejecuta. Asi se recorren las dos etapas — empezar y cerrar — sin nadie
+ * delante, y quien pidio la descarga recibe su aviso al terminar.
+ *
+ * <p>Cada orden se ejecuta <b>una sola vez</b>. El servicio habilita y
+ * deshabilita el boton varias veces durante la descarga, y sin esa marca la
+ * descarga se relanzaria sola en bucle.
+ *
+ * <p>Dos detalles del motor que hay que respetar:
+ * <ul>
+ *   <li>La barra de progreso <b>no puede ser null</b>: {@code
+ *       GuiDownloadZipService.download} devuelve la cadena vacia si lo es, y
+ *       entonces no descarga nada y no lo dice.</li>
+ *   <li>{@code initialize} lee el texto de la caja del proxy, asi que tampoco
+ *       puede ser null. Con el tipo de proxy a 0 el motor va directo.</li>
+ * </ul>
+ */
+public final class NeoDownloads {
+
+    private NeoDownloads() {
+    }
+
+    /** Traza las etapas por consola. Se enciende con -Dneo.net.debug=true */
+    private static final boolean DEBUG = Boolean.getBoolean("neo.net.debug");
+
+    /**
+     * Lanza el servicio y avisa por {@code callback} cuando termina.
+     *
+     * <p>No bloquea: el motor llama a esto desde el hilo de interfaz (ver
+     * {@code WaitCallback.invokeAndWait}, que es quien espera, desde otro hilo).
+     */
+    public static void run(final GuiDownloadService service, final Consumer<Boolean> callback) {
+        final Consumer<Boolean> once = onceOnly(callback);
+        try {
+            final Bar bar = new Bar(service.getTitle());
+            service.initialize(new Text(""), new Text(""), bar,
+                    new AutoButton(once), () -> once.accept(true), null, null);
+        } catch (final RuntimeException e) {
+            // Sin linea, o con la lista mal: no es motivo para tirar la
+            // aplicacion. Quien pidio la descarga se entera de que no hubo.
+            System.err.println("[neo] the download failed: " + e);
+            once.accept(false);
+        }
+    }
+
+    /** Envuelve el aviso para que no se pueda mandar dos veces. */
+    private static Consumer<Boolean> onceOnly(final Consumer<Boolean> callback) {
+        final java.util.concurrent.atomic.AtomicBoolean sent =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        return ok -> {
+            if (callback != null && sent.compareAndSet(false, true)) {
+                callback.accept(ok);
+            }
+        };
+    }
+
+    /**
+     * Igual que {@link #run}, pero para quien SI puede esperar.
+     *
+     * <p><b>Nunca llamarlo desde el hilo de JavaFX</b>: una descarga puede
+     * tardar minutos y dejaria la ventana congelada.
+     */
+    public static boolean runAndWait(final GuiDownloadService service, final long timeoutSeconds) {
+        final java.util.concurrent.CountDownLatch done =
+                new java.util.concurrent.CountDownLatch(1);
+        final boolean[] ok = {false};
+        run(service, result -> {
+            ok[0] = Boolean.TRUE.equals(result);
+            done.countDown();
+        });
+        try {
+            if (!done.await(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)) {
+                System.err.println("[neo] the download did not finish in time");
+                service.setCancel(true);
+                return false;
+            }
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        return ok[0];
+    }
+
+    // ---------------------------------------------------------------
+    // La misma descarga, pero MIRANDOLA
+    // ---------------------------------------------------------------
+
+    /**
+     * Lo que una pantalla necesita saber de una descarga que si se ve.
+     *
+     * <p>Existe para que quien pinta no toque ni una interfaz del motor: la
+     * pantalla recibe numeros y ya. Lo usa el arte sin conexion
+     * ({@code forge.neo.ui.ArtDownloadPanel}).
+     */
+    public interface Watch {
+        /** La lista ya esta hecha: esto es lo que falta por bajar. */
+        void ready(int total);
+
+        /** Una mas. Llega en el hilo de interfaz. */
+        void progress(int done, int total);
+
+        /**
+         * Se acabo. {@code skipped} son las que no se pudieron bajar (el
+         * servidor no las tiene, o pidio frenar): el servicio las cuenta como
+         * hechas, asi que la barra llega al final igual.
+         */
+        void finished(int skipped);
+    }
+
+    /** El mando de una descarga que se esta mirando. */
+    public interface Control {
+        /** Empezar. Antes de {@code ready} no hace nada. */
+        void start();
+
+        /** Parar. Lo que ya esta bajado se queda. */
+        void cancel();
+    }
+
+    /**
+     * Prepara la descarga y devuelve su mando, <b>sin empezarla</b>.
+     *
+     * <p>Al reves que {@link #run}, aqui el boton NO se pulsa solo: lo pulsa
+     * el jugador, porque esto son dos gigas y eso se pregunta. La lista se
+     * monta en un hilo de fondo (lo hace el propio servicio) y cuando esta
+     * lista llega {@code ready}.
+     */
+    public static Control watch(final GuiDownloadService service, final Watch watch) {
+        final WatchedButton button = new WatchedButton(watch);
+        final WatchedBar bar = new WatchedBar(watch, button);
+        service.initialize(new Text("neo.jpg"), new Text(""), bar, button, null,
+                () -> { }, null);
+        return new Control() {
+            @Override
+            public void start() {
+                button.press();
+            }
+
+            @Override
+            public void cancel() {
+                service.setCancel(true);
+            }
+        };
+    }
+
+    /**
+     * El boton del servicio, esperando a que lo pulsen.
+     *
+     * <p>El servicio deja dentro dos ordenes distintas a lo largo de la
+     * descarga: primero "empezar" y al final "cerrar". La primera vez que
+     * habilita una orden es que la lista esta hecha, y eso es lo que se
+     * cuenta como {@code ready}; la segunda es el final.
+     */
+    private static final class WatchedButton extends Base implements IButton {
+        private final Watch watch;
+        private UiCommand command;
+        private String text = "";
+        private boolean selected;
+        private boolean announced;
+        private boolean started;
+
+        WatchedButton(final Watch watch) {
+            this.watch = watch;
+        }
+
+        void press() {
+            final UiCommand c = command;
+            if (c == null || started) {
+                return;
+            }
+            started = true;
+            c.run();
+        }
+
+        @Override
+        public void setCommand(final UiCommand c) {
+            this.command = c;
+            if (!announced) {
+                announced = true;
+                // El total lo pone el servicio justo antes de esta orden.
+                watch.ready(pending);
+            } else if (started) {
+                // La segunda orden es la de cerrar: se acabo. Pero NO se avisa
+                // aqui: el servicio pone esta orden (finish) ANTES de su ultimo
+                // setValue/setDescription, y ese setValue pisaba el "Listo" con
+                // "98.998 de 98.998 - 1 min" para siempre (itch.io, 24-09-2026).
+                // Avisa la barra, con lo ultimo que escribe el servicio.
+                closing = true;
+            }
+        }
+
+        /** Ha llegado la orden de cerrar: el proximo texto de la barra es el final. */
+        private boolean closing;
+
+        /** El total que anuncio la barra, para poder darlo en {@code ready}. */
+        private int pending;
+
+        void setPending(final int total) {
+            this.pending = total;
+        }
+
+        @Override
+        public String getText() {
+            return text;
+        }
+
+        @Override
+        public void setText(final String t) {
+            this.text = t == null ? "" : t;
+        }
+
+        @Override
+        public boolean isSelected() {
+            return selected;
+        }
+
+        @Override
+        public void setSelected(final boolean b) {
+            this.selected = b;
+        }
+
+        @Override
+        public boolean requestFocusInWindow() {
+            return false;
+        }
+
+        @Override
+        public void setImage(final FSkinProp p) {
+        }
+
+        @Override
+        public void setTextColor(final int r, final int g, final int b) {
+        }
+    }
+
+    /** La barra de verdad: cada numero va a la pantalla. */
+    private static final class WatchedBar implements IProgressBar {
+        private final Watch watch;
+        private final WatchedButton button;
+        private int maximum;
+
+        WatchedBar(final Watch watch, final WatchedButton button) {
+            this.watch = watch;
+            this.button = button;
+        }
+
+        private boolean reported;
+
+        @Override
+        public void setDescription(final String s) {
+            // No se ensenya: el servicio la escribe en ingles y con el formato
+            // de su dialogo de Swing ("12/345 - 00:07 remaining."). La pantalla
+            // escribe la suya con los numeros, que si estan traducidos.
+            // Solo se lee la ultima, la del final, que es la que viene detras
+            // del ultimo setValue y la unica que dice cuantas fallaron.
+            if (button.closing && !reported) {
+                reported = true;
+                watch.finished(skipped(s));
+            }
+        }
+
+        /** "... Skipped 747 items. Please close!" -> 747. */
+        private static int skipped(final String s) {
+            final java.util.regex.Matcher m = s == null ? null
+                    : java.util.regex.Pattern.compile("Skipped (\\d+)").matcher(s);
+            return m != null && m.find() ? Integer.parseInt(m.group(1)) : 0;
+        }
+
+        @Override
+        public void setValue(final int progress) {
+            watch.progress(progress, maximum);
+        }
+
+        @Override
+        public void reset() {
+        }
+
+        @Override
+        public void setShowETA(final boolean b) {
+        }
+
+        @Override
+        public void setShowCount(final boolean b) {
+        }
+
+        @Override
+        public void setPercentMode(final boolean b) {
+        }
+
+        @Override
+        public int getMaximum() {
+            return maximum;
+        }
+
+        @Override
+        public void setMaximum(final int m) {
+            this.maximum = m;
+            button.setPending(m);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Los widgets que no se pintan
+    // ---------------------------------------------------------------
+
+    /** Lo comun a todos: existen, pero no hay nada que mostrar. */
+    private abstract static class Base implements IComponent {
+        private boolean enabled = true;
+        private boolean visible = true;
+        private String tooltip = "";
+
+        @Override
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        @Override
+        public void setEnabled(final boolean b) {
+            this.enabled = b;
+        }
+
+        @Override
+        public boolean isVisible() {
+            return visible;
+        }
+
+        @Override
+        public void setVisible(final boolean b) {
+            this.visible = b;
+        }
+
+        @Override
+        public String getToolTipText() {
+            return tooltip;
+        }
+
+        @Override
+        public void setToolTipText(final String s) {
+            this.tooltip = s;
+        }
+    }
+
+    private static final class Text extends Base implements ITextField {
+        private String text;
+
+        Text(final String initial) {
+            this.text = initial == null ? "" : initial;
+        }
+
+        @Override
+        public String getText() {
+            return text;
+        }
+
+        @Override
+        public void setText(final String t) {
+            this.text = t == null ? "" : t;
+        }
+
+        @Override
+        public boolean requestFocusInWindow() {
+            return false;
+        }
+    }
+
+    /**
+     * El boton que se pulsa solo.
+     *
+     * <p>El servicio deja una orden dentro y lo habilita; eso, en un dialogo de
+     * verdad, es la invitacion a que el usuario haga click. Aqui el click se da
+     * en cuanto llega. Son dos etapas: la primera orden empieza la descarga, la
+     * segunda ({@code finish}) es la de cerrar, y es la que dice que ha ido
+     * bien.
+     */
+    private static final class AutoButton extends Base implements IButton {
+        private final Consumer<Boolean> done;
+        private UiCommand command;
+        private String text = "";
+        private boolean selected;
+        private final java.util.Set<UiCommand> fired =
+                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+
+        AutoButton(final Consumer<Boolean> done) {
+            this.done = done;
+        }
+
+        @Override
+        public String getText() {
+            return text;
+        }
+
+        @Override
+        public void setText(final String t) {
+            this.text = t == null ? "" : t;
+        }
+
+        @Override
+        public boolean isSelected() {
+            return selected;
+        }
+
+        @Override
+        public void setSelected(final boolean b) {
+            this.selected = b;
+        }
+
+        @Override
+        public boolean requestFocusInWindow() {
+            return false;
+        }
+
+        @Override
+        public void setCommand(final UiCommand c) {
+            this.command = c;
+            press();
+        }
+
+        @Override
+        public void setEnabled(final boolean b) {
+            super.setEnabled(b);
+            if (b) {
+                press();
+            }
+        }
+
+        @Override
+        public void setImage(final FSkinProp color) {
+        }
+
+        @Override
+        public void setTextColor(final int r, final int g, final int b) {
+        }
+
+        /** Pulsa la orden que haya, si esta habilitada y no se ha pulsado ya. */
+        private void press() {
+            final UiCommand c = command;
+            if (c == null || !isEnabled() || !fired.add(c)) {
+                return;
+            }
+            if (DEBUG) {
+                System.out.println("[net] pulsando " + (text.isBlank() ? "empezar" : text));
+            }
+            try {
+                c.run();
+            } catch (final RuntimeException e) {
+                System.err.println("[neo] the download failed: " + e);
+                done.accept(false);
+            }
+        }
+    }
+
+    /**
+     * La barra de progreso, que aqui es la consola.
+     *
+     * <p>No se traza cada tanto por ciento — serian cientos de lineas por
+     * descarga. Solo los cambios de etapa ("Downloading...", "Extracting...").
+     */
+    private static final class Bar implements IProgressBar {
+        private final String title;
+        private int maximum = 100;
+        private String description = "";
+
+        Bar(final String title) {
+            this.title = title == null ? "" : title;
+        }
+
+        @Override
+        public void setDescription(final String s) {
+            if (s != null && !s.equals(description)) {
+                description = s;
+                System.out.println("[net] " + title + ": " + s);
+            }
+        }
+
+        @Override
+        public void setValue(final int progress) {
+        }
+
+        @Override
+        public void reset() {
+        }
+
+        @Override
+        public void setShowETA(final boolean b) {
+        }
+
+        @Override
+        public void setShowCount(final boolean b) {
+        }
+
+        @Override
+        public void setPercentMode(final boolean b) {
+        }
+
+        @Override
+        public int getMaximum() {
+            return maximum;
+        }
+
+        @Override
+        public void setMaximum(final int m) {
+            this.maximum = m;
+        }
+    }
+}

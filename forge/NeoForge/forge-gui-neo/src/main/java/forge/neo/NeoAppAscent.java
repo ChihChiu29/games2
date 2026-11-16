@@ -1,0 +1,873 @@
+package forge.neo;
+
+import forge.neo.ascent.AscentBattle;
+import forge.neo.ascent.AscentEvent;
+import forge.neo.ascent.AscentFeat;
+import forge.neo.ascent.AscentNode;
+import forge.neo.ascent.AscentRelics;
+import forge.neo.ascent.AscentRewards;
+import forge.neo.ascent.AscentRun;
+import forge.neo.ascent.AscentShop;
+import forge.neo.ascent.AscentSummary;
+import forge.neo.ascent.AscentUnlocks;
+import forge.item.PaperCard;
+import forge.neo.match.NeoMatchUI;
+import forge.neo.match.TableBinder;
+import forge.neo.ui.AscentDeckScreen;
+import forge.neo.ui.AscentRelicsScreen;
+import forge.neo.ui.AscentEventScreen;
+import forge.neo.ui.AscentMapScreen;
+import forge.neo.ui.AscentOverScreen;
+import forge.neo.ui.AscentPickScreen;
+import forge.neo.ui.AscentRestScreen;
+import forge.neo.ui.AscentRewardScreen;
+import forge.neo.ui.AscentSetupScreen;
+import forge.neo.ui.AscentShopScreen;
+import forge.neo.ui.TableScreen;
+import javafx.application.Platform;
+
+/**
+ * El router de Ascenso: que pantalla del modo esta puesta.
+ *
+ * <p>Los campos de estado del modo viven <b>aqui y no en {@link NeoApp}</b>,
+ * que es la leccion de la auditoría del motor, apartado E2: {@code NeoApp} llego a 4.896 lineas
+ * porque cada modo nuevo le dejaba dentro sus tres campos y sus ocho metodos.
+ * Es el mismo sitio que ocupan {@code NeoAppQuest} y {@code NeoAppTournament}.
+ *
+ * <h2>El bucle, que es lo que hace esta clase</h2>
+ *
+ * <pre>
+ *   mapa  --eliges nodo-->  se juega / se resuelve  -->  premio  -->  mapa
+ *                                    |
+ *                                    +-- pierdes -->  se acaba la run
+ * </pre>
+ *
+ * <p>Y el nodo <b>se marca resuelto al ganarlo, no al entrar</b>. Es lo que
+ * impide la unica forma de hacer trampa que tendria el modo: entrar en un nodo,
+ * ver que la partida va mal y cerrar el juego para que al volver el nodo siga
+ * ahi pero con otra mano.
+ */
+final class NeoAppAscent {
+
+    private final NeoApp app;
+
+    NeoAppAscent(final NeoApp app) {
+        this.app = app;
+    }
+
+    /** Cuanto se espera a una partida de Ascenso antes de darla por colgada. */
+    private static final int TIMEOUT_SECS = 60 * 60;
+
+    /**
+     * Entrar al modo: a decidir con la run que haya, o a montar una.
+     *
+     * <p>Lo primero de todo es {@code AscentRelics.install()}, y va aqui por lo
+     * mismo que el principio 8 (las notas de diseño): <b>en el punto por el que pasan
+     * todos los caminos</b>. Una reliquia sin registrar no revienta — devuelve
+     * {@code null} al pedir su carta y la run se juega sin ella, en silencio.
+     *
+     * <p>⚠️ La excepcion es {@code neo.ascent.enterAt} / {@code hoverAt}: esos
+     * ganchos de {@code --ascent} comprueban de punta a punta que elegir un
+     * nodo juega la partida, y sus temporizadores viven DENTRO de
+     * {@code AscentMapScreen}. Con esas propiedades puestas se salta
+     * {@code AscentPickScreen} y se entra al mapa igual que antes — si no, esas
+     * pruebas dejarian de encontrar nunca el mapa que esperan capturar.
+     */
+    void showAscent() {
+        AscentRelics.install();
+        final AscentRun run = AscentRun.current();
+        if (run == null) {
+            showSetup();
+            return;
+        }
+        if ("victory".equals(System.getProperty("neo.ascent.skipTo")) && !run.isEndless()) {
+            // SOLO PRUEBAS: da por resueltos todos los nodos de los tres actos
+            // (sin jugarlos) para llegar a la victoria de verdad y probar el modo
+            // infinito sin jugar una run entera. Usar con -Dneo.settingsFile.
+            for (int vueltas = 0; vueltas < AscentRun.ACTS * 4; vueltas++) {
+                while (!run.actCleared() && !run.available().isEmpty()) {
+                    run.clear(run.available().get(0));
+                }
+                if (run.advance() != AscentRun.Step.NEXT_ACT) {
+                    break;
+                }
+            }
+            System.out.println("[ascenso] prueba: saltado a la victoria — " + run);
+        }
+        final String skipRows = System.getProperty("neo.ascent.skipTo", "");
+        if (skipRows.startsWith("rows:")) {
+            // SOLO PRUEBAS: N nodos del acto resueltos sin jugarlos, cogiendo
+            // siempre el ULTIMO accesible, para que el camino zigzaguee por el
+            // mapa y se pueda capturar como se pinta (Discord, 12-10-2026: el
+            // camino hecho salia en gris y otro en azul). Con -Dneo.settingsFile.
+            int left = Integer.parseInt(skipRows.substring(5).trim());
+            while (left-- > 0 && !run.actCleared() && !run.available().isEmpty()) {
+                final java.util.List<AscentNode> next = run.available();
+                run.clear(next.get(next.size() - 1));
+            }
+            System.out.println("[ascenso] prueba: nodos resueltos — " + run);
+        }
+        if (Boolean.getBoolean("neo.ascent.loseNow")) {
+            // SOLO PRUEBAS: cierra la run como si se hubiera perdido el duelo,
+            // por el mismo gameOver del juego (el resumen y, en modo infinito,
+            // el record).
+            gameOver(run, false);
+            return;
+        }
+        // EL JUEGO SE CERRO CON UNA PARTIDA A MEDIAS (Ana, 28-10-2026): cuenta
+        // como perdida. Si no, cerrarlo cuando vas perdiendo seria repetir el
+        // nodo — en el jefe final, o en el reto del dia. Ver
+        // AscentRun#wasInterrupted.
+        if (run.wasInterrupted()) {
+            System.out.println("[ascenso] el juego se cerro a mitad de una partida: run perdida");
+            lostByClosing = true;
+            gameOver(run, false);
+            return;
+        }
+        if (Integer.getInteger("neo.ascent.enterAt", 0) > 0
+                || Integer.getInteger("neo.ascent.hoverAt", 0) > 0) {
+            showMap(run);
+            return;
+        }
+        // El cambio de acto, tambien ANTES de la pantalla de continuar: a quien
+        // tenga una run atascada del fallo del 17-09-2026 (jefe del acto 1
+        // ganado y sin salida), esa pantalla le diria "acto 1" y al continuar
+        // apareceria en el 2 — que se lee como otro fallo. advance() es
+        // idempotente, asi que volver a llamarlo desde showMap no hace nada.
+        if (run.advance() == AscentRun.Step.RUN_COMPLETED) {
+            victory(run);
+            return;
+        }
+        // Con una run a medias, primero se pregunta: continuar la lleva a SU
+        // mapa; abandonar pasa por su propio confirm (principio 6b).
+        showPick(run);
+    }
+
+    /** Continuar o abandonar la run que hay, sin cargar el mapa entero. */
+    void showPick(final AscentRun run) {
+        app.scene.setRoot(new AscentPickScreen(run, app.cardWidth, new AscentPickScreen.Actions() {
+            @Override
+            public void continueRun() {
+                showMap(run);
+            }
+
+            @Override
+            public void deck() {
+                app.scene.setRoot(new AscentDeckScreen(run, app.cardWidth, () -> showPick(run)));
+                app.applyScale();
+            }
+
+            @Override
+            public void abandon() {
+                if (run.isEndless()) {
+                    // Abandonar en modo infinito tambien cuenta hasta donde
+                    // llegaste: la run ya estaba ganada.
+                    AscentUnlocks.recordEndless(run.getMode(), run.endlessLevel());
+                }
+                // Si era el reto de hoy o el de la semana, cuenta como jugado.
+                forge.neo.ascent.AscentChallenges.recordAbandoned(run);
+                run.discard();
+                app.showMainMenu();
+            }
+
+            @Override
+            public void back() {
+                app.showMainMenu();
+            }
+        }));
+        app.applyScale();
+    }
+
+    /**
+     * Montar una run.
+     *
+     * <p>Nunca se empieza una sin pasar por aqui: de una run no se vuelve
+     * atras, asi que una casilla del menu que la empezara al pulsarla se
+     * llevaria por delante la que hubiera a medias y dejaria dentro a quien
+     * solo entro a ver que era esto (principio 6).
+     */
+    void showSetup() {
+        AscentRelics.install();
+        // -Dneo.ascent.draftNow=true: directo a la pantalla de picks del draft
+        // de salida, para capturarla. No crea ninguna run hasta acabar.
+        // -Dneo.ascent.draftBuildNow=true: el draft hecho solo (el primero de
+        // cada sobre) y directo al constructor, para capturarlo.
+        if (Boolean.getBoolean("neo.ascent.draftBuildNow")) {
+            System.clearProperty("neo.ascent.draftBuildNow");
+            final forge.neo.ascent.AscentSeed.Recipe r = forge.neo.ascent.AscentSeed.fresh(AscentRun.Mode.STANDARD,
+                    0, forge.neo.ascent.AscentSeedDeck.NO_COLOURS, null, forge.neo.ascent.AscentPool.ALL)
+                    .withDraft(true);
+            final forge.neo.ascent.AscentDraft d = new forge.neo.ascent.AscentDraft(r);
+            while (!d.isDone()) {
+                d.pick(d.currentCards().get(0));
+            }
+            showDraftBuild(r, d.picked(), false);
+            return;
+        }
+        if (Boolean.getBoolean("neo.ascent.draftNow")) {
+            System.clearProperty("neo.ascent.draftNow");
+            showDraft(forge.neo.ascent.AscentSeed.fresh(AscentRun.Mode.STANDARD, 0,
+                    forge.neo.ascent.AscentSeedDeck.NO_COLOURS, null, forge.neo.ascent.AscentPool.ALL)
+                    .withDraft(true), false);
+            return;
+        }
+        app.scene.setRoot(new AscentSetupScreen(app.cardWidth, AscentRun.current() != null,
+                new AscentSetupScreen.Actions() {
+                    @Override
+                    public void start(final AscentRun.Mode mode, final PaperCard commander,
+                                      final int ascension, final byte colours,
+                                      final forge.neo.ascent.AscentPool pool) {
+                        start(mode, commander, null, ascension, colours, pool);
+                    }
+
+                    @Override
+                    public void start(final AscentRun.Mode mode, final PaperCard commander,
+                                      final PaperCard partner, final int ascension, final byte colours,
+                                      final forge.neo.ascent.AscentPool pool) {
+                        start(mode, commander, partner, ascension, colours, pool, false);
+                    }
+
+                    @Override
+                    public void start(final AscentRun.Mode mode, final PaperCard commander,
+                                      final PaperCard partner, final int ascension, final byte colours,
+                                      final forge.neo.ascent.AscentPool pool, final boolean melee) {
+                        final AscentRun previous = AscentRun.current();
+                        if (previous != null) {
+                            // Su mazo se va con ella: si no, la carpeta de
+                            // Ascenso acumula cadaveres.
+                            previous.discard();
+                        }
+                        showMap(AscentRun.begin(mode, ascension,
+                                mode == AscentRun.Mode.COMMANDER ? 40 : 20, commander, partner, colours, pool,
+                                melee));
+                    }
+
+                    @Override
+                    public void startDraft(final forge.neo.ascent.AscentSeed.Recipe recipe) {
+                        showDraft(recipe, false);
+                    }
+
+                    @Override
+                    public void startRecipe(final forge.neo.ascent.AscentSeed.Recipe recipe) {
+                        if (recipe.draft) {
+                            // Un codigo o un reto con draft: los mismos sobres para todos.
+                            showDraft(recipe, true);
+                            return;
+                        }
+                        final AscentRun previous = AscentRun.current();
+                        if (previous != null) {
+                            previous.discard();
+                        }
+                        showMap(AscentRun.begin(recipe));
+                    }
+
+                    @Override
+                    public void back() {
+                        app.showMainMenu();
+                    }
+                }));
+        app.applyScale();
+    }
+
+    /**
+     * <b>Draftear el mazo de salida</b> ({@link forge.neo.ascent.AscentDraft}):
+     * la pantalla de picks del draft de siempre, y al acabar la run empieza con
+     * lo cogido. Hasta entonces no existe: salirse vuelve al montaje y la run a
+     * medias que hubiera sigue intacta.
+     */
+    void showDraft(final forge.neo.ascent.AscentSeed.Recipe recipe, final boolean fromCode) {
+        final forge.neo.ascent.AscentDraft draft = new forge.neo.ascent.AscentDraft(recipe);
+        app.scene.setRoot(new forge.neo.ui.DraftScreen(draft, app.cardWidth,
+                done -> showDraftBuild(recipe, draft.picked(), fromCode), this::showSetup));
+        app.applyScale();
+    }
+
+    /**
+     * <b>Montar el mazo con el pool del draft</b>: el constructor de limitado
+     * de siempre ({@link forge.neo.draft.AscentPoolContext}). Guardar un mazo
+     * de 30 empieza la run; volver sin guardarlo vuelve al montaje y el draft
+     * se pierde (la run aun no existe).
+     */
+    void showDraftBuild(final forge.neo.ascent.AscentSeed.Recipe recipe,
+                        final java.util.List<forge.item.PaperCard> picks, final boolean fromCode) {
+        final boolean[] started = {false};
+        final forge.neo.draft.AscentPoolContext context = new forge.neo.draft.AscentPoolContext(picks,
+                forge.neo.NeoText.get("ascent.draft.deckName"), deck -> {
+                    if (started[0]) {
+                        return;
+                    }
+                    started[0] = true;
+                    // Despues del guardado: el constructor aun esta ensenyando su aviso.
+                    javafx.application.Platform.runLater(() -> {
+                        app.builder = null;
+                        final AscentRun previous = AscentRun.current();
+                        if (previous != null) {
+                            previous.discard();
+                        }
+                        showMap(AscentRun.beginDrafted(recipe, deck, fromCode));
+                    });
+                });
+        final forge.neo.deck.DeckEditor editor = new forge.neo.deck.DeckEditor(context, context.startingDeck());
+        app.builder = new forge.neo.ui.DeckBuilderScreen(editor, app.cardWidth, () -> {
+            app.builder = null;
+            if (!started[0]) {
+                showSetup();
+            }
+        });
+        app.scene.setRoot(app.builder);
+        app.applyScale();
+    }
+
+    /**
+     * El mapa del acto en curso.
+     *
+     * <p><b>Y el sitio donde se cambia de acto</b>, que es el punto por el que
+     * pasan TODOS los caminos de vuelta de un nodo (principio 8 de las notas de diseño
+     * 10b): el premio del jefe, el visor del mazo, la pantalla de continuar y
+     * la partida que revienta. Ponerlo solo detras del premio del jefe habria
+     * arreglado la run siguiente y dejado <b>atascadas para siempre las que ya
+     * lo estan</b>, que es lo que tiene ahora mismo todo el que haya ganado un
+     * acto 1.
+     *
+     * <p>Ver {@link AscentRun#advance()} para por que hacia falta.
+     */
+    void showMap(final AscentRun run) {
+        // Si el jefe ya cayo, aqui no se pinta el mapa de este acto: o se pasa
+        // al siguiente (y entonces lo que se pinta abajo ya es OTRO mapa, con
+        // sus nodos sin resolver) o se acabo la run, y esta ganada.
+        final AscentRun.Step paso = run.advance();
+        if (paso == AscentRun.Step.RUN_COMPLETED) {
+            victory(run);
+            return;
+        }
+        if (paso == AscentRun.Step.NEXT_ACT) {
+            // Al registro, como "run terminada": cuando alguien reporte algo
+            // raro de su run, el fichero tiene que decir por donde iba.
+            System.out.println("[ascenso] acto " + run.getAct() + " de " + AscentRun.ACTS
+                    + " — " + run.getLife() + " vidas, " + run.relics().size() + " reliquias");
+        }
+        app.scene.setRoot(new AscentMapScreen(run, new AscentMapScreen.Actions() {
+            @Override
+            public void enter(final AscentNode node) {
+                NeoAppAscent.this.enter(run, node);
+            }
+
+            @Override
+            public void deck() {
+                app.scene.setRoot(new AscentDeckScreen(run, app.cardWidth, () -> showMap(run)));
+                app.applyScale();
+            }
+
+            @Override
+            public void relics() {
+                app.scene.setRoot(new AscentRelicsScreen(run, app.cardWidth, () -> showMap(run)));
+                app.applyScale();
+            }
+
+            @Override
+            public void abandon() {
+                if (run.isEndless()) {
+                    // Abandonar en modo infinito tambien cuenta hasta donde
+                    // llegaste: la run ya estaba ganada.
+                    AscentUnlocks.recordEndless(run.getMode(), run.endlessLevel());
+                }
+                // Si era el reto de hoy o el de la semana, cuenta como jugado.
+                forge.neo.ascent.AscentChallenges.recordAbandoned(run);
+                run.discard();
+                app.showMainMenu();
+            }
+
+            @Override
+            public void back() {
+                app.showMainMenu();
+            }
+        }));
+        app.applyScale();
+        // Solo capturas: -Dneo.ascent.shieldBroke=true, el aviso del escudo roto.
+        if (Boolean.getBoolean("neo.ascent.shieldBroke") && app.scene.getRoot() instanceof AscentMapScreen) {
+            ((AscentMapScreen) app.scene.getRoot()).showShieldBroke(run.getLife());
+        }
+    }
+
+    /**
+     * Las pantallas del bucle, sin jugar la run.
+     *
+     * <p>Para verlas de verdad harian falta un combate ganado (el premio) y
+     * llegar a la fila 10 (el descanso), o sea media hora de partida por
+     * captura. Con esto se abren solas sobre una run de mentira, que es lo que
+     * permite comprobarlas con {@code --snapshot}.
+     *
+     * <p>⚠️ La run es {@link AscentRun#demo}: <b>no se guarda nada</b>. Si el
+     * jugador tiene una a medias se ensenya una copia suya, y lo que la
+     * maqueta le haga encima (creditos, vida, nodos) no le llega.
+     */
+    void showMock(final String which) {
+        AscentRelics.install();
+        // -Dneo.ascent.setupMode=commander para la maqueta en Commander, que
+        // NO ensenya lo mismo: alli todo lo que va de cartas va por dos (2 de 6
+        // en el premio, dos al quitar). Ver AscentRun.cardBatch(). Solo cuenta
+        // si no hay run guardada: si la hay, manda la suya.
+        final boolean cmd = "commander".equalsIgnoreCase(
+                System.getProperty("neo.ascent.setupMode", ""));
+        final AscentRun demo = cmd
+                ? AscentRun.demo(AscentRun.Mode.COMMANDER, 40)
+                : AscentRun.demo(AscentRun.Mode.STANDARD, 20);
+        // -Dneo.ascent.relicCount=N: la run de mentira con N reliquias, para
+        // ver las filas de reliquias llenas (RelicChipRow).
+        final int relicCount = Integer.getInteger("neo.ascent.relicCount", 0);
+        for (final forge.neo.ascent.AscentRelic r : AscentRelics.all()) {
+            if (demo.relics().size() >= relicCount) {
+                break;
+            }
+            if (!demo.relics().contains(r)) {
+                demo.addRelic(r);
+            }
+        }
+        if ("map".equals(which)) {
+            showMap(demo);
+            return;
+        }
+        if ("pick".equals(which)) {
+            showPick(demo);
+            return;
+        }
+        if ("shop".equals(which)) {
+            // Con dinero: una tienda sin creditos ensenya lo mismo pero todo
+            // apagado, que es justo lo que NO hay que mirar.
+            if (demo.getCredits() < 400) {
+                demo.addCredits(400 - demo.getCredits());
+            }
+            AscentNode node = demo.map().boss();
+            outer:
+            for (int r = 0; r < forge.neo.ascent.AscentMap.ROWS; r++) {
+                for (final AscentNode n : demo.map().row(r)) {
+                    if (n.getKind() == AscentNode.Kind.SHOP) {
+                        node = n;
+                        break outer;
+                    }
+                }
+            }
+            app.scene.setRoot(new AscentShopScreen(demo, AscentShop.stock(demo, node),
+                    app.cardWidth, () -> showMap(demo)));
+            app.applyScale();
+            return;
+        }
+        if (which != null && which.startsWith("event")) {
+            // -Dneo.ascent.event=<id> para uno concreto: cada uno ensenya una
+            // cosa distinta (el bloqueado por creditos, el de quitar carta, la
+            // apuesta...). Se busca por byId, que mira el catalogo ENTERO y no
+            // el pozo desbloqueado: si no, los cuatro que hay detras de un hito
+            // no se podrian capturar hasta habertelos ganado jugando.
+            final String id = System.getProperty("neo.ascent.event");
+            AscentEvent ev = id == null ? null : AscentEvent.byId(id);
+            if (ev == null) {
+                ev = AscentEvent.all().get(0);
+            }
+            // Con algo de dinero y a media vida: con la vida llena y sin
+            // creditos, media pantalla sale apagada — que es justo lo que NO
+            // hay que mirar.
+            demo.recordLife(Math.max(1, demo.getMaxLife() * 2 / 3));
+            if (demo.getCredits() < 200) {
+                demo.addCredits(200 - demo.getCredits());
+            }
+            final AscentEventScreen screen = new AscentEventScreen(demo, ev,
+                    new java.util.Random(7), app.cardWidth, () -> showMap(demo));
+            app.scene.setRoot(screen);
+            app.applyScale();
+            // -Dneo.ascent.eventPick=N: pulsa esa opcion sola, para capturar lo
+            // que viene DESPUES (la rejilla del mazo, el 1 de 3, el resultado).
+            final int pick = Integer.getInteger("neo.ascent.eventPick", -1);
+            if (pick >= 0) {
+                screen.autoPickForTest(pick, Long.getLong("neo.ascent.eventPickAt", 1800L));
+            }
+            return;
+        }
+        if ("relics".equals(which)) {
+            // Una run recien empezada no lleva ninguna: se le ponen cinco para
+            // que la captura ensenye la rejilla y el texto partido en lineas.
+            for (final forge.neo.ascent.AscentRelic r : AscentRelics.all()) {
+                if (demo.relics().size() >= 5) {
+                    break;
+                }
+                if (!demo.relics().contains(r)) {
+                    demo.addRelic(r);
+                }
+            }
+            app.scene.setRoot(new AscentRelicsScreen(demo, app.cardWidth, () -> showMap(demo)));
+            app.applyScale();
+            return;
+        }
+        if ("deck".equals(which)) {
+            app.scene.setRoot(new AscentDeckScreen(demo, app.cardWidth, () -> showMap(demo)));
+            app.applyScale();
+            return;
+        }
+        if ("over".equals(which)) {
+            // -Dneo.ascent.overWon=true para el final bueno: los dos textos y
+            // los dos papeles son distintos, y el de ganar ademas dice si has
+            // desbloqueado Ascension.
+            final boolean won = Boolean.getBoolean("neo.ascent.overWon");
+            // Una run recien empezada da 0 nodos y la vida llena, o sea la
+            // pantalla que menos se parece a la de verdad. Se le pone algo de
+            // historia encima para que la captura sirva de algo.
+            demo.recordLife(Math.max(1, demo.getMaxLife() / 3));
+            demo.addCredits(140);
+            for (final AscentNode n : demo.available()) {
+                demo.clear(n);
+                break;
+            }
+            if (demo.relics().isEmpty() && !AscentRelics.all().isEmpty()) {
+                demo.addRelic(AscentRelics.all().get(0));
+            }
+            // Y un hito conseguido, que es lo unico bueno que puede salir en
+            // esta pantalla cuando se ha perdido. NO se apunta de verdad
+            // (nada de AscentUnlocks.record): una maqueta que le regalara al
+            // jugador un desbloqueo seria peor que no tener maqueta.
+            // -Dneo.ascent.overEndless=offer: la victoria con el boton de seguir
+            // en modo infinito; =N: el final de una run infinita en el nivel N
+            // (con record si N > 3). Nada se apunta de verdad.
+            final String endless = System.getProperty("neo.ascent.overEndless");
+            final AscentSummary photo = AscentSummary.of(demo, won, won)
+                    .withFeats(java.util.List.of(AscentFeat.REACH_ACT_2));
+            if ("offer".equals(endless)) {
+                showOver(photo, demo);
+            } else if (endless != null) {
+                final int nivel = Integer.parseInt(endless);
+                showOver(photo.withEndlessForMock(nivel, Math.max(3, nivel), nivel > 3));
+            } else {
+                showOver(photo);
+            }
+            return;
+        }
+        if ("rest".equals(which)) {
+            // A media vida, que es el caso normal.
+            //
+            // -Dneo.ascent.restFull=true para el OTRO caso, el que se reporto
+            // jugando: llegar sano al descanso. Ese boton ya no se apaga (te
+            // obligaba a quitar una carta para poder salir), pero cambia de
+            // rotulo — y un rotulo no se puede comprobar sin verlo.
+            demo.recordLife(Boolean.getBoolean("neo.ascent.restFull")
+                    ? demo.getMaxLife()
+                    : Math.max(1, demo.getMaxLife() / 2));
+            app.scene.setRoot(new AscentRestScreen(demo, app.cardWidth, () -> showMap(demo)));
+            app.applyScale();
+            return;
+        }
+        // El premio de un JEFE, que es el unico que ofrece reliquias a elegir.
+        //
+        // -Dneo.ascent.rewardCombat=true para el premio de un COMBATE, que es
+        // el que ve el jugador veinte veces por run: sin reliquia, o sea el
+        // paso de las tres cartas MAS la fila de tierras y el boton de no coger
+        // ninguna. Es el que hay que mirar para saber si esa fila cabe.
+        AscentNode donde = demo.map().boss();
+        if (Boolean.getBoolean("neo.ascent.rewardCombat")) {
+            final AscentNode combate = firstCombat(demo);
+            if (combate != null) {
+                donde = combate;
+            }
+        }
+        // -Dneo.ascent.rewardElite=true: el de una ELITE, con la reliquia que
+        // se lleva sola y sus botones de quedarsela o dejarla.
+        if (Boolean.getBoolean("neo.ascent.rewardElite")) {
+            final AscentNode elite = first(demo, AscentNode.Kind.ELITE);
+            if (elite != null) {
+                donde = elite;
+            }
+        }
+        reward(demo, donde);
+    }
+
+    /** El primer combate del mapa, para la maqueta del premio normal. */
+    private static AscentNode firstCombat(final AscentRun run) {
+        return first(run, AscentNode.Kind.COMBAT);
+    }
+
+    /** El primer nodo de esa clase del mapa, o null. */
+    private static AscentNode first(final AscentRun run, final AscentNode.Kind kind) {
+        for (int r = 0; r < forge.neo.ascent.AscentMap.ROWS; r++) {
+            for (final AscentNode n : run.map().row(r)) {
+                if (n.getKind() == kind) {
+                    return n;
+                }
+            }
+        }
+        return null;
+    }
+
+    // ------------------------------------------------------------------
+    //  Resolver un nodo
+    // ------------------------------------------------------------------
+
+    private void enter(final AscentRun run, final AscentNode node) {
+        if (AscentBattle.isBattle(node.getKind())) {
+            fight(run, node);
+            return;
+        }
+        if (node.getKind() == AscentNode.Kind.REST) {
+            app.scene.setRoot(new AscentRestScreen(run, app.cardWidth, () -> {
+                run.clear(node);
+                showMap(run);
+            }));
+            app.applyScale();
+            return;
+        }
+        if (node.getKind() == AscentNode.Kind.SHOP) {
+            // El nodo se marca resuelto AL ENTRAR, y aqui si es lo correcto:
+            // no hay partida que rebobinar, y lo que evita es rerodar el
+            // escaparate saliendo del juego y volviendo a entrar.
+            run.clear(node);
+            app.scene.setRoot(new AscentShopScreen(run, AscentShop.stock(run, node),
+                    app.cardWidth, () -> showMap(run)));
+            app.applyScale();
+            return;
+        }
+        if (node.getKind() == AscentNode.Kind.EVENT) {
+            // Igual que la tienda: resuelto AL ENTRAR. No hay partida que
+            // rebobinar, y lo que evita es volver a tirar el evento (y sus
+            // apuestas) saliendo del juego y entrando otra vez.
+            run.clear(node);
+            app.scene.setRoot(new AscentEventScreen(run, AscentEvent.of(run, node),
+                    AscentEvent.rng(run, node), app.cardWidth, () -> showMap(run)));
+            app.applyScale();
+            return;
+        }
+        // Tesoro: se cobra el premio y al mapa.
+        run.clear(node);
+        reward(run, node);
+    }
+
+    /**
+     * Jugar el duelo de un nodo.
+     *
+     * <p>Mesa <b>nueva</b>, como en cualquier otra partida: reaprovechar la del
+     * nodo anterior la deja con sus nodos y sus resaltados puestos. Es lo mismo
+     * que hacen {@code startFromHome}, el puzzle y el duelo de la aventura.
+     */
+    private void fight(final AscentRun run, final AscentNode node) {
+        // Esta partida vale una run: el menu de Escape tiene que decirlo.
+        app.runAtStake = true;
+        app.table = new TableScreen(app.cardWidth, app.sideWidth);
+        app.table.getDetailPanel().setTextZoom(NeoSettings.getDouble(NeoSettings.TEXT_ZOOM, 1.15));
+        app.showTable();
+        final TableBinder binder = new TableBinder(app.table);
+        app.binder = binder;
+        app.table.setPrompt(NeoText.get("app.preparingDuel"));
+        // En disco ANTES de jugar: cerrar el juego a mitad cuenta como perder.
+        run.markFighting(node);
+        // Pero si es el MOTOR el que se rompe (eso no lo provoca nadie), el
+        // nodo se puede repetir: el hilo de la partida puede no volver nunca,
+        // asi que se borra aqui, al salir por el aviso.
+        binder.setOnAbandoned(why -> {
+            if (why == TableBinder.Abandon.CRASH) {
+                run.clearFighting();
+            }
+        });
+
+        final Thread engine = new Thread(() -> {
+            AscentBattle.Outcome outcome = null;
+            try {
+                outcome = AscentBattle.fight(run, node, NeoMatchUI.Mode.HUMAN,
+                        TIMEOUT_SECS, binder);
+            } catch (final RuntimeException e) {
+                System.err.println("[neo] el duelo de Ascenso ha fallado: " + e);
+                e.printStackTrace();
+            } finally {
+                final AscentBattle.Outcome got = outcome;
+                Platform.runLater(() -> {
+                    app.binder = null;
+                    app.runAtStake = false;
+                    // La partida ha vuelto con el juego abierto, como sea.
+                    run.clearFighting();
+                    if (got == null) {
+                        // La partida ha reventado. NO se da el nodo por
+                        // resuelto ni la run por perdida: se vuelve al mapa
+                        // tal y como estaba. Perder una run por un fallo
+                        // nuestro seria lo peor que puede pasar aqui.
+                        showMap(run);
+                        return;
+                    }
+                    // Reiniciar no se ofrece en Ascenso (seria rebarajar la
+                    // mano), pero si llegara de algun sitio se trata como lo
+                    // que es: dejar el duelo a medias, o sea perder la run.
+                    if (!got.alive || got.exit == NeoMatchUI.Exit.RESTART) {
+                        gameOver(run, got.won);
+                        return;
+                    }
+                    // Se marca resuelto AL GANARLO, nunca al entrar.
+                    run.clear(node);
+                    if (got.shieldBroke) {
+                        // Perdido, pero el escudo te ha salvado: sin premio, y
+                        // se dice al volver al mapa (AscentRelics.SHIELD).
+                        showMap(run);
+                        if (app.scene.getRoot() instanceof AscentMapScreen) {
+                            ((AscentMapScreen) app.scene.getRoot()).showShieldBroke(run.getLife());
+                        }
+                        return;
+                    }
+                    reward(run, node);
+                });
+            }
+        }, "Game-neo-ascent");
+        engine.setDaemon(true);
+        engine.start();
+    }
+
+    /** El premio del nodo, si da alguno. */
+    private void reward(final AscentRun run, final AscentNode node) {
+        final AscentRewards.Reward got = AscentRewards.of(run, node);
+        if (got.credits > 0) {
+            run.addCredits(got.credits);
+        }
+        if (got.cards.isEmpty() && got.relics.isEmpty()) {
+            showMap(run);
+            return;
+        }
+        app.scene.setRoot(new AscentRewardScreen(run, got, app.cardWidth, () -> showMap(run)));
+        app.applyScale();
+    }
+
+    /**
+     * Se acabo.
+     *
+     * <p>La run se borra <b>aqui</b> y no al volver al menu: si se dejara para
+     * despues, cerrar el juego en esta pantalla la dejaria guardada y el menu
+     * ofreceria continuar una partida que ya se perdio — que es justo lo que un
+     * roguelike no puede permitir.
+     */
+    private void gameOver(final AscentRun run, final boolean won) {
+        if (run.isEndless()) {
+            endlessOver(run);
+            return;
+        }
+        final boolean completed = won && run.isCompleted();
+        final boolean unlocked = completed
+                // Lo unico que sobrevive a la run. Va ANTES de discard(), que
+                // borra todo lo que empieza por "ascent." — los desbloqueos
+                // viven en sus propias claves justo para no irse con ella.
+                && AscentUnlocks.recordWin(run);
+        // ⚠️ Y la FOTO tambien va antes: discard() se lleva el .dck y el bloque
+        // entero, o sea todo lo que el resumen tiene que ensenyar. Ver
+        // AscentSummary.
+        final AscentSummary photo = AscentSummary.of(run, completed, unlocked);
+        // Los hitos se calculan A PARTIR de la foto, asi que van despues de
+        // hacerla y antes de borrar la run — igual que todo lo demas que tiene
+        // que sobrevivir a discard(). Y se apuntan tambien cuando se ha
+        // perdido: lo que la derrota se lleva es la run, no lo que ya te
+        // habias ganado (el plan de Ascenso).
+        final AscentSummary summary = photo.withFeats(AscentUnlocks.record(photo));
+        run.discard();
+        System.out.println("[ascenso] run terminada: " + summary);
+        showOver(summary);
+    }
+
+    /**
+     * <b>El jefe final ha caido: enhorabuena, y se puede seguir.</b>
+     *
+     * <p>La victoria se apunta AQUI y no al salir: la Ascension, las victorias y
+     * los hitos son de haber ganado, asi que seguir en modo infinito no puede
+     * costarlos. Y se apunta una sola vez ({@link AscentRun#markVictoryRecorded}):
+     * si se cierra el juego en esta pantalla, al volver se pregunta otra vez sin
+     * contar la run dos veces.
+     *
+     * <p>La run NO se borra todavia: «Seguir» la necesita. Se borra al elegir
+     * cualquiera de las otras dos salidas.
+     */
+    private void victory(final AscentRun run) {
+        boolean unlocked = false;
+        java.util.List<forge.neo.ascent.AscentFeat> feats = java.util.List.of();
+        if (!run.isVictoryRecorded()) {
+            unlocked = AscentUnlocks.recordWin(run);
+            feats = AscentUnlocks.record(AscentSummary.of(run, true, unlocked));
+            run.markVictoryRecorded();
+        }
+        final AscentSummary summary = AscentSummary.of(run, true, unlocked).withFeats(feats);
+        System.out.println("[ascenso] run ganada: " + summary + " — se ofrece el modo infinito");
+        showOver(summary, run);
+    }
+
+    /**
+     * Se acabo una run en modo infinito. Ya estaba ganada: lo que se cierra es
+     * hasta donde llegaste, y si es record.
+     */
+    private void endlessOver(final AscentRun run) {
+        final int level = run.endlessLevel();
+        final boolean record = AscentUnlocks.recordEndless(run.getMode(), level);
+        final AscentSummary photo = AscentSummary.of(run, true, false)
+                .withEndlessRecord(AscentUnlocks.bestEndless(run.getMode()), record);
+        final AscentSummary summary = photo.withFeats(AscentUnlocks.record(photo));
+        run.discard();
+        System.out.println("[ascenso] modo infinito terminado: " + summary
+                + (record ? " — RECORD" : ""));
+        showOver(summary);
+    }
+
+    /**
+     * El resumen de la run, que es donde se decide si hay otra.
+     *
+     * <p>La run ya no existe cuando esto se ve: lo que se pinta es la foto.
+     */
+    void showOver(final AscentSummary summary) {
+        showOver(summary, null);
+    }
+
+    /**
+     * Igual, y con {@code run} distinto de null ofrece ademas <b>seguir en modo
+     * infinito</b>: es el resumen de la victoria. Las otras dos salidas cierran
+     * la run (se borra entonces, no antes).
+     */
+    /** La run que se va a resumir se perdio por cerrar el juego a mitad de una partida. */
+    private boolean lostByClosing;
+
+    private void showOver(final AscentSummary summary, final AscentRun endlessRun) {
+        if (lostByClosing) {
+            lostByClosing = false;
+            summary.markInterrupted();
+        }
+        final AscentOverScreen.Actions[] actions = new AscentOverScreen.Actions[1];
+        final int pressAt = Integer.getInteger("neo.ascent.pressEndlessAt", 0);
+        if (pressAt > 0 && endlessRun != null) {
+            // SOLO PRUEBAS: pulsa "Seguir en modo infinito" por el camino real.
+            final javafx.animation.PauseTransition t =
+                    new javafx.animation.PauseTransition(javafx.util.Duration.millis(pressAt));
+            t.setOnFinished(e -> {
+                System.out.println("[ascenso] prueba: pulso seguir en modo infinito");
+                actions[0].endless();
+            });
+            t.play();
+        }
+        app.scene.setRoot(new AscentOverScreen(summary, app.cardWidth,
+                actions[0] = new AscentOverScreen.Actions() {
+                    @Override
+                    public boolean offersEndless() {
+                        return endlessRun != null;
+                    }
+
+                    @Override
+                    public void endless() {
+                        if (endlessRun != null && endlessRun.enterEndless()) {
+                            System.out.println("[ascenso] modo infinito: " + endlessRun);
+                            showMap(endlessRun);
+                        }
+                    }
+
+                    @Override
+                    public void again() {
+                        if (endlessRun != null) {
+                            endlessRun.discard();
+                        }
+                        // A la pantalla de montar, NO a empezar una run: de una
+                        // run no se vuelve atras (principio 6).
+                        showSetup();
+                    }
+
+                    @Override
+                    public void menu() {
+                        if (endlessRun != null) {
+                            endlessRun.discard();
+                        }
+                        app.showMainMenu();
+                    }
+                }));
+        app.applyScale();
+    }
+}

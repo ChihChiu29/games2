@@ -1,0 +1,309 @@
+package forge.neo.look;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import forge.LobbyPlayer;
+import forge.player.GamePlayerUtil;
+import forge.util.GuiDisplayUtil;
+
+/**
+ * Quien se sienta a la mesa: tu, con tu nombre y tu cara, y los rivales.
+ *
+ * <p>Estaban todos llamandose "Human", "IA-1", "IA-2"... y eso es lo que hace
+ * que una partida no se recuerde. Forge trae un <b>generador con cientos de
+ * nombres</b> ({@code NameGenerator}, de fantasia y normales) que no estabamos
+ * usando: una partida contra Sythril, Kaldar y Occelot se cuenta despues; una
+ * contra IA-1, IA-2 e IA-3 no.
+ *
+ * <p>Los nombres de los rivales se <b>fijan al elegirlos</b>: si en la pantalla
+ * de personalizacion no has puesto ninguno, se sortea uno la primera vez y se
+ * guarda. Sortearlo en cada partida haria que el rival de siempre fuera otro
+ * cada vez, que es justo lo contrario de lo que se busca.
+ */
+public final class NeoPlayers {
+
+    private NeoPlayers() {
+    }
+
+    /**
+     * Tu, con tu nombre y tu avatar.
+     *
+     * <p>El avatar que se le pasa al motor es un <b>indice</b> de su hoja de
+     * sprites, asi que solo puede llevar los de Forge. El tuyo — que puede ser
+     * un PNG que hayas traido — lo pinta la interfaz por su cuenta
+     * ({@code PlayerBar}); este indice es el que veran otros sitios del motor.
+     */
+    public static LobbyPlayer human() {
+        final String name = NeoLook.playerName();
+        if (name.isBlank()) {
+            return GamePlayerUtil.getGuiPlayer();
+        }
+        // La funda es la del MAZO con el que se va a jugar (si lleva una): el
+        // indice que se le pasa al motor tiene que decir lo mismo que pinta la
+        // mesa, o el rival de una partida en red veria otra distinta.
+        return GamePlayerUtil.getGuiPlayer(name, avatarIndexOf(NeoLook.currentAvatar()),
+                sleeveIndexOf(NeoLook.sleeveInPlay()), true);
+    }
+
+    /**
+     * El rival numero {@code index} (desde 0), con su nombre, su cara y su
+     * forma de jugar (ver {@link RivalSetup}).
+     *
+     * @param aiProfile un perfil, "" (el de Forge), {@link RivalSetup#RANDOM}
+     *                  o {@link RivalSetup#perRival(String)} en una partida
+     *                  normal, donde cada rival juega con el suyo
+     */
+    public static LobbyPlayer ai(final int index, final String aiProfile) {
+        return ai(index, aiProfile, aiName(index));
+    }
+
+    /**
+     * Lo mismo para una partida normal, con el mazo con el que va a jugar: el
+     * nombre puede salir de ahi, segun Personalizar → Rivales
+     * ({@link forge.neo.NeoSettings#aiNames}).
+     */
+    public static LobbyPlayer ai(final int index, final String aiProfile, final forge.deck.Deck deck) {
+        return ai(index, aiProfile, nameInGame(index, deck));
+    }
+
+    private static LobbyPlayer ai(final int index, final String aiProfile, final String name) {
+        final String profile = RivalSetup.resolve(aiProfile, index, RANDOM);
+        // La cara: si es de la hoja de Forge, su numero va al motor (y la ve
+        // tambien un invitado en red); si es un PNG tuyo, el motor no sabe
+        // pintarla y se apunta por nombre para que la pinte la mesa.
+        final String face = RivalSetup.avatar(index);
+        final int sprite = RivalSetup.spriteIndexOf(face);
+        if (sprite < 0 && !face.isEmpty()) {
+            CUSTOM_FACES.put(name, face);
+        }
+        final int sleeve = sleeveFor(index, name);
+        System.out.printf(java.util.Locale.ROOT, "  Opponent %d: %s | AI %s%s%s%n", index + 1, name,
+                profile.isEmpty() ? "(Forge's)" : profile,
+                face.isEmpty() ? "" : " | face " + face,
+                RivalSetup.sleeve(index).isEmpty() ? "" : " | sleeve " + RivalSetup.sleeve(index));
+        return GamePlayerUtil.createAiPlayer(name, sprite >= 0 ? sprite : index, sleeve, null, profile);
+    }
+
+    /**
+     * UN RIVAL DE PASO: nombre del generador de Forge y cara de su hoja, los
+     * dos al azar y SIN apuntarlos. Para los modos donde el rival cambia en
+     * cada duelo (Ascenso): con {@link #ai} salia siempre el rival 1 de
+     * Personalizar, con su nombre guardado — Discord, 10-10-2026: <i>"I'm always
+     * playing against Dolly. It would be nice to randomize the name of the
+     * opponent and his photo"</i>. Tus rivales guardados no se tocan.
+     */
+    public static LobbyPlayer passingAi(final String aiProfile) {
+        final String name = randomName(0);
+        final String profile = RivalSetup.resolve(aiProfile, 0, RANDOM);
+        final int faces = NeoLook.builtInAvatarCount();
+        final int sprite = faces > 0 ? RANDOM.nextInt(faces) : 0;
+        System.out.printf(java.util.Locale.ROOT, "  Rival de paso: %s | IA %s | cara %d%n", name,
+                profile.isEmpty() ? "(la de Forge)" : profile, sprite);
+        return GamePlayerUtil.createAiPlayer(name, sprite, profile);
+    }
+
+    /**
+     * El rival numero {@code index} jugado por una PERSONA en este aparato (hot
+     * seat): su nombre y su cara de siempre, pero humano. Un
+     * {@code LobbyPlayerHuman} aparte, nunca el tuyo: el motor tiene que poder
+     * distinguirlos (ver {@code GamePlayerUtil.getGuiPlayer}, "use separate
+     * LobbyPlayerHuman instance for human players beyond first").
+     */
+    public static LobbyPlayer hotSeat(final int index) {
+        final String name = aiName(index);
+        final String face = RivalSetup.avatar(index);
+        final int sprite = RivalSetup.spriteIndexOf(face);
+        if (sprite < 0 && !face.isEmpty()) {
+            CUSTOM_FACES.put(name, face);
+        }
+        System.out.printf(java.util.Locale.ROOT, "  Opponent %d: %s | HUMAN (hot seat)%n", index + 1, name);
+        return GamePlayerUtil.getGuiPlayer(name, sprite >= 0 ? sprite : index, sleeveFor(index, name), false);
+    }
+
+    private static final java.util.Random RANDOM = new java.util.Random();
+
+    /**
+     * El numero de funda que se le pasa al motor para el rival {@code index}:
+     * la de su hoja si la tiene elegida en Personalizar → Rivales; si es un
+     * PNG importado, se apunta por nombre (el motor no sabe pintarla, la
+     * pinta {@code TableBinder}) y al motor le va una cualquiera; y sin
+     * elegir, una al azar, como hizo siempre el motor.
+     */
+    private static int sleeveFor(final int index, final String name) {
+        final String id = RivalSetup.sleeve(index);
+        final int sprite = RivalSetup.sleeveSpriteIndexOf(id);
+        if (sprite >= 0) {
+            return sprite;
+        }
+        if (!id.isEmpty() && NeoLook.sleeveById(id) != null) {
+            CUSTOM_SLEEVES.put(name, id);
+        }
+        final int count = NeoLook.builtInSleeveCount();
+        return count > 0 ? RANDOM.nextInt(count) : 0;
+    }
+
+    /** Rivales con una funda importada (PNG): nombre -> id de funda. Como {@link #CUSTOM_FACES}. */
+    private static final java.util.Map<String, String> CUSTOM_SLEEVES =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * El id de la funda importada de un rival, o {@code null} si lleva una de
+     * la hoja de Forge (entonces vale {@code PlayerView.getSleeveIndex}).
+     */
+    public static String customSleeveOf(final String playerName) {
+        return playerName == null ? null : CUSTOM_SLEEVES.get(playerName);
+    }
+
+    /**
+     * Rivales con una cara importada (PNG): nombre -> id de avatar.
+     *
+     * <p>Solo se anyade: se vacia entero al montar cada partida
+     * ({@link #newMatch}). Quitar al sentar a un rival sin cara le borraba la
+     * suya a otro que se llamara igual.
+     */
+    private static final java.util.Map<String, String> CUSTOM_FACES =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Una partida nueva: las caras importadas de la anterior no valen. */
+    public static void newMatch() {
+        CUSTOM_FACES.clear();
+        CUSTOM_SLEEVES.clear();
+        IN_GAME.clear();
+    }
+
+    /** Los nombres ya repartidos en esta partida: dos rivales no se llaman igual. */
+    private static final List<String> IN_GAME = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    /**
+     * <b>Como se llama el rival en ESTA partida</b> (Discord, 30-10-2026:
+     * <i>"AI Player names randomly generated or changed to the name of the
+     * commander they're using"</i>). El de Personalizar de fabrica; al azar,
+     * uno del generador sin guardarlo; o el nombre corto de su comandante
+     * (lo de antes de la coma: "Krenko", "Atraxa"), y sin comandante el de
+     * siempre. Nunca repite uno de esta partida ni el tuyo: si choca, un "2".
+     */
+    static String nameInGame(final int index, final forge.deck.Deck deck) {
+        final String mode = forge.neo.NeoSettings.aiNames();
+        String name = null;
+        if (forge.neo.NeoSettings.AI_NAMES_COMMANDER.equals(mode)) {
+            name = commanderName(deck);
+        } else if (forge.neo.NeoSettings.AI_NAMES_RANDOM.equals(mode)) {
+            name = randomName(index);
+        }
+        if (name == null || name.isBlank()) {
+            name = aiName(index);
+        }
+        final List<String> taken = new ArrayList<>(IN_GAME);
+        taken.add(NeoLook.playerName());
+        String unique = name;
+        for (int n = 2; taken.contains(unique); n++) {
+            unique = name + " " + n;
+        }
+        IN_GAME.add(unique);
+        return unique;
+    }
+
+    /** El nombre corto del primer comandante del mazo, traducido; o null. Lo usa tambien Android. */
+    public static String commanderName(final forge.deck.Deck deck) {
+        if (deck == null || deck.getCommanders().isEmpty()) {
+            return null;
+        }
+        final String full = deck.getCommanders().get(0).getName();
+        String shown = full;
+        try {
+            final String t = forge.util.CardTranslation.getTranslatedName(full);
+            if (t != null && !t.isBlank()) {
+                shown = t;
+            }
+        } catch (final RuntimeException e) {
+            // sin traduccion, el ingles
+        }
+        // Las partidas y las de dos caras: solo la de delante.
+        final int faces = shown.indexOf(" // ");
+        if (faces > 0) {
+            shown = shown.substring(0, faces);
+        }
+        final int comma = shown.indexOf(',');
+        return (comma > 0 ? shown.substring(0, comma) : shown).trim();
+    }
+
+    /**
+     * El id de la cara importada de un rival, o {@code null} si lleva una de la
+     * hoja de Forge (entonces vale {@code PlayerView.getAvatarIndex}).
+     */
+    public static String customFaceOf(final String playerName) {
+        return playerName == null ? null : CUSTOM_FACES.get(playerName);
+    }
+
+    /**
+     * Como se llama el rival numero {@code index}.
+     *
+     * <p>El que hayas puesto tu; si no, uno sorteado <b>y guardado</b>, para
+     * que sea el mismo la proxima vez.
+     */
+    public static String aiName(final int index) {
+        final String saved = NeoLook.aiName(index);
+        if (!saved.isBlank()) {
+            return saved;
+        }
+        final String fresh = randomName(index);
+        remember(index, fresh);
+        return fresh;
+    }
+
+    /**
+     * Un nombre del generador de Forge que no repita a los que ya hay.
+     *
+     * <p>Si el generador fallara — no deberia, es una lista en memoria — se cae
+     * al "IA-N" de siempre: sin nombre no hay partida.
+     */
+    /** Lo usa tambien la sala en red, con el modo "al azar" de Personalizar → Rivales. */
+    public static String randomName(final int index) {
+        try {
+            final List<String> taken = new ArrayList<>(NeoLook.aiNames());
+            taken.add(NeoLook.playerName());
+            for (int attempt = 0; attempt < 20; attempt++) {
+                final String candidate = GuiDisplayUtil.getRandomAiName();
+                if (candidate != null && !candidate.isBlank() && !taken.contains(candidate)) {
+                    return candidate;
+                }
+            }
+        } catch (final RuntimeException e) {
+            System.err.println("[neo] el generador de nombres ha fallado: " + e);
+        }
+        return "IA-" + (index + 1);
+    }
+
+    /** Guarda el nombre sorteado en su hueco, alargando la lista si hace falta. */
+    private static void remember(final int index, final String name) {
+        final List<String> names = new ArrayList<>(NeoLook.aiNames());
+        while (names.size() <= index) {
+            names.add("");
+        }
+        names.set(index, name);
+        NeoLook.setAiNames(names);
+    }
+
+    // ---------------------------------------------------------------
+
+    /** El numero de sprite de un avatar, o 0 si el elegido es un fichero tuyo. */
+    private static int avatarIndexOf(final LookItem item) {
+        return spriteNumber(item, "sprite:avatar:");
+    }
+
+    private static int sleeveIndexOf(final LookItem item) {
+        return spriteNumber(item, "sprite:sleeve:");
+    }
+
+    private static int spriteNumber(final LookItem item, final String prefix) {
+        if (item == null || !item.getId().startsWith(prefix)) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(item.getId().substring(prefix.length()));
+        } catch (final NumberFormatException e) {
+            return 0;
+        }
+    }
+}

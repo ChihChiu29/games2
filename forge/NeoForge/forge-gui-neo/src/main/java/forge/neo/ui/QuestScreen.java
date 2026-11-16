@@ -1,0 +1,1100 @@
+package forge.neo.ui;
+
+import forge.neo.NeoText;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.function.DoubleConsumer;
+
+import forge.deck.Deck;
+import forge.game.card.CardView;
+import forge.gamemodes.quest.QuestEventDifficulty;
+import forge.gamemodes.quest.QuestEventChallenge;
+import forge.gamemodes.quest.QuestEventDuel;
+import forge.item.PaperCard;
+import forge.neo.card.CardNode;
+import forge.neo.quest.DuelFace;
+import forge.neo.quest.NeoQuest;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
+import javafx.scene.control.ProgressBar;
+import javafx.scene.control.ScrollPane;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
+import javafx.scene.layout.VBox;
+
+/**
+ * El cuartel general de la aventura.
+ *
+ * <p>Es la pantalla a la que se vuelve entre duelo y duelo, asi que tiene que
+ * contestar de un vistazo a cuatro cosas y en este orden:
+ *
+ * <ol>
+ *   <li><b>Como voy</b> — creditos, victorias, cartas, rango.</li>
+ *   <li><b>Contra quien estoy jugando</b> — el nivel de los rivales y cuanto
+ *       falta para que suban. Es lo que hace que se NOTE el progreso: sin esto,
+ *       ganar veinte duelos no se distingue de ganar dos.</li>
+ *   <li><b>Con que juego</b> — el mazo, y si es legal.</li>
+ *   <li><b>Que puedo hacer ahora</b> — los cuatro duelos, con su dificultad.</li>
+ * </ol>
+ *
+ * <p>La dificultad va por color y no solo por texto: verde facil, ambar medio,
+ * rojo duro, morado experto. Es la misma regla que la mesa — el estado se ve, no
+ * se lee.
+ */
+public class QuestScreen extends StackPane {
+
+    /** Lo que se puede hacer desde el cuartel general. */
+    public interface Actions {
+        void duel(QuestEventDuel duel);
+
+        void challenge(QuestEventChallenge challenge);
+
+        void deckPicker();
+
+        void collection();
+
+        /** Editar el mazo con el que juegas ahora. */
+        void editDeck();
+
+        /** Montar uno nuevo con lo que tienes. */
+        void newDeck();
+
+        void shop();
+
+        /** La tienda, en las sueltas que te faltan en tus mazos. */
+        default void shopWanted() {
+            shop();
+        }
+
+        void bazaar();
+
+        /** Los torneos de draft: los abiertos o el que estes jugando. */
+        void tournaments();
+
+        /** El Coliseo (solo en una Quest de Commander). */
+        void colosseum();
+
+        /** El torneo de la Quest ({@link forge.neo.quest.NeoQuestCup}), al lado de los de draft. */
+        default void cup() {
+        }
+
+        /** Volver a pintar el cuartel (tras desbloquear una expansion). */
+        default void refresh() {
+        }
+
+        /** Las preferencias de la Quest (las de Forge): premios, tienda, dificultad. */
+        void preferences();
+
+        /** Abrir el sobre del dia ({@link forge.neo.quest.NeoDailyPack}). */
+        void dailyPack();
+
+        void newAdventure();
+
+        void back();
+    }
+
+    private final double cardWidth;
+    /**
+     * La capa del sobre del dia ({@link #showDailyPack}). Hasta el 14-10-2026
+     * esta pantalla era un BorderPane a pelo: no tenia nada que ensenyar
+     * encima de si misma.
+     */
+    private final Overlay overlay = new Overlay();
+    /**
+     * La carta del comandante rival, como parte de la de la mesa. 0,88 y no
+     * 0,95 desde que Volver bajo a su barra (principio 12): con 0,95 el boton
+     * JUGAR de los duelos se quedaba bajo el borde en 1080p.
+     */
+    private static final double DUEL_CARD = 0.88;
+    /** La tira de cartas de "TU MAZO", como parte de la de la mesa. */
+    private static final double STRIP_CARD = 0.58;
+    /**
+     * La carta de esta pantalla, como mucho, como parte del alto de la ventana.
+     *
+     * <p>{@link #cardWidth} sale del ANCHO (once cartas en fila, con un tope que
+     * crece con la pantalla), y aqui las cartas se apilan en VERTICAL: la tira
+     * del mazo y, debajo, la del comandante rival con el JUGAR. Con una ventana
+     * mas ancha que alta de lo que se penso — un ultrapanoramico, una ventana
+     * sin maximizar, o -Dneo.win=2560x1440 en un monitor pequenyo — los JUGAR
+     * se iban bajo el borde (Ana, 14-10-2026). 0,14 deja 1080p y 2K
+     * maximizados exactamente como estaban (136 de 1001 y 183 de 1361 caben
+     * dentro) y solo encoge la carta cuando el alto no da para ella.
+     */
+    private static final double FIT_HEIGHT = 0.14;
+    /** Lo que hay que hacer con cada carta cuando cambia su ancho ({@link #fitToHeight}). */
+    private final List<DoubleConsumer> cardResizers = new ArrayList<>();
+    /** El ancho de carta que se esta ensenyando ahora. */
+    private double shownWidth;
+
+    public QuestScreen(final double cardWidth, final Actions actions) {
+        this.cardWidth = cardWidth;
+        getStyleClass().addAll("table-root", "quest");
+
+        final BorderPane frame = new BorderPane();
+        frame.setTop(header(actions));
+        frame.setCenter(body(actions));
+        // Volver, abajo a la derecha: el mismo sitio en todas las pantallas
+        // (las notas de diseño, principio 12). Antes iba en la cabecera.
+        frame.setBottom(BackBar.of(actions::back));
+        getChildren().addAll(frame, overlay);
+        overlay.hide();
+
+        // Click derecho sobre cualquier carta: a tamanyo de lectura, igual que
+        // en la mesa. Aqui las cartas son pequenyas — el comandante del rival
+        // ocupa un dedo — y decidir contra quien juegas sin poder leer su carta
+        // es decidir a ciegas.
+        CardZoom.install(this);
+
+        // Las cartas se miden tambien por el alto de verdad: ver FIT_HEIGHT.
+        // Es su propio alto, asi que no ata la pantalla a nada que viva mas.
+        shownWidth = cardWidth;
+        heightProperty().addListener((o, was, h) -> fitToHeight(h.doubleValue()));
+        // Solo pruebas: -Dneo.quest.openTrophies=true abre la vitrina.
+        if (Boolean.getBoolean("neo.quest.openTrophies")) {
+            final javafx.animation.PauseTransition later =
+                    new javafx.animation.PauseTransition(javafx.util.Duration.millis(1500));
+            later.setOnFinished(e -> showTrophyCase());
+            later.play();
+        }
+        // Solo pruebas: -Dneo.quest.openUnlock=true abre la lista de desbloqueos.
+        if (Boolean.getBoolean("neo.quest.openUnlock") && forge.neo.quest.NeoQuestUnlock.available()) {
+            final javafx.animation.PauseTransition later =
+                    new javafx.animation.PauseTransition(javafx.util.Duration.millis(1500));
+            later.setOnFinished(e -> showUnlockOffers(actions));
+            later.play();
+        }
+    }
+
+    private void fitToHeight(final double height) {
+        if (height <= 0) {
+            return;
+        }
+        final double w = Math.min(cardWidth, height * FIT_HEIGHT);
+        if (Math.abs(w - shownWidth) < 1) {
+            return;
+        }
+        shownWidth = w;
+        for (final DoubleConsumer r : cardResizers) {
+            r.accept(w);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Cabecera: quien eres y como vas
+    // ---------------------------------------------------------------
+
+    private Region header(final Actions actions) {
+        final Label title = new Label(NeoText.get("quest.title", safe(NeoQuest.name())));
+        title.getStyleClass().add("home-title");
+
+        final Label rank = new Label(NeoQuest.rankLabel()
+                + "   ·   " + NeoQuest.modalidad().getLabel());
+        rank.getStyleClass().add("home-subtitle");
+
+        final Button nueva = new Button(NeoText.get("quest.new"));
+        nueva.getStyleClass().add("btn-secondary");
+        nueva.setMinWidth(Region.USE_PREF_SIZE);
+        nueva.setOnAction(e -> actions.newAdventure());
+
+        // Las preferencias, al lado de "Nueva": valen para todas las Quests y
+        // las de empezar (cartas, creditos) solo cuentan al crear una.
+        final Button prefs = new Button(NeoText.get("questPrefs.button"));
+        prefs.getStyleClass().add("btn-secondary");
+        prefs.setMinWidth(Region.USE_PREF_SIZE);
+        prefs.setOnAction(e -> actions.preferences());
+
+        final Region gap = new Region();
+        HBox.setHgrow(gap, Priority.ALWAYS);
+        final HBox row = new HBox(10, new VBox(2, title, rank), gap);
+        // El sobre del dia, en la cabecera mientras esta por abrir: arriba del
+        // todo sin empujar los duelos (en el cuerpo, en 1080p dejaba los JUGAR
+        // fuera de la vista). Abierto, desaparece (Ana, 14-10-2026).
+        if (forge.neo.quest.NeoDailyPack.available()) {
+            final Region daily = dailyPack(actions);
+            if (daily != null) {
+                row.getChildren().add(daily);
+            }
+        }
+        // La vitrina (Discord, 25-10-2026): lo ganado, a la vista. En la
+        // cabecera porque no es una accion de la Quest, es mirarla.
+        final Button trophies = new Button(NeoText.get("trophies.button"));
+        trophies.setId("quest-trophies");
+        trophies.getStyleClass().add("btn-secondary");
+        trophies.setMinWidth(Region.USE_PREF_SIZE);
+        trophies.setOnAction(e -> showTrophyCase());
+        row.getChildren().addAll(trophies, prefs, nueva);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.setPadding(new Insets(20, 28, 6, 30));
+        return row;
+    }
+
+    private Region body(final Actions actions) {
+        final VBox content = new VBox(16);
+        // 8 abajo y no 22: debajo va la barra de Volver, que trae su propio
+        // aire. Con los 22, en 1080p los JUGAR de los duelos quedaban cortados.
+        content.setPadding(new Insets(8, 30, 8, 30));
+        content.getChildren().addAll(
+                stats(actions),
+                deckRow(actions),
+                duels(actions));
+        if (forge.neo.quest.NeoColosseum.available()) {
+            content.getChildren().add(colosseum(actions));
+        }
+        if (forge.neo.quest.NeoQuestCup.available()) {
+            content.getChildren().add(cup(actions));
+        }
+        if (forge.neo.quest.NeoQuestUnlock.available()) {
+            content.getChildren().add(unlock(actions));
+        }
+        content.getChildren().addAll(
+                challenges(actions),
+                tournaments(actions));
+
+        final ScrollPane sp = new ScrollPane(content);
+        sp.getStyleClass().add("dialog-scroll");
+        sp.setFitToWidth(true);
+        sp.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        return sp;
+    }
+
+    /** Los numeros grandes, y el panel de "contra quien juegas". */
+    private Region stats(final Actions actions) {
+        final HBox row = new HBox(14);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.getChildren().addAll(
+                tile(String.valueOf(NeoQuest.credits()), NeoText.get("quest.credits"), "stat-credits"),
+                // El historial abre la vitrina: es donde mira quien quiere
+                // saber que ha ganado.
+                clickable(tile(NeoQuest.wins() + " - " + NeoQuest.losses(), NeoText.get("quest.record"), null),
+                        this::showTrophyCase),
+                // El numero de cartas ES el boton de la coleccion. Si algo
+                // grande dice "146 cartas en tu coleccion", se clica: la misma
+                // regla que ya se aplico a las pilas de la mesa.
+                clickable(tile(String.valueOf(NeoQuest.collectionSize()),
+                        NeoText.get("quest.collectionSize"), null), actions::collection),
+                tile(String.valueOf(NeoQuest.life()), NeoText.get("quest.duelLife"), null));
+        // Cuanto llevas del MUNDO (Discord, 07-10-2026: "the count of cards your
+        // collection is missing from the current world"). Solo en un mundo con
+        // expansiones propias: en el principal "te faltan 33.000" no dice nada.
+        final forge.neo.quest.NeoQuestCollection.Progress progress =
+                forge.neo.quest.NeoQuestCollection.worldProgress();
+        if (progress != null) {
+            // El numero grande es lo que te FALTA, que es lo que se pregunto;
+            // lo que tienes de cuantas, en el tooltip. La etiqueta envuelve:
+            // hay mundos con nombre largo ("Streets of New Capenna (*)").
+            final Region worldTile = tile(
+                    String.format(java.util.Locale.getDefault(), "%,d", progress.missing()),
+                    NeoText.get("quest.worldProgress", progress.world.toUpperCase(java.util.Locale.ROOT)), null);
+            for (final javafx.scene.Node n : ((VBox) worldTile).getChildren()) {
+                if (n instanceof Label l && l.getStyleClass().contains("caption")) {
+                    l.setWrapText(true);
+                    l.setTextAlignment(javafx.scene.text.TextAlignment.CENTER);
+                    l.setMaxWidth(UiScale.px(190));
+                }
+            }
+            javafx.scene.control.Tooltip.install(worldTile, new javafx.scene.control.Tooltip(
+                    NeoText.get("quest.worldProgress.tip",
+                            String.format(java.util.Locale.getDefault(), "%,d", progress.owned),
+                            String.format(java.util.Locale.getDefault(), "%,d", progress.total),
+                            progress.world)));
+            row.getChildren().add(3, clickable(worldTile, actions::collection));
+        }
+
+        final Region grow = tierPanel();
+        HBox.setHgrow(grow, Priority.ALWAYS);
+        row.getChildren().add(grow);
+        return row;
+    }
+
+    /**
+     * Hace que una casilla de numero se pueda clicar.
+     *
+     * <p>Sale de jugar: <i>"donde pone COLECCION en grande deberia abrirse la
+     * coleccion igual que con el boton"</i>. Y tiene razon — un numero grande
+     * con su etiqueta parece un boton, asi que serlo cuesta una linea y no
+     * serlo despista. El boton de abajo se queda: esto no lo sustituye, lo
+     * duplica donde el ojo ya estaba mirando.
+     */
+    private static Region clickable(final Region tile, final Runnable action) {
+        tile.getStyleClass().add("stat-tile-link");
+        tile.setOnMouseClicked(e -> {
+            if (e.getButton() == javafx.scene.input.MouseButton.PRIMARY) {
+                action.run();
+            }
+        });
+        return tile;
+    }
+
+    private static Region tile(final String value, final String caption, final String extra) {
+        final Label v = new Label(value);
+        v.getStyleClass().add("stat-value");
+        if (extra != null) {
+            v.getStyleClass().add(extra);
+        }
+        final Label c = new Label(caption);
+        c.getStyleClass().add("caption");
+        final VBox box = new VBox(2, v, c);
+        box.getStyleClass().add("stat-tile");
+        box.setAlignment(Pos.CENTER);
+        box.setPadding(new Insets(12, 18, 10, 18));
+        box.setMinWidth(UiScale.px(140));
+        return box;
+    }
+
+    /**
+     * Contra que clase de rival juegas, y cuanto falta para el siguiente escalon.
+     *
+     * <p><b>Esta es la pieza que hace que la aventura se sienta a aventura.</b>
+     * El motor sube el nivel de los rivales con tus victorias; si eso no se ve,
+     * el jugador no tiene forma de saber que esta progresando — solo nota, un
+     * dia, que le cuesta mas.
+     */
+    private Region tierPanel() {
+        final QuestEventDifficulty tier = NeoQuest.tier();
+        final int falta = NeoQuest.winsToNextTier();
+
+        final Label label = new Label(NeoText.get("quest.rivals",
+                NeoQuest.tierLabel().toUpperCase()));
+        label.getStyleClass().addAll("tier-label", styleFor(tier));
+
+        final Label detail = new Label(falta == 0
+                ? NeoText.get("quest.topTier")
+                : NeoText.get(falta == 1 ? "quest.toNextTier.one" : "quest.toNextTier", falta));
+        detail.getStyleClass().add("home-subtitle");
+
+        final VBox box = new VBox(4, label, detail);
+        box.getStyleClass().add("stat-tile");
+        box.setPadding(new Insets(12, 18, 10, 18));
+
+        if (falta > 0) {
+            // La barra se llena DENTRO del escalon: cuenta desde la ultima
+            // subida, no desde cero, que es lo que el jugador quiere saber.
+            final int step = Math.max(1, falta + progressInTier());
+            final ProgressBar bar = new ProgressBar(progressInTier() / (double) step);
+            bar.getStyleClass().addAll("tier-bar", styleFor(tier));
+            bar.setMaxWidth(Double.MAX_VALUE);
+            box.getChildren().add(bar);
+        }
+        return box;
+    }
+
+    /** Victorias conseguidas dentro del escalon actual. */
+    private static int progressInTier() {
+        return Math.max(0, NeoQuest.wins() - NeoQuest.tierStartedAt());
+    }
+
+    private static String styleFor(final QuestEventDifficulty d) {
+        if (d == null) {
+            return "tier-easy";
+        }
+        switch (d) {
+            case MEDIUM: return "tier-medium";
+            case HARD: return "tier-hard";
+            case EXPERT: return "tier-expert";
+            default: return "tier-easy";
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Tu mazo
+    // ---------------------------------------------------------------
+
+    private Region deckRow(final Actions actions) {
+        final Deck deck = NeoQuest.currentDeck();
+        final String problem = NeoQuest.problemWith(deck);
+
+        final Label caption = new Label(NeoText.get("quest.yourDeck"));
+        caption.getStyleClass().add("caption");
+
+        final Label name = new Label(deck == null ? NeoText.get("quest.noDeckShort") : deck.getName());
+        name.getStyleClass().add("quest-deck-name");
+
+        final Label state = new Label(problem == null
+                ? NeoText.get("quest.deckReady", deck.getMain().countAll())
+                : problem);
+        state.getStyleClass().add(problem == null ? "quest-ok" : "quest-problem");
+        state.setWrapText(true);
+        state.setMaxWidth(UiScale.px(520));
+
+        final Button change = new Button(NeoText.get("quest.changeDeck"));
+        change.getStyleClass().add("btn-secondary");
+        change.setMinWidth(Region.USE_PREF_SIZE);
+        change.setOnAction(e -> actions.deckPicker());
+
+        // Editar y crear, aqui mismo. El mazo de la aventura se toca MUCHO —
+        // cada sobre que abres es un motivo para volver — asi que mandar a otra
+        // pantalla a buscarlo seria el camino largo de la cosa mas frecuente.
+        final Button edit = new Button(NeoText.get("quest.editDeck"));
+        edit.getStyleClass().add("btn-secondary");
+        edit.setMinWidth(Region.USE_PREF_SIZE);
+        edit.setDisable(deck == null);
+        edit.setOnAction(e -> actions.editDeck());
+
+        final Button create = new Button(NeoText.get("home.newDeck"));
+        create.getStyleClass().add("btn-secondary");
+        create.setMinWidth(Region.USE_PREF_SIZE);
+        create.setOnAction(e -> actions.newDeck());
+
+        final Button collection = new Button(NeoText.get("quest.collection"));
+        collection.getStyleClass().add("btn-secondary");
+        collection.setMinWidth(Region.USE_PREF_SIZE);
+        collection.setOnAction(e -> actions.collection());
+
+        // Secundario a proposito: en esta pantalla la accion principal es
+        // JUGAR un duelo, y el boton destacado tiene que ser uno solo.
+        // Si hoy hay a la venta cartas que te faltan en tus mazos, el boton lo
+        // dice y abre directamente esas (Discord, 15-10-2026: "ping the user
+        // whenever a card ... inside one of the decks, is available in the
+        // shop"). Sin fila nueva: la cabecera ya va justa con el sobre del dia.
+        int wantedNow = 0;
+        try {
+            wantedNow = forge.neo.quest.NeoQuestShop.wantedInShop();
+        } catch (final RuntimeException e) {
+            wantedNow = 0;
+        }
+        final Button shop = new Button(wantedNow > 0
+                ? NeoText.get("quest.shopWanted", wantedNow) : NeoText.get("quest.shop"));
+        shop.getStyleClass().add("btn-secondary");
+        if (wantedNow > 0) {
+            shop.getStyleClass().add("quest-shop-wanted");
+        }
+        shop.setMinWidth(Region.USE_PREF_SIZE);
+        final boolean toWanted = wantedNow > 0;
+        shop.setOnAction(e -> {
+            if (toWanted) {
+                actions.shopWanted();
+            } else {
+                actions.shop();
+            }
+        });
+
+        // El bazar es la OTRA forma de gastar creditos, y la que no da cartas.
+        // Va al lado de la tienda porque es la misma decision: en que me gasto
+        // lo que he ganado.
+        final Button bazaar = new Button(NeoText.get("quest.bazaar"));
+        bazaar.getStyleClass().add("btn-secondary");
+        bazaar.setMinWidth(Region.USE_PREF_SIZE);
+        bazaar.setOnAction(e -> actions.bazaar());
+
+        // Los torneos de draft, junto a la tienda y el bazar: tambien es en que
+        // te gastas los creditos. Abajo hay ademas su seccion, pero queda bajo
+        // los duelos y hay que bajar para verla.
+        final Button tournaments = new Button(NeoText.get(
+                forge.neo.quest.NeoQuestDrafts.current() != null ? "questDraft.buttonLive" : "questDraft.button"));
+        tournaments.getStyleClass().add("btn-secondary");
+        tournaments.setMinWidth(Region.USE_PREF_SIZE);
+        tournaments.setOnAction(e -> actions.tournaments());
+
+        final Region gap = new Region();
+        HBox.setHgrow(gap, Priority.ALWAYS);
+
+        final VBox texts = new VBox(2, caption, name, state);
+        final HBox row = new HBox(10, strip(deck), texts, gap,
+                edit, create, change, collection, shop, bazaar, tournaments);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.getStyleClass().add("stat-tile");
+        row.setPadding(new Insets(12, 18, 12, 18));
+        return row;
+    }
+
+    /** Un mazo como tira de cartas solapadas. Sin tierras: no dicen nada. */
+    private Region strip(final Deck deck) {
+        final double w = cardWidth * STRIP_CARD;
+        final HBox row = new HBox(-w * 0.5);
+        cardResizers.add(cw -> row.setSpacing(-cw * STRIP_CARD * 0.5));
+        row.setAlignment(Pos.CENTER_LEFT);
+        if (deck != null) {
+            int shown = 0;
+            for (final Map.Entry<PaperCard, Integer> e : deck.getMain()) {
+                if (e.getKey().getRules() != null && e.getKey().getRules().getType().isLand()) {
+                    continue;
+                }
+                final CardNode node = new CardNode(w);
+                cardResizers.add(cw -> node.setCardWidth(cw * STRIP_CARD));
+                node.setCard(CardView.getCardForUi(e.getKey()));
+                node.setRotationEnabled(false);
+                row.getChildren().add(node);
+                if (++shown >= 6) {
+                    break;
+                }
+            }
+        }
+        row.setMinWidth(Region.USE_PREF_SIZE);
+        return row;
+    }
+
+    // ---------------------------------------------------------------
+    // Los duelos
+    // ---------------------------------------------------------------
+
+    private Region duels(final Actions actions) {
+        final Label caption = new Label(NeoText.get("quest.duels"));
+        caption.getStyleClass().add("caption");
+
+        final HBox row = new HBox(14);
+        row.setAlignment(Pos.TOP_LEFT);
+
+        final List<QuestEventDuel> duels = NeoQuest.duels();
+        final boolean canPlay = NeoQuest.problemWith(NeoQuest.currentDeck()) == null;
+        for (final QuestEventDuel duel : duels) {
+            final Region tile = duelTile(duel, canPlay, actions);
+            HBox.setHgrow(tile, Priority.ALWAYS);
+            row.getChildren().add(tile);
+        }
+        if (duels.isEmpty()) {
+            final Label none = new Label(NeoText.get("quest.noDuels"));
+            none.getStyleClass().add("home-subtitle");
+            row.getChildren().add(none);
+        }
+        return new VBox(6, caption, row);
+    }
+
+    /**
+     * Un duelo.
+     *
+     * <p>Se ensenya <b>la carta del rival</b>: saber que te vas a enfrentar a
+     * Vrondiss dice mucho mas que leer su nombre, y es lo que hace que elegir
+     * duelo sea una decision y no un sorteo.
+     *
+     * <p><b>Pero solo es su comandante en una aventura de Commander.</b> En una
+     * de Estandar los duelos salen de {@code res/quest/duels}, donde el
+     * {@code Title} es el <b>personaje</b> del mazo — "Ajani Goldmane",
+     * "Chandra Nalaar" — que casi siempre existe como carta pero no es ningun
+     * comandante: ese formato no tiene zona de mando. Poner "SU COMANDANTE"
+     * encima era afirmar algo falso, y encima algo que el jugador sabe que es
+     * falso porque acaba de elegir Estandar.
+     *
+     * <p>Y cuando el personaje <b>no</b> es una carta ("King Goldemar", "Bamm
+     * Bamm Rubble") se ensenya la mejor carta de su mazo — ver
+     * {@link #faceOf}. El unico que se queda con el interrogante es el
+     * <b>duelo sorpresa</b>, y ahi si tiene sentido: es lo que se paga por que
+     * pueda tocarte cualquiera.
+     */
+    private Region duelTile(final QuestEventDuel duel, final boolean canPlay,
+                            final Actions actions) {
+        final VBox box = new VBox(8);
+        box.getStyleClass().addAll("duel-tile", styleFor(duel.getDifficulty()));
+        box.setPadding(new Insets(14));
+        box.setAlignment(Pos.TOP_CENTER);
+        box.setMinWidth(UiScale.px(190));
+
+        final Label badge = new Label(duel.showDifficulty()
+                ? difficultyLabel(duel.getDifficulty()) : NeoText.get("quest.surprise"));
+        badge.getStyleClass().addAll("duel-badge", styleFor(duel.getDifficulty()));
+
+        final Label name = new Label(NeoQuest.titleOf(duel));
+        name.getStyleClass().add("duel-name");
+        name.setWrapText(true);
+        name.setMaxWidth(UiScale.px(200));
+        name.setMinHeight(Region.USE_PREF_SIZE);
+
+        box.getChildren().add(badge);
+
+        // Al duelo sorpresa no se le pregunta: su gracia es no saber contra
+        // quien juegas, y ademas su mazo es el de OTRO rival prestado
+        // (getRandomOpponent copia el eventDeck del que le toque barajando),
+        // asi que ensenyar una carta suya seria mentir.
+        final CardView face = duel.showDifficulty() ? faceOf(duel) : null;
+
+        // La etiqueta va en LAS CUATRO casillas, tengan carta o no. Con la
+        // carta a secas se confunde con un premio ("pensaba que era la carta
+        // que ganaba si le gano"), y poniendola solo donde hay carta las otras
+        // quedaban un peldanyo mas arriba y la fila entera se veia rota.
+        final Label against = new Label(NeoText.get(NeoQuest.isActive()
+                && NeoQuest.modalidad() == NeoQuest.Modalidad.COMMANDER
+                ? "quest.theirCommander" : "quest.theirRival"));
+        against.getStyleClass().add("caption");
+        box.getChildren().add(against);
+        if (face != null) {
+            final CardNode node = new CardNode(cardWidth * DUEL_CARD);
+            node.setRotationEnabled(false);
+            cardResizers.add(cw -> node.setCardWidth(cw * DUEL_CARD));
+            node.setCard(face);
+            box.getChildren().add(node);
+        } else {
+            // Sin carta que ensenyar el hueco SI se ocupa igual: una casilla a
+            // media altura al lado de otras tres desnivela la fila.
+            final Label unknown = new Label("?");
+            unknown.getStyleClass().add("duel-unknown");
+            unknown.setAlignment(Pos.CENTER);
+            unknown.setPrefSize(cardWidth * DUEL_CARD, cardWidth * DUEL_CARD * CardNode.ASPECT);
+            cardResizers.add(cw -> unknown.setPrefSize(cw * DUEL_CARD, cw * DUEL_CARD * CardNode.ASPECT));
+            box.getChildren().add(unknown);
+        }
+        box.getChildren().add(name);
+
+        // Lo que da ganarlo, para que elegir rival sea elegir (Discord,
+        // 19-10-2026): el seguro paga menos y el dificil mas. Al sorpresa no se
+        // le pone cifra (diria su dificultad), solo que paga el doble.
+        final int credits = NeoQuest.duelCredits(duel);
+        if (credits > 0) {
+            final Label reward = new Label(NeoQuest.isSurprise(duel)
+                    ? NeoText.get("quest.duelReward.surprise")
+                    : NeoText.get("quest.duelReward", credits));
+            reward.getStyleClass().add("duel-reward");
+            // El sorpresa dobla la BASE, no los extras (QuestWinLoseController
+            // .awardEventCredits): "paga el doble" prometia mas de lo que da y en
+            // total sale ~1,5 veces (Discord, 06-11-2026).
+            reward.setTooltip(new javafx.scene.control.Tooltip(NeoText.get(NeoQuest.isSurprise(duel)
+                    ? "quest.duelReward.surprise.tip" : "quest.duelReward.tip")));
+            box.getChildren().add(reward);
+        }
+
+        final Button play = new Button(NeoText.get("home.play"));
+        play.getStyleClass().add("btn-primary");
+        play.setMaxWidth(Double.MAX_VALUE);
+        play.setDisable(!canPlay);
+        play.setOnAction(e -> actions.duel(duel));
+        box.getChildren().add(play);
+        return box;
+    }
+
+    // ---------------------------------------------------------------
+    // Los desafios
+    // ---------------------------------------------------------------
+
+    /**
+     * Los desafios abiertos.
+     *
+     * <p>Un desafio no es un duelo mas: es una <b>situacion preparada</b> con
+     * su propio guion — el rival puede empezar con 25 o 40 vidas y con cartas
+     * ya en la mesa, y tu tambien. Forge trae 37 y llevaban desde el primer dia
+     * sin abrirse.
+     *
+     * <p>La seccion se ensenya <b>tambien cuando esta vacia</b>, y ahi esta la
+     * gracia: dice cuantas victorias faltan para el siguiente. "No hay
+     * desafios" a secas parece que el modo no los tiene; "te faltan 3
+     * victorias" es una razon para seguir jugando.
+     */
+    /**
+     * Los torneos de draft (13-10-2026): una linea y un boton. El torneo
+     * entero vive en su pantalla ({@link QuestTournamentScreen}); aqui solo se
+     * dice si hay uno en curso o cuantos hay abiertos, que es lo que hace
+     * volver a mirar.
+     */
+    private Region tournaments(final Actions actions) {
+        final Label caption = new Label(NeoText.get("questDraft.caption"));
+        caption.getStyleClass().add("caption");
+        final forge.gamemodes.quest.QuestEventDraft mine = forge.neo.quest.NeoQuestDrafts.current();
+        final String line;
+        final String button;
+        if (mine != null) {
+            line = NeoText.get("questDraft.inProgress", mine.getTitle());
+            button = NeoText.get("questDraft.continue");
+        } else {
+            final List<forge.gamemodes.quest.QuestEventDraft> open = forge.neo.quest.NeoQuestDrafts.offered();
+            line = open.isEmpty()
+                    ? NeoText.get("questDraft.noneShort")
+                    : NeoText.get(open.size() == 1 ? "questDraft.openOne" : "questDraft.openMany", open.size());
+            button = NeoText.get("questDraft.see");
+        }
+        final Label text = new Label(line);
+        text.getStyleClass().add("home-subtitle");
+        text.setWrapText(true);
+        final Button go = new Button(button);
+        go.getStyleClass().add("btn-secondary");
+        go.setMinWidth(Region.USE_PREF_SIZE);
+        go.setOnAction(e -> actions.tournaments());
+        final Region gap = new Region();
+        HBox.setHgrow(gap, Priority.ALWAYS);
+        final HBox row = new HBox(14, text, gap, go);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.getStyleClass().add("stat-tile");
+        row.setPadding(new Insets(12, 18, 12, 18));
+        return new VBox(6, caption, row);
+    }
+
+    /**
+     * El torneo de la Quest (23-10-2026): lo que cuesta y lo que da con tu
+     * nivel, o que tienes uno a medias. Lo demas, en {@link QuestCupScreen}.
+     */
+    private Region cup(final Actions actions) {
+        final Label caption = new Label(NeoText.get("cup.caption"));
+        caption.getStyleClass().add("caption");
+        final forge.neo.quest.NeoQuestCup.Terms t = forge.neo.quest.NeoQuestCup.terms();
+        final forge.neo.quest.NeoQuestCup.Stage stage = forge.neo.quest.NeoQuestCup.stage();
+        final String line = stage == forge.neo.quest.NeoQuestCup.Stage.OFFER
+                ? NeoText.get(t.commander ? "cup.line.commander" : "cup.line.standard", t.fee,
+                        QuestCupScreen.prizeText(t))
+                : NeoText.get("cup.line.playing");
+        final Label text = new Label(line);
+        text.getStyleClass().add("home-subtitle");
+        text.setWrapText(true);
+        final Button go = new Button(NeoText.get("cup.see"));
+        go.setId("quest-cup-see");
+        go.getStyleClass().add(stage == forge.neo.quest.NeoQuestCup.Stage.OFFER ? "btn-secondary" : "btn-primary");
+        go.setMinWidth(Region.USE_PREF_SIZE);
+        go.setOnAction(e -> actions.cup());
+        final Region gap = new Region();
+        HBox.setHgrow(gap, Priority.ALWAYS);
+        final HBox row = new HBox(14, text, gap, go);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.getStyleClass().add("stat-tile");
+        row.setPadding(new Insets(12, 18, 12, 18));
+        return new VBox(6, caption, row);
+    }
+
+    /**
+     * El Coliseo (13-10-2026), solo en una Quest de Commander: una linea con
+     * lo que cuesta y lo que da, y un boton. Lo que es y contra quien se
+     * explica en su pantalla ({@link ColosseumScreen}), antes de pagar.
+     */
+    private Region colosseum(final Actions actions) {
+        final Label caption = new Label(NeoText.get("colosseum.caption"));
+        caption.getStyleClass().add("caption");
+        final Label text = new Label(NeoText.get(forge.neo.quest.NeoColosseum.collectorPrize() ? "colosseum.line" : "colosseum.lineBooster",
+                forge.neo.quest.NeoColosseum.fee(),
+                forge.neo.quest.NeoColosseum.prizeCredits()));
+        text.getStyleClass().add("home-subtitle");
+        text.setWrapText(true);
+        final Button go = new Button(NeoText.get("colosseum.see"));
+        go.getStyleClass().add("btn-secondary");
+        go.setMinWidth(Region.USE_PREF_SIZE);
+        go.setOnAction(e -> actions.colosseum());
+        final Region gap = new Region();
+        HBox.setHgrow(gap, Priority.ALWAYS);
+        final HBox row = new HBox(14, text, gap, go);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.getStyleClass().add("stat-tile");
+        row.setPadding(new Insets(12, 18, 12, 18));
+        return new VBox(6, caption, row);
+    }
+
+    /**
+     * El sobre del dia (14-10-2026): de que expansion es el de hoy y el boton
+     * de abrirlo. Solo sale mientras esta por abrir. Null si esta Quest no
+     * tiene ninguna expansion con sobre (no hay nada que ofrecer).
+     */
+    private Region dailyPack(final Actions actions) {
+        final forge.card.CardEdition today = forge.neo.quest.NeoDailyPack.todaysEdition();
+        if (today == null) {
+            return null;
+        }
+        final Label caption = new Label(NeoText.get("daily.caption"));
+        caption.getStyleClass().add("caption");
+        final Label text = new Label(NeoText.get("daily.ready", today.getName()));
+        text.getStyleClass().add("home-subtitle");
+        text.setWrapText(true);
+        final Button open = new Button(NeoText.get("daily.open"));
+        open.getStyleClass().add("btn-primary");
+        open.setMinWidth(Region.USE_PREF_SIZE);
+        open.setId("daily-open");
+        // Una vez: el segundo clic llegaria con el sobre ya abierto.
+        open.setOnAction(e -> {
+            open.setDisable(true);
+            actions.dailyPack();
+        });
+        final VBox words = new VBox(2, caption, text);
+        HBox.setHgrow(words, Priority.SOMETIMES);
+        final HBox row = new HBox(14, words, open);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.getStyleClass().add("stat-tile");
+        row.setPadding(new Insets(6, 12, 6, 14));
+        // Compacta: comparte fila con el titulo y los botones de la cabecera.
+        row.setMaxWidth(UiScale.px(620));
+        return row;
+    }
+
+    /** El sobre del dia no ha salido (todas las expansiones probadas revientan). */
+    public void showDailyPackFailed(final String why) {
+        overlay.setOnBackgroundClick(overlay::hide);
+        // El motivo, en pequenyo y sin traducir: es para mandarmelo en una captura.
+        final String text = NeoText.get("daily.failed") + (why == null ? "" : "\n\n(" + why + ")");
+        overlay.show(new ConfirmDialog(NeoText.get("daily.caption"), text,
+                List.of(NeoText.get("common.accept")), 0, i -> overlay.hide()));
+    }
+
+    /**
+     * Lo que ha salido del sobre del dia, como en la tienda ({@link PackOpening}).
+     * Se llama recien montada la pantalla, asi que puede no tener medidas
+     * todavia: entonces espera al primer layout (como {@code ColosseumScreen}).
+     */
+    public void showDailyPack(final forge.neo.quest.NeoDailyPack.Claimed claimed) {
+        if (claimed == null) {
+            return;
+        }
+        if (getWidth() <= 0 || getHeight() <= 0) {
+            layoutBoundsProperty().addListener(new javafx.beans.value.ChangeListener<javafx.geometry.Bounds>() {
+                @Override
+                public void changed(final javafx.beans.value.ObservableValue<? extends javafx.geometry.Bounds> o,
+                                    final javafx.geometry.Bounds was, final javafx.geometry.Bounds now) {
+                    if (now.getWidth() > 0 && now.getHeight() > 0) {
+                        layoutBoundsProperty().removeListener(this);
+                        showDailyPack(claimed);
+                    }
+                }
+            });
+            return;
+        }
+        final forge.neo.quest.NeoQuestShop.Opened opened = claimed.opened;
+        overlay.setOnBackgroundClick(overlay::hide);
+        final PackOpening panel = new PackOpening(
+                NeoText.get("daily.openedTitle", claimed.edition.getName()),
+                NeoText.get("daily.openedDetail", opened.getCards().size(), opened.getNewCount()),
+                opened.getCards(), opened::isNew, getWidth(), getHeight(), overlay::hide);
+        panel.setWanted(opened::wantedIn);
+        panel.setValue(forge.neo.quest.NeoQuestSell::priceOf);
+        overlay.show(panel);
+    }
+
+    /**
+     * DESBLOQUEAR EXPANSIONES (Discord, 23-10-2026, como el Forge de siempre):
+     * solo en una Quest con expansiones elegidas. Cuantos desbloqueos tienes, o
+     * cuantas victorias faltan, y el boton. Ver {@link forge.neo.quest.NeoQuestUnlock}.
+     */
+    private Region unlock(final Actions actions) {
+        final Label caption = new Label(NeoText.get("quest.unlock.caption"));
+        caption.getStyleClass().add("caption");
+        final int tokens = forge.neo.quest.NeoQuestUnlock.tokens();
+        final String line = tokens > 0
+                ? NeoText.get(tokens == 1 ? "quest.unlock.has.one" : "quest.unlock.has.many", tokens,
+                        forge.neo.quest.NeoQuestUnlock.used())
+                : NeoText.get("quest.unlock.wait", forge.neo.quest.NeoQuestUnlock.winsPerUnlock(),
+                        forge.neo.quest.NeoQuestUnlock.winsToNext());
+        final Label text = new Label(line);
+        text.getStyleClass().add("home-subtitle");
+        text.setWrapText(true);
+        final Button go = new Button(NeoText.get("quest.unlock.see"));
+        go.setId("quest-unlock-see");
+        go.getStyleClass().add(tokens > 0 ? "btn-primary" : "btn-secondary");
+        go.setMinWidth(Region.USE_PREF_SIZE);
+        go.setDisable(tokens < 1);
+        go.setOnAction(e -> showUnlockOffers(actions));
+        final Region gap = new Region();
+        HBox.setHgrow(gap, Priority.ALWAYS);
+        final HBox row = new HBox(14, text, gap, go);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.getStyleClass().add("stat-tile");
+        row.setPadding(new Insets(12, 18, 12, 18));
+        return new VBox(6, caption, row);
+    }
+
+    /** La vitrina: ver {@link QuestTrophyCase}. */
+    void showTrophyCase() {
+        overlay.setOnBackgroundClick(overlay::hide);
+        overlay.show(new QuestTrophyCase(overlay::hide,
+                Math.min(UiScale.px(900), Math.max(420, getWidth() * 0.9)), getHeight()));
+    }
+
+    /** La lista: las mas cercanas en fecha primero, con su precio. */
+    void showUnlockOffers(final Actions actions) {
+        final Label title = new Label(NeoText.get("quest.unlock.title"));
+        title.getStyleClass().add("dialog-title");
+        final Label sub = new Label(NeoText.get("quest.unlock.sub", forge.neo.quest.NeoQuest.credits()));
+        sub.getStyleClass().add("home-subtitle");
+        sub.setWrapText(true);
+        final VBox list = new VBox(6);
+        for (final forge.neo.quest.NeoQuestUnlock.Offer o : forge.neo.quest.NeoQuestUnlock.offers()) {
+            final String year = o.edition.getDate() == null ? ""
+                    : " (" + new java.text.SimpleDateFormat("yyyy").format(o.edition.getDate()) + ")";
+            final Label name = new Label(o.edition.getName() + year + "  ·  " + o.edition.getCode());
+            name.getStyleClass().add("quest-deck-name");
+            final Label price = new Label(NeoText.get("quest.unlock.price", o.price));
+            price.getStyleClass().add("home-subtitle");
+            final boolean afford = forge.neo.quest.NeoQuest.credits() >= o.price;
+            final Button pick = new Button(afford ? NeoText.get("quest.unlock.pick")
+                    : NeoText.get("quest.unlock.cantAfford", o.price - forge.neo.quest.NeoQuest.credits()));
+            pick.getStyleClass().add(afford ? "btn-primary" : "btn-secondary");
+            pick.setDisable(!afford);
+            pick.setMinWidth(Region.USE_PREF_SIZE);
+            pick.setOnAction(e -> confirmUnlock(o, actions));
+            final Region gap = new Region();
+            HBox.setHgrow(gap, Priority.ALWAYS);
+            final HBox row = new HBox(12, new VBox(2, name, price), gap, pick);
+            row.setAlignment(Pos.CENTER_LEFT);
+            row.getStyleClass().add("stat-tile");
+            row.setPadding(new Insets(8, 14, 8, 14));
+            list.getChildren().add(row);
+        }
+        final javafx.scene.control.ScrollPane sp = new javafx.scene.control.ScrollPane(list);
+        sp.getStyleClass().add("dialog-scroll");
+        sp.setFitToWidth(true);
+        sp.setPrefViewportHeight(Math.max(240, getHeight() * 0.6));
+        final Button close = new Button(NeoText.get("common.back"));
+        close.getStyleClass().add("btn-secondary");
+        close.setOnAction(e -> overlay.hide());
+        final HBox bottom = new HBox(close);
+        bottom.setAlignment(Pos.CENTER_RIGHT);
+        final VBox box = new VBox(10, title, sub, sp, bottom);
+        box.getStyleClass().add("dialog");
+        box.setPadding(new Insets(18));
+        box.setMaxWidth(Math.min(UiScale.px(760), Math.max(400, getWidth() * 0.86)));
+        box.setMaxHeight(Region.USE_PREF_SIZE);
+        overlay.setOnBackgroundClick(overlay::hide);
+        overlay.show(box);
+    }
+
+    private void confirmUnlock(final forge.neo.quest.NeoQuestUnlock.Offer o, final Actions actions) {
+        overlay.show(new ConfirmDialog(NeoText.get("quest.unlock.confirmTitle", o.edition.getName()),
+                NeoText.get("quest.unlock.confirmBody", o.price, forge.neo.quest.NeoQuest.credits() - o.price,
+                        o.edition.getName()),
+                java.util.List.of(NeoText.get("quest.unlock.pick"), NeoText.get("common.cancel")), 1, i -> {
+                    if (i != 0) {
+                        showUnlockOffers(actions);
+                        return;
+                    }
+                    final forge.neo.quest.NeoQuestUnlock.Result r = forge.neo.quest.NeoQuestUnlock.unlock(o);
+                    if (r == null) {
+                        overlay.hide();
+                        actions.refresh();
+                        return;
+                    }
+                    final java.util.List<forge.item.PaperCard> cards = new java.util.ArrayList<>();
+                    final java.util.Set<forge.item.PaperCard> fresh = new java.util.HashSet<>();
+                    for (final forge.neo.quest.NeoQuestShop.Opened p : r.packs) {
+                        for (final forge.item.PaperCard c : p.getCards()) {
+                            cards.add(c);
+                            if (p.isNew(c)) {
+                                fresh.add(c);
+                            }
+                        }
+                    }
+                    final java.util.List<String> notes = new java.util.ArrayList<>();
+                    if (r.packs.isEmpty()) {
+                        notes.add(NeoText.get("quest.unlock.noPacks"));
+                    }
+                    overlay.setOnBackgroundClick(null);
+                    overlay.show(CardHaul.panel(NeoText.get("quest.unlock.doneTitle", r.edition.getName()),
+                            NeoText.get("quest.unlock.doneSub"), cards, fresh::contains, notes, cardWidth,
+                            getWidth(), getHeight(), () -> {
+                                overlay.hide();
+                                actions.refresh();
+                            }));
+                }));
+    }
+
+    private Region challenges(final Actions actions) {
+        final Label caption = new Label(NeoText.get("quest.challenges"));
+        caption.getStyleClass().add("caption");
+
+        final List<QuestEventChallenge> open = NeoQuest.challenges();
+        final boolean canPlay = NeoQuest.problemWith(NeoQuest.currentDeck()) == null;
+
+        final javafx.scene.layout.FlowPane row = new javafx.scene.layout.FlowPane(14, 14);
+        row.setAlignment(Pos.TOP_LEFT);
+        for (final QuestEventChallenge c : open) {
+            row.getChildren().add(challengeTile(c, canPlay, actions));
+        }
+        if (open.isEmpty()) {
+            final int missing = NeoQuest.winsToNextChallenge();
+            final Label none = new Label(missing > 0
+                    ? NeoText.get("quest.nextChallenge", missing)
+                    : NeoText.get("quest.noChallenges"));
+            none.getStyleClass().add("home-subtitle");
+            none.setWrapText(true);
+            row.getChildren().add(none);
+        }
+        return new VBox(6, caption, row);
+    }
+
+    /**
+     * Un desafio.
+     *
+     * <p>Lleva lo que hace falta para decidir si entrar: su descripcion (que la
+     * escribe el fichero y explica la situacion), la vida del rival cuando no
+     * es la normal, la recompensa, y <b>si se puede repetir</b>. Lo ultimo
+     * importa mas de lo que parece: la mayoria se juegan UNA vez en toda la
+     * aventura, y eso hay que saberlo ANTES de entrar con el mazo a medio
+     * montar.
+     */
+    private Region challengeTile(final QuestEventChallenge c, final boolean canPlay,
+                                 final Actions actions) {
+        final VBox box = new VBox(6);
+        box.getStyleClass().addAll("duel-tile", styleFor(c.getDifficulty()));
+        box.setPadding(new Insets(14));
+        box.setAlignment(Pos.TOP_LEFT);
+        box.setPrefWidth(UiScale.px(330));
+        box.setMinWidth(UiScale.px(300));
+
+        final Label badge = new Label(difficultyLabel(c.getDifficulty()));
+        badge.getStyleClass().addAll("duel-badge", styleFor(c.getDifficulty()));
+
+        final Label name = new Label(safe(c.getTitle()));
+        name.getStyleClass().add("duel-name");
+        name.setWrapText(true);
+        name.setMaxWidth(UiScale.px(300));
+        name.setMinHeight(Region.USE_PREF_SIZE);
+
+        final Label desc = new Label(safe(c.getDescription()));
+        desc.getStyleClass().add("home-subtitle");
+        desc.setWrapText(true);
+        desc.setMaxWidth(UiScale.px(300));
+        desc.setMinHeight(Region.USE_PREF_SIZE);
+
+        // Lo que hace distinto a ESTE desafio, en una linea. La vida del rival
+        // solo se dice si no es la normal: repetir "20 vidas" en los treinta
+        // que la tienen es ruido.
+        final StringBuilder facts = new StringBuilder();
+        final int life = c.getAILife();
+        if (life > 0) {
+            facts.append(NeoText.get("quest.challenge.life", life));
+        }
+        if (c.getCreditsReward() > 0) {
+            if (facts.length() > 0) {
+                facts.append("  ·  ");
+            }
+            facts.append(NeoText.get("quest.challenge.reward", c.getCreditsReward()));
+        }
+        if (!c.isRepeatable()) {
+            if (facts.length() > 0) {
+                facts.append("  ·  ");
+            }
+            facts.append(NeoText.get("quest.challenge.once"));
+        }
+        final Label info = new Label(facts.toString());
+        info.getStyleClass().add("caption");
+        info.setWrapText(true);
+        info.setMaxWidth(UiScale.px(300));
+        info.setMinHeight(Region.USE_PREF_SIZE);
+
+        final Button play = new Button(NeoText.get("home.play"));
+        play.getStyleClass().add("btn-primary");
+        play.setMaxWidth(Double.MAX_VALUE);
+        play.setDisable(!canPlay);
+        play.setOnAction(e -> actions.challenge(c));
+
+        box.getChildren().addAll(badge, name, desc, info, play);
+        return box;
+    }
+
+    /**
+     * La carta con la que se presenta a un rival.
+     *
+     * <p>Cual es y por que la elige asi lo cuenta {@link DuelFace}, que vive en
+     * {@code forge.neo.quest} y no en la pantalla a proposito: eso permite
+     * recorrer los 1.145 duelos sin ventana y comprobar que a ninguno le falta
+     * cara ({@code run.cmd questcheck}).
+     */
+    private static CardView faceOf(final QuestEventDuel duel) {
+        final PaperCard pc = DuelFace.of(duel);
+        return pc == null ? null : CardView.getCardForUi(pc);
+    }
+
+    private static String difficultyLabel(final QuestEventDifficulty d) {
+        if (d == null) {
+            return NeoText.get("quest.diff.easy");
+        }
+        switch (d) {
+            case MEDIUM: return NeoText.get("quest.diff.medium");
+            case HARD: return NeoText.get("quest.diff.hard");
+            case EXPERT: return NeoText.get("quest.diff.expert");
+            case WILD: return NeoText.get("quest.diff.wild");
+            default: return NeoText.get("quest.diff.easy");
+        }
+    }
+
+    private static String safe(final String s) {
+        return s == null ? "" : s;
+    }
+
+    /** Las imagenes llegan de Scryfall en segundo plano: hay que repedirlas. */
+    public void refreshArt() {
+        CardNode.refreshAllIn(this);
+    }
+}

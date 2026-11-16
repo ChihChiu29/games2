@@ -1,0 +1,170 @@
+package forge.neo.card;
+
+import java.io.File;
+import java.text.Normalizer;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+import forge.ImageKeys;
+import forge.item.PaperCard;
+import forge.localinstance.properties.ForgeConstants;
+import forge.util.ImageUtil;
+
+/**
+ * EL ARTE SIN CONEXION: una imagen por NOMBRE de carta, bajada de antemano.
+ *
+ * <p>Sale de {@code tools/bajar-arte.py} del proyecto Android (decision 93 de
+ * alli): ~36.000 cartas con su recorte de arte, ~3 GB, en
+ * {@code <cache>/pics/arte/<letra>/<Nombre>.jpg} y {@code .artcrop.jpg}. Sirve
+ * para jugar donde no hay internet - el pueblo con la portable, un vuelo con el
+ * movil - con foto en vez de la carta dibujada.
+ *
+ * <p><b>Va DETRAS de la cache normal.</b> Si la impresion exacta (o la
+ * traducida) esta en disco, gana ella: esto solo contesta cuando no hay otra
+ * cosa. Y no se apoya en el "sin edicion" que ya trae
+ * {@code ImageKeys.getImageFile}: ese camino lanza una busqueda asincrona por
+ * {@code setLookup} que puede apuntar la clave en {@code missingCards} DESPUES
+ * de haberla encontrado, y desde ahi la carta se queda sin imagen.
+ *
+ * <p>Clase pura, sin JavaFX, porque la usan las DOS interfaces: el
+ * {@code CardImages} de aqui y el de Android. Y el nombre del fichero lo
+ * calcula igual el script que lo baja: <b>si se toca {@link #fileName} o
+ * {@link #folder}, se toca {@code nombre_fichero} y {@code carpeta} en
+ * bajar-arte.py</b>.
+ */
+public final class OfflineArt {
+
+    private OfflineArt() {
+    }
+
+    /**
+     * Lo ya mirado, con "" para "no esta". La mesa pide la misma carta muchas
+     * veces, y 70.000 ficheros en un disco USB - o en el almacenamiento
+     * compartido de Android - no se miran gratis. El arte se copia con el
+     * programa cerrado, asi que recordar un "no esta" toda la sesion no pierde
+     * nada.
+     */
+    private static final Map<String, String> SEEN = new ConcurrentHashMap<>();
+
+    /**
+     * Olvida lo mirado.
+     *
+     * <p><b>Por que hace falta.</b> Esta clase recuerda los "no esta" durante
+     * toda la sesion, y eso era gratis mientras el arte solo se podia copiar
+     * con el programa cerrado. Desde que se baja DESDE DENTRO
+     * ({@code ArtDownload}) deja de serlo: sin esto, el jugador se baja dos
+     * gigas, se queda mirando la mesa y las cartas siguen dibujadas — porque
+     * cada una de ellas ya esta apuntada como que no estaba.
+     *
+     * <p>Lo caza {@code run.cmd artecheck -Dneo.art.testLimit=3}: bajaba tres
+     * y el lector encontraba cero.
+     */
+    public static void forget() {
+        SEEN.clear();
+    }
+
+    /** La carpeta del arte: hermana de {@code pics/cards}. */
+    public static File dir() {
+        return new File(ForgeConstants.CACHE_DIR, "pics" + File.separator + "arte");
+    }
+
+    /**
+     * TUS IMAGENES: la carpeta {@code pics/own}, hermana de {@code arte} y con
+     * sus mismos nombres ({@code own/<letra>/<Nombre>.jpg} y {@code .artcrop.jpg}).
+     *
+     * <p>Al reves que el arte, esta <b>gana a todo</b>: a la impresion exacta
+     * bajada y a la traducida. Pedido en Discord (04-11-2026) por quien metio
+     * 12.000 cartas en su idioma en {@code arte}: cada carta que salia se bajaba
+     * en ingles a {@code cards} y le tapaba la suya. Lo que alguien pone a mano
+     * en una carpeta suya es lo que quiere ver; si no esta, todo sigue igual.
+     */
+    public static File ownDir() {
+        return new File(ForgeConstants.CACHE_DIR, "pics" + File.separator + "own");
+    }
+
+    /** La imagen propia de esa carta, si la hay. Ver {@link #ownDir()}. */
+    public static File own(final String imageKey, final boolean crop) {
+        return find(imageKey, crop, ownDir());
+    }
+
+    /**
+     * El fichero de esa carta, si esta.
+     *
+     * @param imageKey clave de busqueda del motor, {@code c:Nombre|SET|1}, con
+     *                 {@code $alt} si es la cara de atras
+     * @param crop     el recorte de arte en vez de la carta entera
+     */
+    public static File find(final String imageKey, final boolean crop) {
+        return find(imageKey, crop, dir());
+    }
+
+    /**
+     * Lo mismo en otra carpeta: la de una calidad de imagen del escritorio
+     * ({@code ImageQuality.artDir}, {@code pics/arte-large}...). Android usa
+     * siempre la de arriba.
+     */
+    public static File find(final String imageKey, final boolean crop, final File dir) {
+        if (imageKey == null || !imageKey.startsWith(ImageKeys.CARD_PREFIX) || dir == null) {
+            return null;
+        }
+        final String key = (crop ? imageKey + "#crop" : imageKey) + "@" + dir.getName();
+        final String seen = SEEN.computeIfAbsent(key, k -> {
+            final File f = lookup(imageKey, crop, dir);
+            return f == null ? "" : f.getPath();
+        });
+        return seen.isEmpty() ? null : new File(seen);
+    }
+
+    private static File lookup(final String imageKey, final boolean crop, final File dir) {
+        if (!dir.isDirectory()) {
+            return null;
+        }
+        final String name = cardName(imageKey);
+        if (name == null) {
+            return null;
+        }
+        final String clean = fileName(name);
+        if (clean.isEmpty()) {
+            return null;
+        }
+        final File f = new File(new File(dir, folder(clean)), clean + (crop ? ".artcrop.jpg" : ".jpg"));
+        return f.exists() ? f : null;
+    }
+
+    /**
+     * El nombre con el que se guardo la imagen.
+     *
+     * <p>La trasera de una doble cara, flip o meld tiene su propia foto con su
+     * propio nombre; lo demas - partidas, aventuras - es una sola foto con el
+     * nombre de arriba, que es el que Scryfall da a la primera cara.
+     */
+    static String cardName(final String imageKey) {
+        try {
+            final PaperCard pc = ImageUtil.getPaperCardFromImageKey(imageKey);
+            if (pc == null) {
+                return null;
+            }
+            return imageKey.endsWith(ImageKeys.BACKFACE_POSTFIX)
+                    ? ImageUtil.getNameToUse(pc, "back")
+                    : pc.getRules().getMainPart().getName();
+        } catch (final RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** Sin tildes y sin lo que Windows o Android no admiten en un nombre. */
+    public static String fileName(final String name) {
+        String n = Normalizer.normalize(name, Normalizer.Form.NFKD).replaceAll("\\p{Mn}+", "");
+        n = n.replaceAll("[\"*/:<>?\\\\|]", "").trim();
+        while (n.endsWith(".")) {
+            n = n.substring(0, n.length() - 1);
+        }
+        return n;
+    }
+
+    /** Una carpeta por inicial: 70.000 ficheros en una sola van lentos. */
+    public static String folder(final String clean) {
+        final char c = Character.toLowerCase(clean.charAt(0));
+        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ? String.valueOf(c) : "_";
+    }
+}

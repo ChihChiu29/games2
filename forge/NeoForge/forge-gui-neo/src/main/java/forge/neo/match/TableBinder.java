@@ -1,0 +1,1120 @@
+package forge.neo.match;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import forge.card.mana.ManaAtom;
+import forge.game.GameEntityView;
+import forge.game.GameView;
+import forge.game.card.CardView;
+import forge.game.combat.CombatView;
+import forge.game.player.PlayerView;
+import forge.game.spellability.StackItemView;
+import forge.game.zone.ZoneType;
+import forge.neo.ui.CombatOverlay;
+import forge.neo.ui.TableScreen;
+import forge.util.collect.FCollectionView;
+import javafx.application.Platform;
+
+/**
+ * Vuelca el estado real de la partida en la mesa.
+ *
+ * <p>Es TODO el trabajo de la fase 3: la pantalla ya estaba hecha, aqui solo se
+ * cambia de donde salen los datos. En vez de repartir cartas del mazo a mano,
+ * se leen del {@link GameView} que el motor nos empuja.
+ *
+ * <p>Dos reglas que respeta:
+ * <ul>
+ *   <li><b>Solo lee vistas.</b> Nunca toca el estado vivo del motor. Todo sale
+ *       de {@code GameView}, {@code PlayerView} y {@code CardView}.</li>
+ *   <li><b>Refresco agrupado.</b> El motor avisa de cambios decenas de veces
+ *       por turno. Repintar en cada aviso tiraria los fps, asi que se marca
+ *       "hay que refrescar" y se hace una sola pasada en el siguiente pulso de
+ *       JavaFX.</li>
+ * </ul>
+ */
+public class TableBinder {
+
+    private final TableScreen table;
+
+    /** Evita repintar N veces seguidas: una pasada por pulso basta. */
+    private final AtomicBoolean pending = new AtomicBoolean(false);
+
+    private volatile GameView gameView;
+    private volatile PlayerView self;
+
+    /**
+     * La interfaz que conduce esta partida.
+     *
+     * <p>Lo necesita el menu de pausa: es quien sabe salir de un match en curso
+     * sin dejar al motor bloqueado.
+     */
+    private volatile NeoMatchUI matchUi;
+
+    public void setMatchUi(final NeoMatchUI ui) {
+        this.matchUi = ui;
+    }
+
+    public NeoMatchUI getMatchUi() {
+        return matchUi;
+    }
+
+    /** Por que se ha dejado esta mesa a la fuerza ({@link #fireAbandoned}). */
+    public enum Abandon {
+        /** El motor se ha roto: no lo ha decidido el jugador. */
+        CRASH,
+        /** El jugador ha pedido salir y el motor no ha cerrado a tiempo. */
+        QUIT,
+        /** El jugador ha salido antes de que empezara la partida. */
+        BEFORE_START
+    }
+
+    private volatile boolean abandoned;
+    private volatile java.util.function.Consumer<Abandon> onAbandoned;
+
+    /**
+     * Quien lanzo la partida y tiene algo en juego (la entrada del Coliseo)
+     * quiere saber si la mesa se abandona, y por que, EN ESE MOMENTO: el hilo
+     * del motor puede no volver nunca (motor roto), asi que esperar a que
+     * vuelva no vale. Se llama una vez, en el hilo de interfaz.
+     */
+    public void setOnAbandoned(final java.util.function.Consumer<Abandon> listener) {
+        this.onAbandoned = listener;
+    }
+
+    /** Si esta mesa se ha dejado a la fuerza (ver {@link Abandon}). */
+    public boolean isAbandoned() {
+        return abandoned;
+    }
+
+    /** Lo llama {@code NeoApp} al dejar esta mesa a la fuerza. */
+    public void fireAbandoned(final Abandon why) {
+        abandoned = true;
+        final java.util.function.Consumer<Abandon> listener = onAbandoned;
+        onAbandoned = null;
+        if (listener != null) {
+            listener.accept(why);
+        }
+    }
+
+    /** Rival que se esta viendo arriba. Con mas de uno se elige por pestanyas. */
+    private volatile PlayerView viewedOpponent;
+
+    /**
+     * A quien le tocaba la ultima vez que se repinto.
+     *
+     * <p>Sirve para cambiar de pestanya SOLO cuando cambia el turno. Si se
+     * siguiera al jugador activo en cada refresco, clicar una pestanya para
+     * mirar a otro rival no serviria de nada: volveria sola al momento.
+     */
+    private volatile PlayerView lastTurnPlayer;
+
+    public TableBinder(final TableScreen table) {
+        this.table = table;
+        table.setOnOpponentSelected(p -> {
+            viewedOpponent = p;
+            // La pestanya no solo elige a quien MIRAS: mientras declaras
+            // atacantes elige tambien a quien ATACAS. Ver NeoMatchUI.
+            final NeoMatchUI ui = matchUi;
+            if (ui != null) {
+                ui.onOpponentFocused(p);
+            }
+            requestRefresh();
+        });
+    }
+
+    /**
+     * Quien se sienta abajo. En una partida normal es el jugador local; como
+     * espectador no hay ninguno, asi que se coge el primero.
+     */
+    public TableScreen getTable() {
+        return table;
+    }
+
+    public void setSelf(final PlayerView player) {
+        this.self = player;
+        requestRefresh();
+    }
+
+    public void setGameView(final GameView view) {
+        // Cada partida de un Bo3 (draft/sellado con banquillo) es un Game
+        // NUEVO del motor, con sus propios PlayerView — y sus ids de
+        // asiento se REPARTEN OTRA VEZ desde 0 (Game.java: "int plId = 0"
+        // local al constructor). TrackableObject.equals() compara SOLO por
+        // id+clase, no por a que partida pertenece, asi que el PlayerView
+        // congelado del rival al final de la partida anterior "es igual"
+        // al del rival de la partida nueva. Sin este aviso, viewedOpponent/
+        // shownOpponent/lastTurnPlayer se quedaban apuntando al objeto
+        // VIEJO — congelado en el ultimo estado de la partida anterior — y
+        // el campo del rival enseñaba su mesa de la partida de antes hasta
+        // que le tocaba turno: es updateTurn, no apply(), quien primero le
+        // asigna el PlayerView nuevo (sin pasar por el equals que atrapaba
+        // al viejo), y por eso el fallo se veia "arreglarse solo" justo al
+        // acabar tu primer turno. GameView.getId() sale de Game.id =
+        // nextId(), un contador ESTATICO de toda la JVM: a diferencia de
+        // los ids de jugador, no se reparte de cero en cada partida, asi
+        // que sirve para distinguir "sigue siendo la misma partida" de
+        // "partida nueva del mismo partido".
+        final boolean newGame = view != null && (gameView == null || gameView.getId() != view.getId());
+        this.gameView = view;
+        if (newGame) {
+            viewedOpponent = null;
+            shownOpponent = null;
+            lastTurnPlayer = null;
+        }
+        requestRefresh();
+    }
+
+    /** Texto del prompt que el motor quiere mostrar al jugador. */
+    public void setPrompt(final String message) {
+        try {
+            Platform.runLater(() -> table.setPrompt(message));
+        } catch (final IllegalStateException ignored) {
+            // sin ventana
+        }
+    }
+
+    /** Marca que hay que repintar. Se puede llamar desde cualquier hilo. */
+    public void requestRefresh() {
+        if (pending.compareAndSet(false, true)) {
+            try {
+                Platform.runLater(this::apply);
+            } catch (final IllegalStateException e) {
+                // El toolkit no esta arrancado (modo consola): nada que pintar.
+                pending.set(false);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+
+    /**
+     * El mismo jugador, pero el objeto VIVO del {@code GameView}.
+     *
+     * <p>Devuelve null si ese jugador no esta en la partida (espectador, o una
+     * maqueta sin jugador local).
+     */
+    private static PlayerView liveOne(final List<PlayerView> players, final PlayerView wanted) {
+        if (wanted == null) {
+            return null;
+        }
+        for (final PlayerView p : players) {
+            if (p != null && p.getId() == wanted.getId()) {
+                return p;
+            }
+        }
+        return null;
+    }
+
+    private void apply() {
+        pending.set(false);
+        final GameView gv = gameView;
+        if (gv == null) {
+            return;
+        }
+
+        final List<PlayerView> players = new ArrayList<>();
+        for (final PlayerView p : gv.getPlayers()) {
+            players.add(p);
+        }
+        if (players.isEmpty()) {
+            return;
+        }
+
+        // Quien va abajo, y OJO CON ESTO en una partida en red.
+        //
+        // "self" sale de NeoMatchUI.openView, y en el invitado esa lista NO
+        // trae los objetos vivos: GameClientHandler deserializa el paquete y
+        // se limita a ponerles el tracker, sin cambiarlos por los que el
+        // tracker ya tiene. Con la sincronizacion por deltas encendida
+        // -- replicatePlayerView se corta en seco si lo esta -- esa copia no
+        // vuelve a actualizarse NUNCA: se queda con la foto del momento en que
+        // empezo la partida.
+        //
+        // Y no se nota leyendo el codigo, porque TrackableObject.equals compara
+        // por id: la copia congelada "es igual" a la de verdad, asi que
+        // contains() dice que si y todo parece correcto. Lo que veia el
+        // invitado era su barra con 0 cartas en mano, 0 de mazo y 0 en el
+        // cementerio, mientras la del rival iba bien.
+        //
+        // Se resuelve pidiendo el que esta en el GameView, que es el que
+        // reciben los deltas. Buscar por id y no por equals() es a proposito:
+        // aqui la diferencia entre los dos objetos es justo lo que importa.
+        PlayerView bottom = liveOne(players, self);
+        if (bottom == null) {
+            bottom = players.get(0);
+        }
+        bottomNow = bottom;
+        // Commander se juega hasta a cuatro. Se muestra UN rival cada vez y se
+        // cambia con pestanyas: partir la pantalla en cuatro dejaria las cartas
+        // ilegibles.
+        final List<PlayerView> opponents = new ArrayList<>();
+        for (final PlayerView p : players) {
+            if (!p.equals(bottom)) {
+                opponents.add(p);
+            }
+        }
+
+        // Al empezar el turno de un rival, se pasa a su vista. En una partida a
+        // cuatro es dificil seguir quien esta jugando si la mesa se queda
+        // mirando a otro; asi el turno de IA-3 se ve en el turno de IA-3.
+        final PlayerView turnPlayer = gv.getPlayerTurn();
+        if (turnPlayer != null && !turnPlayer.equals(lastTurnPlayer)) {
+            lastTurnPlayer = turnPlayer;
+            if (opponents.contains(turnPlayer)) {
+                viewedOpponent = turnPlayer;
+            }
+        }
+
+        PlayerView top = viewedOpponent;
+        if (top == null || !opponents.contains(top)) {
+            top = opponents.isEmpty() ? null : opponents.get(0);
+            viewedOpponent = top;
+        }
+
+        // ¿Una mesa o todas? Lo decide el ajuste, y se pregunta aqui en cada
+        // repintado para que encenderlo o apagarlo se note SIN salir de la
+        // partida. Apagado — que es como viene de fabrica — pide un solo
+        // asiento, o sea exactamente la mesa de siempre.
+        // Y no se parte mas de lo que cabe: ver TableScreen.maxOpponentSeats.
+        //
+        // TODO o NADA, y esto importa: con tres rivales y sitio para dos, dos
+        // asientos dejarian al tercero sin mesa Y SIN PESTANYA — o sea un
+        // jugador que esta en la partida y no se ve por ninguna parte, que es
+        // mucho peor que verlos de uno en uno. Si no caben todos, pestanyas.
+        final boolean wanted = multiBoard() && !opponents.isEmpty();
+        // AL CAER UN RIVAL, SU MESA SE VA (Discord, 30-10-2026: "Dynamically
+        // hiding the enemy board after they're knocked out if you have 'View
+        // all battlefields' on, goes from 4 players, to 3, then 2"): los que
+        // siguen en pie se reparten su sitio, como la cuadricula de Android
+        // (su decision 489). El GameView guarda a todos hasta el final, asi que
+        // se mira getHasLost. Con pestanyas sigue la suya, por si quieres mirar
+        // como acabo; y si ya no queda nadie en pie (el final), todos.
+        final List<PlayerView> standing = new ArrayList<>();
+        for (final PlayerView p : opponents) {
+            if (!p.getHasLost()) {
+                standing.add(p);
+            }
+        }
+        final List<PlayerView> seated = wanted && !standing.isEmpty() ? standing : opponents;
+        if (wanted && seated.size() == 1 && top != null && top.getHasLost()) {
+            top = seated.get(0);
+            viewedOpponent = top;
+        }
+        final int room = table.maxOpponentSeats();
+        final boolean fits = wanted && room >= seated.size();
+        // El boton de cambiar la vista: con dos o mas rivales en pie, y si
+        // caben todos (si no, "todos" no haria nada visible).
+        table.setViewToggle(standing.size() > 1 && room >= standing.size(), multiBoard(), this::requestRefresh);
+        final int seats = fits ? seated.size() : 1;
+        table.setOpponentSeats(seats);
+
+        // Y si lo pidio y no cabe, SE DICE.
+        //
+        // Sin esto, el jugador enciende el ajuste, no cambia nada y no hay
+        // forma de saber si esta roto o si es que su pantalla es pequenya.
+        // Reportado tal cual: "lo active en ajustes pero nada cambia". Un
+        // ajuste que se traga su propia respuesta es el principio 1 de
+        // las notas de diseño — un control que no hace lo que parece.
+        //
+        // Y NO mientras haya algo en la capa de menu: ese aviso vive en la
+        // misma capa que el panel de Ajustes, asi que soltarlo ahi le
+        // sustituiria el panel al jugador en el mismo click con el que acaba
+        // de encender el ajuste. Como `warnedNoRoom` solo se marca cuando de
+        // verdad se ensenya, el aviso sale igual en el siguiente repintado
+        // -- o sea al cerrar los Ajustes, que es cuando se puede leer.
+        if (wanted && !fits && !warnedNoRoom && !table.getMenuOverlay().isShowing()) {
+            warnedNoRoom = true;
+            table.showInfo(
+                    forge.neo.NeoText.get("table.allBoards.tight.title"),
+                    forge.neo.NeoText.get("table.allBoards.tight.body",
+                            seated.size(), room));
+        }
+        if (fits) {
+            warnedNoRoom = false;
+        }
+
+        table.setOpponents(seats > 1 ? seated : opponents, top, gv.getPlayerTurn(), bottom);
+        // Donde estaba cada equipo o aura ANTES de recolocar (attachmentsMoved).
+        table.noteAttachmentsBefore();
+
+        if (seats > 1) {
+            // Viendolos a todos no hay "rival a la vista" que pueda cambiar, y
+            // por tanto tampoco la sustitucion de mesa que habia que dejar sin
+            // animar. Cada asiento tiene su jugador fijo mientras dure.
+            shownOpponent = null;
+            applyPlayer(gv, bottom, -1);
+            for (int i = 0; i < seated.size(); i++) {
+                applyPlayer(gv, seated.get(i), i);
+            }
+        } else {
+            // Cambio de rival a la vista: la mesa de arriba se sustituye entera
+            // y no se puede animar como si se hubiera muerto todo.
+            if (top != null && !top.equals(shownOpponent)) {
+                table.skipOpponentRemovalAnimation();
+            }
+            shownOpponent = top;
+
+            applyPlayer(gv, bottom, -1);
+            if (top != null) {
+                applyPlayer(gv, top, 0);
+            }
+        }
+
+        table.setPhase(gv.getPhase());
+        table.getPhaseRail().setPlanes(activePlanes(gv));
+        pushTurnOrder(gv);
+        table.setStackGame(gv.getGame());
+        table.setStack(gv.getStack(), self);
+        table.setCombatLinks(links(gv));
+        table.attachmentsMoved();
+
+        // El resaltado debil se reparte por NODO, y aqui acaban de aparecer
+        // nodos nuevos. Sin reponerlo, lo que el motor dijo que podias usar se
+        // apaga en el primer repintado — y durante un pago de mana la mesa se
+        // repinta con cada tierra que tapas.
+        if (matchUi != null) {
+            table.setActionable(matchUi::actionableStrength);
+            // La mano del rival a la vista, tambien en su pestanya (a cuatro
+            // solo se ve la barra de uno). Ver RevealedHand.
+            final NeoMatchUI forTabs = matchUi;
+            table.getOpponentTabs().setHandReveal(p -> mockHandReveal() != null ? mockHandReveal() : new int[] {
+                    RevealedHand.visible(p, forTabs::mayView),
+                    RevealedHand.castable(p, forTabs::isPlayableOutside)});
+        }
+        // Y el del motor (lo ya elegido al convocar o improvisar), por lo mismo.
+        table.reapplyHighlighted();
+    }
+
+    /**
+     * Los planos y fenomenos activos (Planechase): los que haya en la zona de
+     * mando de cualquiera, que es donde los pone el motor. Vacio sin Planechase.
+     */
+    /**
+     * El orden de turnos y quien tiene la prioridad, para el rail (ver
+     * {@code PhaseRail.setTurnOrder}). Aqui y no al cambiar de turno: la
+     * prioridad cambia de manos muchas veces dentro de un turno, y este es el
+     * repintado por el que pasan todos los cambios de la partida. Los asientos
+     * del motor empezando por el del turno, sin los que han perdido (la lista
+     * de la vista los conserva).
+     */
+    private void pushTurnOrder(final GameView gv) {
+        final PlayerView turn = gv.getPlayerTurn();
+        final List<PlayerView> seats = gv.getPlayers() == null ? List.of() : new ArrayList<>(gv.getPlayers());
+        final int start = turn == null ? -1 : seats.indexOf(turn);
+        final PlayerView me = matchUi == null ? null : matchUi.localPlayerView();
+        final List<String> order = new ArrayList<>();
+        int you = -1;
+        int priority = -1;
+        for (int i = 0; start >= 0 && i < seats.size(); i++) {
+            final PlayerView p = seats.get((start + i) % seats.size());
+            if (p.getHasLost()) {
+                continue;
+            }
+            if (you < 0 && p.equals(me)) {
+                you = order.size();
+            }
+            if (priority < 0 && p.getHasPriority()) {
+                priority = order.size();
+            }
+            order.add(PlayerName.of(p));
+        }
+        table.getPhaseRail().setTurnOrder(order, you, priority);
+    }
+
+    static List<CardView> activePlanes(final GameView gv) {
+        final List<CardView> out = new ArrayList<>();
+        if (gv == null || gv.getPlayers() == null) {
+            return out;
+        }
+        for (final PlayerView p : gv.getPlayers()) {
+            final Iterable<CardView> cmd = p.getCards(ZoneType.Command);
+            if (cmd == null) {
+                continue;
+            }
+            for (final CardView c : cmd) {
+                final forge.card.CardTypeView t = c == null || c.getCurrentState() == null
+                        ? null : c.getCurrentState().getType();
+                if (t != null && (t.isPlane() || t.isPhenomenon())) {
+                    out.add(c);
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Las flechas que hay que pintar ahora mismo.
+     *
+     * <p>Todo sale del {@code GameView}: quien ataca a quien, quien bloquea a
+     * quien y a que apunta cada hechizo del stack. La interfaz no deduce nada,
+     * solo dibuja lo que el motor ya sabe.
+     */
+    /** Ya se ha avisado de que no caben todas las mesas. Una vez por partida. */
+    private boolean warnedNoRoom;
+
+    /**
+     * El jugador de abajo en este repintado: de quien son "aliados" los de
+     * arriba. Observando no hay jugador local y abajo va el primero, asi
+     * que no vale {@code self}.
+     */
+    private PlayerView bottomNow;
+
+    /** El rival que se esta pintando arriba ahora mismo. */
+    private PlayerView shownOpponent;
+
+    /**
+     * Si el jugador ha pedido ver todas las mesas a la vez.
+     *
+     * <p>Se envuelve porque el binder tambien corre en maquetas y pruebas sin
+     * preferencias cargadas; ahi cualquier fallo tiene que significar "como
+     * siempre", nunca "prueba un modo nuevo".
+     */
+    private static boolean multiBoard() {
+        try {
+            return forge.neo.NeoSettings.allBoards();
+        } catch (final RuntimeException e) {
+            return false;
+        }
+    }
+
+    private static List<Object[]> links(final GameView gv) {
+        final List<Object[]> out = new ArrayList<>();
+
+        final CombatView combat = gv.getCombat();
+        if (combat != null && combat.getAttackers() != null) {
+            for (final CardView attacker : combat.getAttackers()) {
+                final GameEntityView defender = combat.getDefender(attacker);
+                if (defender != null) {
+                    out.add(new Object[] {attacker, defender, CombatOverlay.Kind.ATTACK});
+                }
+                // Los bloqueos ya declarados y los que se estan declarando
+                // ahora mismo se pintan igual: al jugador le da lo mismo, lo
+                // que quiere ver es quien para a quien.
+                final Set<CardView> seen = new HashSet<>();
+                addBlockers(out, attacker, combat.getBlockers(attacker), seen);
+                addBlockers(out, attacker, combat.getPlannedBlockers(attacker), seen);
+            }
+        }
+
+        if (gv.getStack() != null) {
+            for (final StackItemView item : gv.getStack()) {
+                final CardView source = item.getSourceCard();
+                if (source == null) {
+                    continue;
+                }
+                if (item.getTargetCards() != null) {
+                    for (final CardView target : item.getTargetCards()) {
+                        out.add(new Object[] {source, target, CombatOverlay.Kind.TARGET});
+                    }
+                }
+                if (item.getTargetPlayers() != null) {
+                    for (final PlayerView target : item.getTargetPlayers()) {
+                        out.add(new Object[] {source, target, CombatOverlay.Kind.TARGET});
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    private static void addBlockers(final List<Object[]> out, final CardView attacker,
+                                    final Iterable<CardView> blockers, final Set<CardView> seen) {
+        if (blockers == null) {
+            return;
+        }
+        for (final CardView blocker : blockers) {
+            if (blocker != null && seen.add(blocker)) {
+                out.add(new Object[] {blocker, attacker, CombatOverlay.Kind.BLOCK});
+            }
+        }
+    }
+
+    /**
+     * Que cara le toca a cada uno.
+     *
+     * <p>La tuya la eliges tu y puede ser un PNG cualquiera. La de un rival
+     * sale del <b>indice que reparte el motor</b> sobre la hoja de sprites de
+     * Forge, asi que cada IA tiene la suya y siempre la misma en esa partida.
+     */
+    private javafx.scene.image.Image faceOf(final PlayerView p, final boolean opponent) {
+        try {
+            if (!opponent) {
+                return forge.neo.look.NeoLook.currentAvatar().image();
+            }
+            // Un rival con una cara importada (Personalizar -> Rivales): el
+            // motor solo sabe de la hoja de Forge, asi que se busca por nombre.
+            final String custom = forge.neo.look.NeoPlayers.customFaceOf(p.getName());
+            if (custom != null) {
+                final javafx.scene.image.Image image = customFace(custom);
+                if (image != null) {
+                    return image;
+                }
+            }
+            return forge.neo.look.NeoLook.builtInAvatar(p.getAvatarIndex()).image();
+        } catch (final RuntimeException e) {
+            // Sin cara se juega igual; con la mesa caida, no.
+            return null;
+        }
+    }
+
+    /**
+     * Las caras importadas de los rivales, ya leidas: una por partida.
+     *
+     * <p>{@code faceOf} se pregunta en cada refresco, y {@code avatarById}
+     * recorre la carpeta y decodifica el PNG entero cada vez — que puede ser
+     * la foto de 4000 px del movil. Vive lo que vive este binder (una
+     * partida), asi que no retiene nada de la anterior.
+     */
+    private final java.util.Map<String, java.util.Optional<javafx.scene.image.Image>> customFaces =
+            new java.util.HashMap<>();
+
+    /** Las fundas importadas de los rivales, ya leidas: una por partida, como las caras. */
+    private final java.util.Map<String, java.util.Optional<javafx.scene.image.Image>> customSleeves =
+            new java.util.HashMap<>();
+
+    private javafx.scene.image.Image customSleeve(final String id) {
+        return customSleeves.computeIfAbsent(id, k -> {
+            final forge.neo.look.LookItem item = forge.neo.look.NeoLook.sleeveById(k);
+            return java.util.Optional.ofNullable(item == null ? null : item.image());
+        }).orElse(null);
+    }
+
+    private javafx.scene.image.Image customFace(final String id) {
+        return customFaces.computeIfAbsent(id, k -> {
+            final forge.neo.look.LookItem item = forge.neo.look.NeoLook.avatarById(k);
+            return java.util.Optional.ofNullable(item == null ? null : item.image());
+        }).orElse(null);
+    }
+
+    /**
+     * La funda de este jugador, para su cementerio y su exilio.
+     *
+     * <p>Misma idea que {@link #faceOf}, y el mismo motivo por el que se
+     * pregunta cada vez: en 3-4 jugadores {@code opponentField} se REUSA para
+     * el rival que se este mirando, así que la funda tiene que refrescarse en
+     * cada cambio de pestaña — no sólo la primera vez que se pinta la mesa.
+     */
+    private javafx.scene.image.Image sleeveOf(final PlayerView p, final boolean opponent) {
+        try {
+            if (!opponent) {
+                // La del MAZO con el que juegas, si lleva una; si no, la tuya
+                // de Personalizar. Ver NeoLook.sleeveInPlay().
+                return forge.neo.look.NeoLook.sleeveInPlay().image();
+            }
+            // Un rival con una funda importada (Personalizar -> Rivales): como
+            // su cara, el motor no sabe de ella y se busca por nombre.
+            final String custom = forge.neo.look.NeoPlayers.customSleeveOf(p.getName());
+            if (custom != null) {
+                final javafx.scene.image.Image image = customSleeve(custom);
+                if (image != null) {
+                    return image;
+                }
+            }
+            return forge.neo.look.NeoLook.builtInSleeve(p.getSleeveIndex()).image();
+        } catch (final RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * El dano de comandante mas alto que ha recibido este jugador.
+     *
+     * <p>Se pregunta por CADA comandante de la partida — el suyo tambien, que
+     * un comandante robado o un efecto puede pegarte con el tuyo. El motor
+     * lleva la cuenta por comandante: {@code PlayerView.getCommanderDamage}.
+     *
+     * <p>A 21 de un mismo comandante se pierde, y el motor lo aplica
+     * (Player.java: {@code if (entry.getValue() >= 21) loseConditionMet}). Sin
+     * ensenyarlo se puede perder una partida sin verlo venir.
+     */
+    private static int worstCommanderDamage(final GameView gv, final PlayerView p) {
+        int worst = 0;
+        for (final forge.neo.ui.PlayerBar.CommanderHit hit : commanderDamage(gv, p)) {
+            worst = Math.max(worst, hit.damage());
+        }
+        return worst;
+    }
+
+    /**
+     * Los nombres de sus comandantes para la barra (PlayerBar.setCommanderNames),
+     * traducidos y esten donde esten: en la mesa, en el cementerio o en la zona
+     * de mando. Vacio si la partida no es de comandante.
+     */
+    static List<String> commanderNames(final PlayerView p) {
+        final List<String> out = new ArrayList<>();
+        final List<CardView> cmds = p.getCommanders();
+        if (cmds != null) {
+            for (final CardView c : cmds) {
+                if (c != null && c.getName() != null && !c.getName().isEmpty()) {
+                    out.add(forge.util.CardTranslation.getTranslatedName(c.getName()));
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Cuanto dano de comandante lleva este jugador, <b>de cada comandante</b>.
+     *
+     * <p>Uno por uno y no sumado, porque asi es la regla y asi lo lleva el
+     * motor: {@code Player.commanderDamage} es un {@code Map<Card, Integer>} y
+     * la derrota se comprueba <b>entrada a entrada</b> ({@code Player.java}:
+     * {@code if (entry.getValue() >= 21) loseConditionMet}). Tres rivales
+     * pegandote 10 cada uno no te matan; uno solo pegandote 21, si.
+     *
+     * <p>Se pregunta por CADA comandante de la partida, el tuyo incluido: un
+     * comandante robado o copiado puede pegarte con el tuyo.
+     *
+     * <p>La etiqueta es el nombre del comandante <b>hasta la primera coma</b>
+     * ("Sephiroth", no "Sephiroth, One-Winged Angel"): es como se le llama de
+     * verdad, y el nombre entero no cabe en una pastilla. Se identifica por
+     * comandante y no por jugador porque el limite de 21 es <b>del
+     * comandante</b> — con companyeros (partner), un mismo rival tiene dos y
+     * cada uno lleva su cuenta.
+     */
+    static List<forge.neo.ui.PlayerBar.CommanderHit> commanderDamage(
+            final GameView gv, final PlayerView p) {
+        final List<forge.neo.ui.PlayerBar.CommanderHit> out = new ArrayList<>();
+        if (gv == null || p == null || gv.getPlayers() == null) {
+            return out;
+        }
+        try {
+            int commanders = 0;
+            for (final PlayerView other : gv.getPlayers()) {
+                final List<CardView> theirs = other.getCommanders();
+                if (theirs == null) {
+                    continue;
+                }
+                commanders += theirs.size();
+                for (final CardView commander : theirs) {
+                    if (commander == null) {
+                        continue;
+                    }
+                    final int dmg = p.getCommanderDamage(commander);
+                    if (dmg > 0) {
+                        out.add(new forge.neo.ui.PlayerBar.CommanderHit(
+                                shortName(commander), dmg));
+                    }
+                }
+            }
+            // Con un solo comandante en toda la partida, decir de quien es
+            // sobra: no puede ser de otro. La pastilla se queda como estaba.
+            if (commanders <= 1 && out.size() == 1) {
+                return List.of(new forge.neo.ui.PlayerBar.CommanderHit(
+                        null, out.get(0).damage()));
+            }
+        } catch (final RuntimeException e) {
+            return List.of();
+        }
+        return out;
+    }
+
+    /** "Sephiroth, One-Winged Angel" -> "Sephiroth". */
+    private static String shortName(final CardView commander) {
+        String name = forge.neo.card.CardText.nameOf(commander);
+        if (name == null || name.isBlank()) {
+            name = commander.getName();
+        }
+        if (name == null) {
+            return "?";
+        }
+        final int comma = name.indexOf(',');
+        return comma > 0 ? name.substring(0, comma) : name;
+    }
+
+    /**
+     * El estado del jugador, tal y como lo escribe el motor.
+     *
+     * <p>No se compone NADA aqui, y es a proposito: {@code getDetails()} ya
+     * trae vidas, contadores, mano y su maximo, tierras jugadas, robadas este
+     * turno, turnos extra y palabras clave — todo traducido — y termina
+     * llamando el solo a {@code getPlayerCommanderInfo()}, que anyade el
+     * impuesto de cada comandante y el desglose del dano de comandante.
+     *
+     * <p>La primera version anyadia ese ultimo bloque otra vez por su cuenta y
+     * salia <b>duplicado</b> en pantalla. Antes de "completar" lo que da el
+     * motor, conviene leer hasta el final lo que ya trae.
+     */
+    private static String detailsOf(final PlayerView p) {
+        if (p == null) {
+            return "";
+        }
+        try {
+            final String base = p.getDetails();
+            return base == null ? "" : base.trim();
+        } catch (final RuntimeException e) {
+            return "";
+        }
+    }
+
+    private static int drawnThisTurn(final PlayerView p) {
+        try {
+            return p == null ? 0 : p.getNumDrawnThisTurn();
+        } catch (final RuntimeException e) {
+            // En red o recien empezada la partida puede no estar puesto.
+            return 0;
+        }
+    }
+
+    /**
+     * Los contadores del jugador, o nada si el motor aun no los ha puesto.
+     *
+     * <p>Se lee del {@code PlayerView} y no se compone: cuando salga un
+     * contador nuevo aparecera solo, con su color y su nombre corto.
+     */
+    private static com.google.common.collect.Multiset<forge.game.card.CounterType>
+            countersOf(final PlayerView p) {
+        try {
+            return p == null ? null : p.getCounters();
+        } catch (final RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static int shardsOf(final PlayerView p) {
+        try {
+            return p == null ? 0 : p.getNumManaShards();
+        } catch (final RuntimeException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Quien te esta jugando el turno, si no eres tu.
+     *
+     * <p>{@code PlayerView.getMindSlaveMaster} lo publica desde siempre y no lo
+     * ensenyabamos en ninguna parte — ni siquiera sale en {@code getDetails}.
+     * Es raro (Mindslaver, Sen Triplets), pero cuando pasa, sin decirlo, lo que
+     * se ve es que la partida se mueve sola.
+     */
+    private static String controllerOf(final PlayerView p) {
+        try {
+            final PlayerView master = p == null ? null : p.getMindSlaveMaster();
+            return master == null || master.equals(p) ? null : PlayerName.of(master);
+        } catch (final RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Las cartas de su zona de mando que son reliquias NUESTRAS.
+     *
+     * <p>Incluye el "segundo aliento" del jefe del acto 3 (Ascension 10), que
+     * es justo la que mas falta hace ver: dice que al jefe le queda un empujon
+     * cuando baje de vida.
+     */
+    private static List<CardView> relicsOf(final PlayerView p) {
+        final List<CardView> out = new ArrayList<>();
+        if (p == null) {
+            return out;
+        }
+        try {
+            final var command = p.getCards(ZoneType.Command);
+            if (command == null) {
+                return out;
+            }
+            for (final CardView cv : command) {
+                final var st = cv == null ? null : cv.getCurrentState();
+                if (st != null && forge.neo.ascent.AscentRelics.byCardName(st.getName()) != null) {
+                    out.add(cv);
+                }
+            }
+        } catch (final RuntimeException e) {
+            return out;
+        }
+        return out;
+    }
+
+    /** Cuanto veneno te mata. Lo dice el motor: en dos cabezas no son diez. */
+    private static int poisonToLose(final GameView gv) {
+        try {
+            return gv == null ? 10 : gv.getPoisonCountersToLose();
+        } catch (final RuntimeException e) {
+            return 10;
+        }
+    }
+
+    /**
+     * Solo pruebas: {@code -Dneo.mock.handRevealed=V:C} pinta la mano de cada
+     * rival como si vieras V cartas y pudieras lanzar C, para capturarlo sin
+     * montar un Sen Triplets.
+     */
+    private static int[] mockHandReveal() {
+        final String v = System.getProperty("neo.mock.handRevealed");
+        if (v == null || !v.contains(":")) {
+            return null;
+        }
+        try {
+            return new int[] {Integer.parseInt(v.substring(0, v.indexOf(':'))),
+                    Integer.parseInt(v.substring(v.indexOf(':') + 1))};
+        } catch (final NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Vuelca un jugador en su asiento.
+     *
+     * @param seat -1 eres tu (la mesa de abajo); 0..N-1, el asiento de rival.
+     *             Con el ajuste apagado solo existe el asiento 0, que es el
+     *             {@code opponentBar}/{@code opponentField} de toda la vida
+     */
+    /** Solo pruebas: a quien ya se ha puesto a "pensar" (-Dneo.aiThinkTest). */
+    private final java.util.Set<Integer> thinkTested = new java.util.HashSet<>();
+
+    private void applyPlayer(final GameView gv, final PlayerView p, final int seat) {
+        final boolean opponent = seat >= 0;
+        final var bar = opponent ? table.opponentBar(seat) : table.getSelfBar();
+
+        bar.setPlayer(p);
+        bar.setGameId(gv.getId());
+        // -Dneo.aiThinkTest=true: el rival "piensa" 30 s, para capturar el borde
+        // ambar de su retrato sin esperar a una IA lenta (Forge #12265).
+        if (opponent && Boolean.getBoolean("neo.aiThinkTest") && thinkTested.add(p.getId())) {
+            forge.util.AITimeoutTracker.begin(forge.util.AITimeoutTracker.key(gv.getId(), p.getId()),
+                    java.util.concurrent.TimeUnit.SECONDS.toNanos(30));
+        }
+        bar.setAvatarImage(faceOf(p, opponent));
+        (opponent ? table.opponentField(seat) : table.getSelfField())
+                .setSleeveImage(sleeveOf(p, opponent));
+        // La pastilla se calcula sobre TODOS los jugadores del GameView.
+        // El panel de detalle trae su propio desglose, pero por otra ruta del
+        // motor (getPlayerCommanderInfo, que recorre getOpponents()), asi que
+        // si alguna vez discrepan, el numero de la pastilla es el de fiar.
+        bar.setCommanderDamage(commanderDamage(gv, p));
+        bar.setDetails(detailsOf(p));
+        bar.setPlayerName(PlayerName.of(p));
+        bar.setCommanderNames(commanderNames(p));
+        bar.setLife(p.getLife());
+        bar.setActiveTurn(p.equals(gv.getPlayerTurn()));
+        // Por equipos, el de tu lado se sienta arriba como un rival mas: la
+        // marca es lo unico que dice que no hay que atacarle. Lo decide el
+        // motor (NeoTeams.isAlly); en todos contra todos no sale nunca.
+        if (opponent) {
+            bar.setAlly(NeoTeams.isAlly(bottomNow, p));
+        }
+        // Su mano, si el motor te deja verla o lanzar de ella (Sen Triplets,
+        // Telepathy...): el contador lo dice. Ver RevealedHand.
+        if (opponent) {
+            final NeoMatchUI ui = matchUi;
+            final int[] mock = mockHandReveal();
+            bar.setHandRevealed(
+                    mock != null ? mock[0] : ui == null ? 0 : RevealedHand.visible(p, ui::mayView),
+                    mock != null ? mock[1] : ui == null ? 0 : RevealedHand.castable(p, ui::isPlayableOutside));
+        }
+        // Tu biblioteca: si al acabar ya no existe por haber perdido, la de
+        // antes (NeoMatchUI.libraryToShow). Guardarla es una asignacion.
+        final NeoMatchUI libUi = matchUi;
+        if (!opponent && libUi != null) {
+            libUi.noteLibrary(p);
+        }
+        final int librarySize = !opponent && libUi != null
+                ? libUi.librarySizeToShow(p) : p.getZoneSize(ZoneType.Library);
+        bar.setZones(
+                p.getZoneSize(ZoneType.Hand),
+                librarySize,
+                p.getZoneSize(ZoneType.Graveyard),
+                p.getZoneSize(ZoneType.Exile),
+                p.getZoneSize(ZoneType.Command));
+        bar.setCommandShown(gv == null || gv.isCommander() || p.getZoneSize(ZoneType.Command) > 0);
+
+        // Contadores del jugador: veneno, energia, experiencia, radiacion,
+        // entradas... y los fragmentos de mana, que no son un contador.
+        //
+        // Estaban SOLO en el detalle que sale al pasar el raton, y con el
+        // veneno eso es un fallo: a diez se pierde la partida.
+        // La velocidad va con ellos aunque no sea un contador: es lo mismo
+        // — un estado del jugador que cambia la partida y que hay que poder
+        // ver de un vistazo. Del rival es que no habia OTRA forma de verlo:
+        // el motor solo la publica como una carta dentro de su zona de mando.
+        bar.setCounters(countersOf(p), shardsOf(p), poisonToLose(gv), controllerOf(p),
+                forge.neo.match.PlayerSpeed.of(p), forge.neo.match.PlayerSpeed.rawText(p));
+        // Y si es el monarca o tiene la iniciativa: del rival no se veia (ver
+        // PlayerBar.setTitles).
+        bar.setTitles(PlayerTitles.of(p));
+        bar.setProtection(PlayerShield.of(p));
+        if (Boolean.getBoolean("neo.shield.debug")) {
+            System.out.println("[escudo] " + p.getName() + " palabras=" + p.getKeywords() + " -> " + PlayerShield.of(p));
+        }
+        // Y cuantas ha robado este turno, si mas de una (Orcish Bowmasters y
+        // compania: ver PlayerBar.setDrawnThisTurn).
+        bar.setDrawnThisTurn(drawnThisTurn(p));
+        // Y los hechizos que ha lanzado este turno, para la tormenta
+        // (Discord, 18-10-2026). Ver SpellsThisTurn.
+        bar.setSpellsThisTurn(SpellsThisTurn.of(matchUi, p));
+        // Y las maldiciones que le encantan y las batallas que protege: estan
+        // en la mesa de quien las controla (Discord, 03-10-2026). Ver
+        // AttachedToPlayer.
+        bar.setAttached(AttachedToPlayer.enchanting(gv, p), AttachedToPlayer.protecting(gv, p));
+
+        // Las reliquias de Ascenso del RIVAL, en su barra.
+        //
+        // Solo del rival: las tuyas ya se ven enteras, como cartas, en tu zona
+        // de mando (CommandZone). Del rival esa zona es un contador que hay que
+        // clicar, y una reliquia no sale nunca de ahi: es una pasiva que esta
+        // actuando todo el rato. Reportado jugando contra el jefe del acto 1.
+        //
+        // Y no hace falta preguntar en que modo estamos: relicsOf solo devuelve
+        // las cartas que AscentRelics reconoce, y esas solo existen si se ha
+        // jugado a Ascenso. En cualquier otro modo la lista sale vacia sola.
+        if (opponent) {
+            bar.setRelics(relicsOf(p));
+        }
+
+        // Reserva de mana, por tipo.
+        //
+        // OJO CON LA CODIFICACION: hay DOS y no coinciden. El motor guarda la
+        // reserva con las de ManaAtom (`PlayerView.updateMana` recorre
+        // `ManaAtom.MANATYPES`), y ahi el incoloro es 1<<5. En MagicColor el
+        // incoloro es 0, "la ausencia de color". Los cinco colores valen lo
+        // mismo en las dos, asi que usar la de MagicColor parecia funcionar...
+        // salvo para el incoloro, que devolvia siempre 0.
+        // Las constantes de ManaAtom son int (hay banderas por encima del byte,
+        // como IS_X), pero los tipos de mana caben de sobra en un byte.
+        bar.setMana(
+                p.getMana((byte) ManaAtom.WHITE),
+                p.getMana((byte) ManaAtom.BLUE),
+                p.getMana((byte) ManaAtom.BLACK),
+                p.getMana((byte) ManaAtom.RED),
+                p.getMana((byte) ManaAtom.GREEN),
+                p.getMana((byte) ManaAtom.COLORLESS));
+
+        final List<CardView> battlefield = toList(p.getBattlefield());
+        if (opponent) {
+            table.setOpponentBattlefield(seat, battlefield);
+            table.setOpponentZonePiles(seat, p.getZoneSize(ZoneType.Graveyard),
+                    p.getZoneSize(ZoneType.Exile),
+                    hasPlayable(p, ZoneType.Graveyard), hasPlayable(p, ZoneType.Exile));
+            table.setOpponentCommand(seat, toList(p.getCommand()));
+        } else {
+            table.setSelfBattlefield(battlefield);
+            // El mazo, con su primera carta si algo te deja mirarla (Bolas's
+            // Citadel y familia). Quien decide si se ve es el motor; aqui solo
+            // se manda la de arriba y la mesa pregunta. Ver
+            // TableScreen.setSelfLibraryPile.
+            table.setSelfLibraryPile(librarySize, topOfLibrary(libUi, p));
+            table.setSelfZonePiles(p.getZoneSize(ZoneType.Graveyard),
+                    p.getZoneSize(ZoneType.Exile),
+                    hasPlayable(p, ZoneType.Graveyard), hasPlayable(p, ZoneType.Exile));
+            // La mano solo se ve entera si es la nuestra; la del rival se
+            // muestra como reverso en la barra (contador de MANO).
+            // Y al final de la mano, desvaido, lo que puedes lanzar desde el
+            // cementerio o el exilio (Discord, 29-10-2026).
+            table.setHandOutside(forge.neo.NeoSettings.handShowsOutside()
+                    ? castableOutsideForHand(p) : java.util.List.of());
+            table.setHand(toList(p.getHand()));
+            table.setCommandZone(toList(p.getCommand()), p,
+                    gv == null || gv.isCommander());
+        }
+    }
+
+    /**
+     * Hay en esta zona de este jugador algo que TU puedas lanzar ahora mismo.
+     *
+     * <p>La pila del cementerio y la del exilio dicen cuantas cartas hay, no si
+     * alguna sirve. Y una aventura exiliada o un flashback no se descubren
+     * solos: hay que abrir la zona para verlos. Esto es lo que hace que se
+     * abra — el borde de acento de la pila.
+     *
+     * <p>La zona se pregunta por la carta ({@code CardView.getZone()}) y no por
+     * la lista de la zona: {@code getFlashback()} las trae TODAS juntas, de las
+     * cinco zonas y de todos los jugadores.
+     */
+    /**
+     * La primera carta del mazo, tal cual la publica el motor.
+     *
+     * <p>Sin permisos ni filtros: eso lo hace la mesa con {@code mayView}. Si
+     * el motor no manda las cartas de esa zona — que es lo normal para un
+     * rival — aqui no hay nada que devolver.
+     */
+    private static CardView topOfLibrary(final NeoMatchUI ui, final PlayerView p) {
+        final var library = p == null ? null : ui != null ? ui.libraryToShow(p) : p.getCards(ZoneType.Library);
+        if (library == null) {
+            return null;
+        }
+        for (final CardView cv : library) {
+            return cv;
+        }
+        return null;
+    }
+
+    private boolean hasPlayable(final PlayerView owner, final ZoneType zone) {
+        for (final CardView cv : playableOutside()) {
+            // Y que se pueda AHORA (NeoMatchUI.castableNow): la lista del motor
+            // no mira la fase, y con Ninja Teen el cementerio brillaba siempre.
+            if (cv != null && cv.getZone() == zone && owner.equals(cv.getOwner())
+                    && (matchUi == null || matchUi.isPlayableOutside(cv))) {
+                return true;
+            }
+        }
+        // Y lo que esa lista del motor se deja: lo planeado en el exilio
+        // (NeoMatchUI.plotted) y el caos o armonizar en el cementerio
+        // (isMayhemCastable).
+        final NeoMatchUI ui = matchUi;
+        final var cards = ui == null || (zone != ZoneType.Exile && zone != ZoneType.Graveyard)
+                ? null : owner.getCards(zone);
+        if (cards != null) {
+            for (final CardView cv : cards) {
+                if (cv != null && ui.isPlayableOutside(cv)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Lo que se ensenya en la mano sin estar en ella: lo que puedes lanzar YA
+     * desde un cementerio o un exilio. Lo mismo que enciende sus pilas
+     * ({@link #hasPlayable}), carta a carta: la lista del motor (de quien sea
+     * la carta: un exilio del rival que te deja jugarla) y lo que esa lista se
+     * deja en tus zonas (lo planeado, el caos). Ni el mando (ya se ve) ni la
+     * biblioteca (su primera carta ya sale en el mazo).
+     */
+    private java.util.List<CardView> castableOutsideForHand(final PlayerView me) {
+        final NeoMatchUI ui = matchUi;
+        if (ui == null) {
+            return java.util.List.of();
+        }
+        final java.util.Map<Integer, CardView> out = new java.util.LinkedHashMap<>();
+        for (final CardView cv : playableOutside()) {
+            if (cv != null && (cv.getZone() == ZoneType.Graveyard || cv.getZone() == ZoneType.Exile)
+                    && ui.isPlayableOutside(cv)) {
+                out.putIfAbsent(cv.getId(), cv);
+            }
+        }
+        for (final ZoneType zone : new ZoneType[] {ZoneType.Graveyard, ZoneType.Exile}) {
+            final var cards = me.getCards(zone);
+            if (cards == null) {
+                continue;
+            }
+            for (final CardView cv : cards) {
+                if (cv != null && !out.containsKey(cv.getId()) && ui.isPlayableOutside(cv)) {
+                    out.put(cv.getId(), cv);
+                }
+            }
+        }
+        return new java.util.ArrayList<>(out.values());
+    }
+
+    /** Lo que el motor dice que puedes lanzar desde fuera de mano y campo. */
+    private FCollectionView<CardView> playableOutside() {
+        final PlayerView me = matchUi == null ? null : matchUi.localPlayerView();
+        final FCollectionView<CardView> flash = me == null ? null : me.getFlashback();
+        return flash == null ? forge.util.collect.FCollection.getEmpty() : flash;
+    }
+
+    private static List<CardView> toList(final FCollectionView<CardView> view) {
+        final List<CardView> out = new ArrayList<>();
+        if (view != null) {
+            for (final CardView cv : view) {
+                out.add(cv);
+            }
+        }
+        return out;
+    }
+}

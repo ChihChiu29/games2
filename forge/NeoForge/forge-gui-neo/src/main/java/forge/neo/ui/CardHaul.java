@@ -1,0 +1,428 @@
+package forge.neo.ui;
+
+import forge.neo.NeoText;
+import java.util.List;
+import java.util.function.Predicate;
+
+import forge.game.card.CardView;
+import forge.item.PaperCard;
+import forge.neo.card.CardNode;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
+import javafx.scene.control.ScrollPane;
+import javafx.scene.layout.GridPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
+
+/**
+ * "Esto es lo que te llevas": un puñado de cartas, en grande y de golpe.
+ *
+ * <p>Sale en los dos momentos en los que la aventura te da cartas — al abrir un
+ * sobre en la tienda y al ganar un duelo — y son <b>el mismo momento</b> para
+ * el jugador, asi que tienen que verse igual. Antes solo existia en la tienda;
+ * lo del duelo se aplicaba en silencio y no se veia nada.
+ *
+ * <p>Dos decisiones que traen cuenta:
+ *
+ * <ul>
+ *   <li><b>Las cartas se dimensionan contra el hueco de verdad</b>, no a un
+ *       tamanyo fijo. Un tamanyo a ojo funciona en la pantalla del que lo
+ *       escribio y recorta en todas las demas; y aqui recortar es tapar
+ *       justamente lo que se ha venido a ver.</li>
+ *   <li><b>Un solo boton, y dice VOLVER.</b> Aqui no hay nada que decidir: las
+ *       cartas ya son tuyas. Un boton que suene a "seguir" o a "comprar" hace
+ *       dudar antes de pulsarlo (seccion 10b, principio 1).</li>
+ * </ul>
+ */
+public final class CardHaul {
+
+    private CardHaul() {
+    }
+
+    /** Cuantas lineas del motor caben sin necesitar visor. */
+    private static final int MAX_PLAIN_LINES = 12;
+
+    /**
+     * Cuantas cartas se pintan como mucho.
+     *
+     * <p>Este panel esta hecho para ensenyar un sobre — quince cartas, grandes,
+     * de un vistazo — y tiene un <b>suelo</b> de tamanyo de carta a proposito,
+     * para que nunca salgan de sello. Eso choca de frente con una caja de 36
+     * sobres: con 504 cartas la rejilla mide varias pantallas, se sale por
+     * abajo y por los lados, y lo unico que se ve son las pastillas de NUEVA
+     * flotando sobre el vacio.
+     *
+     * <p>Asi que se corta. Y como cortar en silencio es mentir sobre lo que
+     * hay, <b>se dice cuantas faltan y donde estan</b> — que es en tu
+     * coleccion, porque el motor ya las metio todas antes de que este panel
+     * exista.
+     *
+     * <p>Se ensenyan las que MAS importan: primero las que no tenias, y dentro
+     * de esas las de mas rareza. En una caja de 504 lo que se mira son las
+     * miticas nuevas, no la trigesima tierra basica.
+     */
+    private static final int MAX_CARDS = 24;
+
+    /**
+     * El panel entero, listo para meter en un {@link Overlay} o en una pantalla.
+     *
+     * @param title    lo que ha pasado ("HAS ABIERTO...", "HAS GANADO EL DUELO")
+     * @param subtitle la linea de numeros debajo
+     * @param cards    lo que te llevas; puede estar vacio
+     * @param isNew    cuales no tenias antes, o null si no aplica
+     * @param notes    lo que el motor queria contarte, una linea por cosa
+     * @param minCard  ancho de carta minimo, para que nunca salgan de sello
+     * @param availW   ancho disponible de verdad
+     * @param availH   alto disponible de verdad
+     * @param onDone   que hacer al pulsar VOLVER
+     */
+    public static Region panel(final String title, final String subtitle,
+                               final List<PaperCard> cards, final Predicate<PaperCard> isNew,
+                               final List<String> notes, final double minCard,
+                               final double availW, final double availH,
+                               final Runnable onDone) {
+        return panel(title, subtitle, cards, isNew, null, notes, minCard, availW, availH, onDone);
+    }
+
+    /**
+     * Y con las cartas que llegan APARTE marcadas ({@code isBonus}): en el botin
+     * de la Quest, la rara al azar y compania, que no salen del sobre de premio
+     * y pueden ser de cualquier expansion. Sin la marca parecia que el sobre
+     * traia una carta de otra coleccion.
+     */
+    public static Region panel(final String title, final String subtitle,
+                               final List<PaperCard> cards, final Predicate<PaperCard> isNew,
+                               final Predicate<PaperCard> isBonus,
+                               final List<String> notes, final double minCard,
+                               final double availW, final double availH,
+                               final Runnable onDone) {
+        return panel(title, subtitle, cards, isNew, isBonus, notes, minCard, availW, availH, onDone, null);
+    }
+
+    /**
+     * Lo que el botin de la Quest anyade a cada carta (Discord, 16-10-2026):
+     * cuantas tienes ya, y venderla ahi mismo. Null en todo lo demas (sobres,
+     * draft, Ascenso), que se queda como estaba.
+     */
+    public interface Extras {
+        /** Cuantas tienes de esta carta (por nombre, ya con las del botin); 0 = no se dice. */
+        int owned(PaperCard card);
+
+        /** Si se puede vender una ahora. */
+        boolean canSell(PaperCard card);
+
+        /** Si no se vende porque la usa un mazo tuyo. */
+        boolean keptForDecks(PaperCard card);
+
+        int price(PaperCard card);
+
+        /** Vende una. @return lo cobrado, 0 si no */
+        int sell(PaperCard card);
+
+        /** La linea de lo vendido hasta ahora, o null si nada. */
+        String soldLine();
+    }
+
+    /** Lo mismo, con lo que tienes y el boton de vender debajo de cada carta ({@code extras}). */
+    public static Region panel(final String title, final String subtitle,
+                               final List<PaperCard> cards, final Predicate<PaperCard> isNew,
+                               final Predicate<PaperCard> isBonus,
+                               final List<String> notes, final double minCard,
+                               final double availW, final double availH,
+                               final Runnable onDone, final Extras extras) {
+
+        final Label heading = new Label(title);
+        heading.getStyleClass().add("dialog-title");
+
+        final VBox head = new VBox(2, heading);
+        if (subtitle != null && !subtitle.isBlank()) {
+            final Label sub = new Label(subtitle);
+            sub.getStyleClass().add("home-subtitle");
+            head.getChildren().add(sub);
+        }
+        // Lo vendido desde aqui, con los creditos que te quedan. Escondida
+        // hasta la primera venta.
+        final Label soldLine = new Label();
+        soldLine.setId("haul-sold");
+        soldLine.getStyleClass().add("haul-sold");
+        soldLine.setVisible(false);
+        soldLine.setManaged(false);
+        head.getChildren().add(soldLine);
+        // Dos copias de la misma carta en el botin son dos casillas: al vender
+        // una se repintan todas.
+        final List<Runnable> refreshers = new java.util.ArrayList<>();
+
+        final VBox box = new VBox(12, head);
+        box.getStyleClass().add("dialog");
+        box.setPadding(new Insets(20, 24, 18, 24));
+        box.setAlignment(Pos.CENTER);
+        // Que se cinya a lo que lleva dentro: un recuadro del ancho de la
+        // pantalla con las cartas en medio deja medio metro de vacio al lado.
+        box.setMaxWidth(Region.USE_PREF_SIZE);
+        box.setMaxHeight(Region.USE_PREF_SIZE);
+
+        // ---- lo que el motor queria contarte ----
+        //
+        // Son las lineas de creditos, rachas y logros. Van ARRIBA de las cartas
+        // porque explican de donde vienen.
+        int noteLines = 0;
+        if (notes != null && !notes.isEmpty()) {
+            final VBox lines = new VBox(1);
+            for (final String note : notes) {
+                for (final String line : note.split("\\r?\\n")) {
+                    if (line.isBlank()) {
+                        continue;
+                    }
+                    final Label l = new Label(stripTags(line));
+                    l.getStyleClass().add("dialog-text");
+                    l.setWrapText(true);
+                    l.setMaxWidth(Math.max(360, availW * 0.5));
+                    l.setMinHeight(Region.USE_PREF_SIZE);
+                    lines.getChildren().add(l);
+                }
+            }
+            // Sin visor mientras quepan: un ScrollPane reserva su alto
+            // preferido aunque el texto ocupe menos, y ese hueco de mas sale
+            // como una franja vacia justo encima de las cartas. Solo se envuelve
+            // cuando el motor se pone hablador de verdad.
+            noteLines = lines.getChildren().size();
+            if (lines.getChildren().size() > MAX_PLAIN_LINES) {
+                final ScrollPane sp = new ScrollPane(lines);
+                sp.getStyleClass().add("dialog-scroll");
+                sp.setFitToWidth(true);
+                sp.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+                sp.setPrefViewportHeight(UiScale.px(180));
+                box.getChildren().add(sp);
+            } else if (!lines.getChildren().isEmpty()) {
+                box.getChildren().add(lines);
+            }
+        }
+
+        // ---- las cartas ----
+        if (cards != null && !cards.isEmpty()) {
+            final List<PaperCard> shown = pick(cards, isNew);
+            final int hidden = cards.size() - shown.size();
+            if (hidden > 0) {
+                final Label more = new Label(NeoText.get("haul.more", hidden));
+                more.getStyleClass().add("home-subtitle");
+                head.getChildren().add(more);
+            }
+            final int columns = columnsFor(shown.size());
+            final double below = extras == null ? 26 : 46;
+            final double w = cardWidthFor(shown.size(), columns, minCard, availW, availH,
+                    noteLines, below);
+
+            final GridPane grid = new GridPane();
+            grid.setHgap(10);
+            grid.setVgap(10);
+            grid.setAlignment(Pos.CENTER);
+
+            int i = 0;
+            for (final PaperCard card : shown) {
+                final CardNode node = new CardNode(w);
+                node.setRotationEnabled(false);
+                node.setCard(CardView.getCardForUi(card));
+
+                final VBox cell = new VBox(4, node);
+                cell.setAlignment(Pos.TOP_CENTER);
+                final boolean fresh = isNew != null && isNew.test(card);
+                if (isBonus != null && isBonus.test(card)) {
+                    final Label badge = new Label(fresh
+                            ? NeoText.get("haul.new") + "  ·  " + NeoText.get("haul.bonus")
+                            : NeoText.get("haul.bonus"));
+                    badge.getStyleClass().add("bonus-badge");
+                    cell.getChildren().add(badge);
+                } else if (fresh) {
+                    final Label badge = new Label(NeoText.get("haul.new"));
+                    badge.getStyleClass().add("new-badge");
+                    cell.getChildren().add(badge);
+                }
+                if (extras != null) {
+                    cell.getChildren().add(extrasRow(card, extras, soldLine, refreshers));
+                }
+                grid.add(cell, i % columns, i / columns);
+                Anim.dealIn(node, i, columns, true);
+                i++;
+            }
+            // Si no cabe, en un visor. El suelo de minCard (que las cartas se
+            // lean) gana al ajuste, y con 24 cartas en 7x4 la rejilla pasaba
+            // del alto de la ventana: el titulo y el boton de "Hecho" se
+            // quedaban fuera de la pantalla, sin forma de llegar (principio 5).
+            // Pasaba con los preconstruidos de 60 y con los mazos de Commander
+            // de 100 (10-10-2026).
+            // Se mide igual que en cardWidthFor: si el ajuste ha mandado, cabe
+            // por construccion y no hay visor; solo lo hay si gano el suelo.
+            final int rows = (int) Math.ceil(shown.size() / (double) columns);
+            final double gridH = rows * (w * CardNode.ASPECT + below);
+            final double room = Math.max(240, availH - chromeH(noteLines));
+            if (gridH > room + 1) {
+                final ScrollPane sp = new ScrollPane(grid);
+                sp.getStyleClass().add("dialog-scroll");
+                sp.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+                sp.setFitToWidth(true);
+                sp.setPrefViewportWidth(columns * w + (columns - 1) * grid.getHgap() + 12);
+                sp.setPrefViewportHeight(room);
+                box.getChildren().add(sp);
+            } else {
+                box.getChildren().add(grid);
+            }
+        }
+
+        // ---- el pie ----
+        final Button done = new Button(NeoText.get("haul.done"));
+        done.getStyleClass().add("btn-primary");
+        done.setMinWidth(Region.USE_PREF_SIZE);
+        done.setOnAction(e -> onDone.run());
+
+        final Label hint = new Label(cards == null || cards.isEmpty() ? ""
+                : NeoText.get("haul.hint"));
+        hint.getStyleClass().add("home-subtitle");
+
+        final Region gap = new Region();
+        HBox.setHgrow(gap, Priority.ALWAYS);
+        final HBox footer = new HBox(14, hint, gap, done);
+        footer.setAlignment(Pos.CENTER_LEFT);
+        box.getChildren().add(footer);
+        return box;
+    }
+
+    /**
+     * Cuales se pintan cuando no caben todas.
+     *
+     * <p>Las nuevas primero, y dentro de ellas las de mas rareza. Si caben
+     * todas, se devuelven tal cual y <b>en su orden</b>: el de un sobre no es
+     * casual, la rara va al final.
+     */
+    private static List<PaperCard> pick(final List<PaperCard> cards,
+                                        final Predicate<PaperCard> isNew) {
+        if (cards.size() <= MAX_CARDS) {
+            return cards;
+        }
+        final List<PaperCard> sorted = new java.util.ArrayList<>(cards);
+        sorted.sort(java.util.Comparator
+                .comparingInt((PaperCard c) -> isNew != null && isNew.test(c) ? 0 : 1)
+                .thenComparingInt(c -> -rarityWeight(c)));
+        return sorted.subList(0, MAX_CARDS);
+    }
+
+    /** Cuanto llama la atencion una rareza. Solo para ordenar. */
+    private static int rarityWeight(final PaperCard card) {
+        if (card == null || card.getRarity() == null) {
+            return 0;
+        }
+        switch (card.getRarity()) {
+            case MythicRare: return 5;
+            case Special: return 4;
+            case Rare: return 3;
+            case Uncommon: return 2;
+            case Common: return 1;
+            default: return 0;
+        }
+    }
+
+    /**
+     * Cuantas columnas.
+     *
+     * <p>Se busca la rejilla mas cuadrada que quepa: con 15 cartas salen 5x3,
+     * que es como se han visto los sobres toda la vida. Una fila de quince deja
+     * las cartas del tamanyo de un sello.
+     */
+    private static int columnsFor(final int count) {
+        if (count <= 4) {
+            return Math.max(1, count);
+        }
+        return (int) Math.ceil(Math.sqrt(count * 1.6));
+    }
+
+    /** Lo que ocupa todo lo que no son las cartas: titulo, lineas del motor, pie. */
+    /**
+     * Lo que ocupa todo menos las cartas: titulo, pie y LAS NOTAS, que crecen
+     * con cada linea. Era un 300 fijo con notas, que vale para las tres o
+     * cuatro de un duelo normal; un desafio de la Quest trae doce (creditos,
+     * recompensa, racha, sobre de premio) y el boton de volver se quedaba
+     * debajo de la ventana (Discord, 06-11-2026). Con mas de
+     * {@link #MAX_PLAIN_LINES} van en un visor de 180.
+     */
+    private static double chromeH(final int noteLines) {
+        if (noteLines <= 0) {
+            return 230;
+        }
+        final double notesH = noteLines > MAX_PLAIN_LINES ? UiScale.px(180)
+                : noteLines * UiScale.px(20);
+        return 230 + 10 + notesH;
+    }
+
+    /** El ancho de carta, medido contra el hueco de verdad. */
+    private static double cardWidthFor(final int count, final int columns, final double minCard,
+                                       final double availW, final double availH,
+                                       final int noteLines, final double below) {
+        final int rows = (int) Math.ceil(count / (double) columns);
+        final double w = Math.max(400, availW - 200) / columns - 12;
+        final double h = Math.max(240, availH - chromeH(noteLines)) / rows - below;
+        // Un maximo por arriba: con tres cartas no tiene sentido que ocupen
+        // media pantalla cada una.
+        return Math.max(minCard * 0.8,
+                Math.min(Math.min(w, h / CardNode.ASPECT), minCard * 2.4));
+    }
+
+    /**
+     * "Tienes 3" y "Vender · 12 cr" debajo de una carta del botin. Lo que usa un
+     * mazo tuyo no se vende desde aqui: el boton lo dice y se queda apagado.
+     */
+    private static Region extrasRow(final PaperCard card, final Extras extras, final Label soldLine,
+                                    final List<Runnable> refreshers) {
+        final Label owned = new Label();
+        owned.getStyleClass().add("haul-owned");
+        final Button sell = new Button();
+        sell.getStyleClass().addAll("btn-secondary", "haul-sell");
+        sell.setMinWidth(Region.USE_PREF_SIZE);
+        final Runnable refresh = () -> {
+            final int n = extras.owned(card);
+            owned.setText(n > 0 ? NeoText.get("haul.owned", n) : "");
+            owned.setTooltip(n > 0 ? new javafx.scene.control.Tooltip(NeoText.get("haul.owned.tip", n)) : null);
+            owned.setVisible(n > 0);
+            owned.setManaged(n > 0);
+            if (extras.canSell(card)) {
+                sell.setText(NeoText.get("haul.sell", extras.price(card)));
+                sell.setDisable(false);
+                sell.setTooltip(null);
+            } else {
+                final boolean kept = extras.keptForDecks(card);
+                sell.setText(NeoText.get(kept ? "haul.sell.kept" : "haul.sell.none"));
+                sell.setDisable(true);
+            }
+        };
+        sell.setOnAction(e -> {
+            if (extras.sell(card) > 0) {
+                for (final Runnable r : refreshers) {
+                    r.run();
+                }
+                final String line = extras.soldLine();
+                soldLine.setText(line == null ? "" : line);
+                soldLine.setVisible(line != null);
+                soldLine.setManaged(line != null);
+            }
+        });
+        refreshers.add(refresh);
+        refresh.run();
+        // En UNA linea: cada fila de alto de mas encoge todas las cartas.
+        final HBox row = new HBox(6, owned, sell);
+        row.setAlignment(Pos.CENTER);
+        return row;
+    }
+
+    /**
+     * El motor mete algo de HTML en sus mensajes.
+     *
+     * <p>Cosas como {@code Alternate win condition: <u>Milled</u>!}. La GUI
+     * vieja los pinta en un panel de HTML; nosotros no, asi que se quitan las
+     * marcas en vez de ensenyar los corchetes al jugador.
+     */
+    private static String stripTags(final String line) {
+        return line == null ? "" : line.replaceAll("<[^>]+>", "").trim();
+    }
+}

@@ -1,0 +1,63 @@
+AVISOS
+======
+
+
+NO ES UN PRODUCTO OFICIAL
+-------------------------
+
+NeoForge no esta afiliado, patrocinado ni aprobado por Wizards of the Coast.
+Magic: the Gathering, los nombres de las cartas y sus ilustraciones son
+propiedad de Wizards of the Coast LLC. Este es un proyecto de aficionado, sin
+animo de lucro: no se vende, no lleva publicidad y no se cobra por el.
+
+Las imagenes de las cartas NO se distribuyen con el programa. Se descargan de
+Scryfall (scryfall.com) al jugar, igual que hace Forge.
+
+
+DE QUE ESTA HECHO
+-----------------
+
+El motor de reglas, las cartas, la IA y todos los recursos de la carpeta res\
+son de FORGE (https://github.com/Card-Forge/forge), publicado bajo la licencia
+GNU GPL v3.
+
+NeoForge es una interfaz nueva construida encima de ese motor, y por tanto es
+obra derivada: se publica bajo la misma licencia, GNU GPL v3. El texto completo
+esta en el fichero LICENSE.
+
+La GPL da derecho a pedir el codigo fuente. El de NeoForge esta publicado en
+https://github.com/AdrianLopez98/NeoForge
+
+
+EL JAVA QUE VIENE DENTRO
+------------------------
+
+La carpeta runtime\ es un Java 17 de Eclipse Adoptium (Temurin), bajo licencia
+GPLv2 con Classpath Exception. Ver https://adoptium.net/
+
+LA LETRA QUE VIENE DENTRO
+-------------------------
+
+Dentro del programa va la letra Inter (https://github.com/rsms/inter),
+Copyright (c) 2016 The Inter Project Authors, bajo la SIL Open Font License 1.1.
+Solo se usa cuando el sistema no tiene Segoe UI (Linux, Steam Deck con Proton).
+El texto de la licencia va junto a la letra, en forge/neo/fonts/Inter-OFL.txt
+dentro de app\neo.jar.
+
+Los dos kanji del nombre de Musashi que salen en la entrada de Isshin, Two
+Heavens as One, son el contorno de la letra Yuji Boku
+(https://github.com/Kinutafontfactory/Yuji), Copyright 2021 The Yuji Project
+Authors, bajo la SIL Open Font License 1.1. La letra no viene dentro: solo esos
+dos contornos. El texto de la licencia esta en forge/neo/fonts/YujiBoku-OFL.txt
+dentro de app\neo.jar.
+
+LOS ICONOS DE LAS CARTAS SIN IMAGEN
+-----------------------------------
+
+Los iconos que salen en una carta cuando no hay imagen (los de cada tipo de
+criatura, tierra, artefacto o encantamiento) son de game-icons.net
+(https://game-icons.net), bajo la licencia Creative Commons Attribution 3.0
+(CC BY 3.0, https://creativecommons.org/licenses/by/3.0/). Sus autores:
+Lorc, Delapouite, Skoll, Carl Olsen, Caro Asercion, Cathelineau, DarkZaitzev
+y Sbed. Van dentro de app\neo.jar como trazados (forge/neo/card/type-icons.txt),
+sin modificar salvo el color con que se pintan.

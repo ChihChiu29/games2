@@ -1,0 +1,4207 @@
+package forge.neo.quest;
+
+import java.util.List;
+import java.util.Locale;
+
+import forge.card.CardEdition;
+import forge.card.CardRarity;
+import forge.deck.Deck;
+import forge.deck.DeckSection;
+import forge.gamemodes.quest.QuestEventDuel;
+import forge.item.BoosterPack;
+import forge.item.PaperCard;
+import forge.model.FModel;
+import forge.neo.deck.DeckEditor;
+
+/**
+ * Comprueba el bucle de la aventura sin abrir una ventana.
+ *
+ * <p>Lo que hay que verificar aqui no es la pantalla: es que el <b>progreso</b>
+ * existe y que <b>los rivales van a la par</b>. Eso ultimo se pidio
+ * explicitamente — *"si empiezas el modo aventura de Commander que los rivales
+ * del inicio no lleven mazos de bracket 5"* — y es lo que menos se puede
+ * comprobar jugando, porque haria falta ganar veinte duelos para llegar al
+ * siguiente escalon.
+ *
+ * <p>{@code run.cmd questcheck}
+ */
+public final class QuestCheck {
+
+    private QuestCheck() {
+    }
+
+    public static void run() {
+        // LA QUEST DEL JUGADOR, DE VUELTA AL ACABAR.  Cada comprobacion empieza
+        // una Quest de prueba (que se apunta como "la de ahora" en las
+        // preferencias de Forge, las del jugador) y la borra (que deja eso en
+        // blanco).  Sin esto, cada pasada de la bateria dejaba al jugador sin
+        // su Quest en curso: al entrar salia la lista en vez de su cuartel.
+        // Visto el 10-10-2026 (la de pruebas del autor, en blanco tras la bateria).
+        final forge.gamemodes.quest.data.QuestPreferences prefs = forge.model.FModel.getQuestPreferences();
+        final String current = prefs.getPref(forge.gamemodes.quest.data.QuestPreferences.QPref.CURRENT_QUEST);
+        try {
+            runAll();
+        } finally {
+            prefs.setPref(forge.gamemodes.quest.data.QuestPreferences.QPref.CURRENT_QUEST, current);
+            prefs.save();
+        }
+    }
+
+    private static void runAll() {
+        final String probe = System.getProperty("neo.quest.check.starterProbe");
+        if (probe != null) {
+            for (final String n : probe.split(";")) {
+                final PaperCard cmd = FModel.getMagicDb().getCommonCards().getUniqueByName(n.trim());
+                for (int i = 0; i < 3 && cmd != null; i++) {
+                    final Deck d = NeoCommanderDuels.starter(cmd);
+                    int colourless = 0, onColour = 0, lands = 0;
+                    final java.util.List<String> cl = new java.util.ArrayList<>();
+                    for (final java.util.Map.Entry<PaperCard, Integer> e : d.getMain()) {
+                        final PaperCard c = e.getKey();
+                        if (c.getRules().getType().isLand()) {
+                            lands += e.getValue();
+                        } else if (c.getRules().getColor().isColorless()) {
+                            colourless += e.getValue();
+                            cl.add(c.getName());
+                        } else {
+                            onColour += e.getValue();
+                        }
+                    }
+                    System.out.printf(Locale.ROOT, "[probe] %s: %d tierras, %d de color, %d incoloras: %s%n",
+                            cmd.getName(), lands, onColour, colourless, cl);
+                }
+            }
+            return;
+        }
+        if (Boolean.getBoolean("neo.quest.check.rivalsOnly")) {
+            if (!checkRivalSetsEveryDuel()) {
+                throw new IllegalStateException("rivales con las expansiones de la Quest");
+            }
+            return;
+        }
+        boolean ok = true;
+        ok &= checkOne(NeoQuest.Modalidad.COMMANDER);
+        System.out.println();
+        ok &= checkCommanderRivals();
+        System.out.println();
+        ok &= checkCommanderStarter();
+        System.out.println();
+        ok &= checkBuildFromCollection();
+        System.out.println();
+        ok &= checkColourStarter();
+        ok &= checkWorldColourStarter();
+        System.out.println();
+        ok &= checkRewardText();
+        System.out.println();
+        ok &= checkTrophyPick();
+        System.out.println();
+        ok &= checkOne(NeoQuest.Modalidad.ESTANDAR);
+        System.out.println();
+        ok &= checkShop();
+        System.out.println();
+        ok &= checkPrize();
+        System.out.println();
+        ok &= checkDeckBuilding();
+        System.out.println();
+        ok &= checkSideboardTrap();
+        System.out.println();
+        ok &= checkWishlist();
+        ok &= checkWishlistCommander();
+        ok &= checkWishlistAttacks();
+        ok &= checkSaveAsCopy();
+        ok &= checkNewestFirst();
+        ok &= checkDuelAfterTravel();
+        ok &= checkLowLife();
+        ok &= checkRivalSets();
+        ok &= checkRivalSetsEveryDuel();
+        ok &= checkTableRivalSets();
+        ok &= checkRename();
+        ok &= checkKept();
+        ok &= checkUpgradeLevels();
+        System.out.println();
+        ok &= checkEveryRivalHasAFace();
+        System.out.println();
+        ok &= checkChallenges();
+        System.out.println();
+        ok &= checkBazaar();
+        System.out.println();
+        ok &= checkEnginePrefs();
+        System.out.println();
+        ok &= checkSetPool();
+        System.out.println();
+        ok &= checkWorldStartingPool();
+
+        System.out.println();
+        System.out.println(ok
+                ? "  OK - la aventura arranca, guarda, compra sobres y los rivales suben contigo"
+                : "  FALLO - revisa el bucle de la aventura");
+    }
+
+    /**
+     * Los mazos de los rivales de una Quest de Commander, nivel por nivel.
+     *
+     * <p>Existe por un informe de itch.io (24-09-2026): en el ultimo nivel los
+     * rivales seguian con artefactos de "paga 7 y roba una carta". Forge monta
+     * esos mazos al azar en todos los niveles; {@link NeoCommanderDuels} los
+     * monta con la matriz de mazos reales. Aqui se mira, para unos cuantos
+     * comandantes:
+     * <ul>
+     *   <li>que el mazo sea legal (100 cartas, el motor lo dice),</li>
+     *   <li>que casi todo salga de la matriz — si no, el montador ha rellenado
+     *       al azar, que es justo lo que se queria quitar,</li>
+     *   <li>y que facil y medio respeten su techo de rareza y de bracket.</li>
+     * </ul>
+     * Se ensenya al lado lo que daba Forge para el mismo comandante, para ver
+     * la diferencia en el registro.
+     */
+    /**
+     * Las lineas del botin que Forge escribe en ingles: todas las formas que
+     * salen de QuestWinLoseController se reconocen (y se traducen), y una que
+     * no es suya se deja tal cual.
+     */
+    private static boolean checkRewardText() {
+        System.out.println("  --- Lineas del botin, traducidas ---");
+        boolean ok = true;
+        final String[] samples = {
+                "Easy opponent: 25 credits.", "Very hard opponent: 100 credits.",
+                "Random Opponent Bonus: 25 credits.", "Random Opponent Bonus: 1 credit.",
+                "Bonus for previous wins: 0 credits.", "Bonus for previous wins: 1 credit.",
+                "Alternate win condition: <u>Milled</u>! Bonus: 40 credits.",
+                "Alternate win condition: Poison! Bonus: 40 credits.",
+                "Mulliganed to zero and still won! Bonus: 100 credits.",
+                "Won on turn zero! Bonus: 100 credits.", "Won in one turn! Bonus: 50 credits.",
+                "Won by turn 5! Bonus: 20 credits.", "Life total difference: 12 credits.",
+                "You have not lost once! Bonus: 25 credits.", "Estates bonus (10%): 5 credits.",
+                "You've earned 50 credits in total.", "Could be worse: 120 credits in total.",
+                "A respectable 300 credits in total.", "An impressive 600 credits in total.",
+                "Spectacular match! 800 credits in total.", "You've won a random rare.",
+                "You've won a random rare for winning against a very hard deck."};
+        for (final String s : samples) {
+            final boolean seen = QuestRewardText.recognizes(s);
+            if (!seen) {
+                System.out.println("  NO RECONOCIDA: " + s);
+            }
+            ok &= seen;
+        }
+        final String other = "Something Forge adds tomorrow: 7 credits.";
+        ok &= other.equals(QuestRewardText.translate(other));
+        System.out.printf(Locale.ROOT, "  %d formas reconocidas; \"%s\" -> \"%s\"%n", samples.length,
+                samples[0], QuestRewardText.translate(samples[0]));
+        System.out.println(ok ? "  OK" : "  FALLO");
+        return ok;
+    }
+
+    private static boolean checkCommanderStarter() {
+        System.out.println("  --- Quest de Commander empezando por comandante ---");
+        boolean ok = true;
+        final List<PaperCard> commanders = new java.util.ArrayList<>();
+        for (final String name : new String[] {"Krenko, Mob Boss", "Meren of Clan Nel Toth",
+                // Recien salidos, sin matriz: su tema sale de la carta (CommanderTheme).
+                "Codie, Ravenous Codex", "Tam, the Possibility"}) {
+            final PaperCard pc = FModel.getMagicDb().getCommonCards().getUniqueByName(name);
+            if (pc != null) {
+                commanders.add(pc);
+            }
+        }
+        // Y uno que la matriz NO conozca: se deja elegir, y tiene que salir
+        // igual un mazo legal (de staples de su color).
+        for (final PaperCard c : forge.neo.ascent.AscentSeedDeck.commanderPool()) {
+            if (!forge.neo.ascent.AscentSynergy.knows(c)) {
+                commanders.add(c);
+                break;
+            }
+        }
+        for (final PaperCard cmd : commanders) {
+            final long t0 = System.nanoTime();
+            final Deck d = NeoCommanderDuels.starter(cmd);
+            final long ms = (System.nanoTime() - t0) / 1_000_000;
+            if (d == null) {
+                System.out.printf(Locale.ROOT, "  %-30s sin mazo: FALLO%n", cmd.getName());
+                ok = false;
+                continue;
+            }
+            final String problem = forge.deck.DeckFormat.Commander.getDeckConformanceProblem(d);
+            final int bracket = forge.deck.CommanderBracketCalculator.getBracket(d);
+            final java.util.Map<CardRarity, Integer> byRarity = new java.util.EnumMap<>(CardRarity.class);
+            for (final PaperCard c : d.getMain().toFlatList()) {
+                if (!c.getRules().getType().isBasicLand()) {
+                    byRarity.merge(NeoCommanderDuels.lowestRarity(c), 1, Integer::sum);
+                }
+            }
+            final int commons = byRarity.getOrDefault(CardRarity.Common, 0);
+            final int uncommons = byRarity.getOrDefault(CardRarity.Uncommon, 0);
+            final int rares = byRarity.getOrDefault(CardRarity.Rare, 0);
+            final int mythics = byRarity.getOrDefault(CardRarity.MythicRare, 0);
+            // Lo del tema, para los que no conoce la matriz (Discord, 02-11-2026:
+            // "none of them have Prepared spells"). Al menos ocho, o la mitad si el tema es corto.
+            final java.util.Set<String> theme = new java.util.HashSet<>();
+            for (final java.util.Map.Entry<PaperCard, Integer> e : forge.neo.ascent.CommanderTheme.poolOf(cmd)) {
+                theme.add(e.getKey().getName());
+            }
+            int themed = 0;
+            for (final PaperCard c : d.getMain().toFlatList()) {
+                if (theme.contains(c.getName())) {
+                    themed++;
+                }
+            }
+            final boolean themeOk = forge.neo.ascent.AscentSynergy.knows(cmd) || theme.isEmpty() || themed >= Math.min(8, theme.size() / 2);
+            System.out.printf(Locale.ROOT, "  %-30s tema %s: %d cartas en el mazo%s%n", cmd.getName(),
+                    forge.neo.ascent.CommanderTheme.clues(cmd), themed, themeOk ? "" : "  <- FALLO");
+            ok &= themeOk;
+            final boolean good = problem == null && bracket <= 2
+                    && uncommons <= NeoCommanderDuels.STARTER_UNCOMMONS
+                    && rares <= NeoCommanderDuels.STARTER_RARES && mythics == 0
+                    && commons > uncommons + rares
+                    && cmd.getName().equals(d.getName());
+            System.out.printf(Locale.ROOT,
+                    "  %-30s %s | %d comunes, %d infrec., %d raras, %d miticas | bracket %d | %d ms%s%n",
+                    cmd.getName(), forge.neo.ascent.AscentSynergy.knows(cmd) ? "matriz" : "staples",
+                    commons, uncommons, rares, mythics, bracket, ms,
+                    good ? "" : "  <- FALLO" + (problem == null ? "" : " (" + problem + ")"));
+            ok &= good;
+        }
+
+        // Y la Quest arranca con el: en la coleccion, elegido y legal.
+        if (!commanders.isEmpty()) {
+            final Deck d = NeoCommanderDuels.starter(commanders.get(0));
+            final String name = "neo-check-starter";
+            NeoQuest.delete(name);
+            NeoQuest.start(name, NeoQuest.Modalidad.COMMANDER, NeoQuest.Dificultad.NORMAL, d, null);
+            final Deck mine = NeoQuest.currentDeck();
+            final String problem = NeoQuest.problemWith(mine);
+            System.out.printf(Locale.ROOT, "  Quest empezada con %s -> %s%n",
+                    mine == null ? "(ningun mazo)" : mine.getName(),
+                    problem == null ? "legal" : problem);
+            ok &= mine != null && problem == null && d != null && d.getName().equals(mine.getName());
+            NeoQuest.delete(name);
+        }
+        System.out.println(ok ? "  OK" : "  FALLO");
+        return ok;
+    }
+
+    /**
+     * Empezar eligiendo solo los colores (Discord, 13-10-2026). En Estandar:
+     * 60 cartas legales, sin raras ni miticas y sin hechizos de otro color. En
+     * Commander: el comandante sorteado es exactamente de esos colores. Y la
+     * Quest de Estandar arranca con ese mazo, elegido y legal.
+     */
+    /**
+     * Con un mundo elegido, el mazo «por colores» sale de SUS expansiones
+     * (Discord, 18-10-2026: Shandalar y un mazo de salida de todo Magic). Antes
+     * salia del pozo, que con un mundo es «todas». Cada carta tiene que valer
+     * en el mundo, con la misma regla con la que el motor lo dice de un mazo.
+     */
+    private static boolean checkWorldColourStarter() {
+        System.out.println("  --- Quest por colores en un mundo (Shandalar) ---");
+        final var world = NeoQuestWorlds.byName("Shandalar");
+        if (world == null) {
+            System.out.println("  no esta el mundo Shandalar: FALLO");
+            return false;
+        }
+        final var pool = NeoQuestWorlds.starterPool(world.getName(), forge.neo.ascent.AscentPool.ALL);
+        final byte ug = (byte) (forge.card.MagicColor.BLUE | forge.card.MagicColor.GREEN);
+        final Deck d = NeoQuest.colourStarter("neo-check-mundo", ug, pool);
+        if (d == null) {
+            System.out.println("  sin mazo: FALLO");
+            return false;
+        }
+        final var legal = NeoQuestWorlds.deckFilter(world);
+        int out = 0;
+        for (final PaperCard c : d.getMain().toFlatList()) {
+            if (!legal.test(c)) {
+                if (out < 5) {
+                    System.out.println("    fuera del mundo: " + c.getName() + " (" + c.getEdition() + ")");
+                }
+                out++;
+            }
+        }
+        // Y el mundo principal sigue con todas: el pozo no se toca.
+        final boolean mainAll = NeoQuestWorlds.starterPool(
+                forge.gamemodes.quest.QuestWorld.MAINWORLDNAME, forge.neo.ascent.AscentPool.ALL).isAll();
+        final boolean ok = out == 0 && d.getMain().countAll() >= 60 && mainAll;
+        System.out.printf(Locale.ROOT, "  %d cartas, %d fuera de Shandalar, principal con todas: %s -> %s%n",
+                d.getMain().countAll(), out, mainAll, ok ? "OK" : "FALLO");
+        return ok;
+    }
+
+    private static boolean checkColourStarter() {
+        System.out.println("  --- Quest empezando por colores ---");
+        boolean ok = true;
+        final byte wb = (byte) (forge.card.MagicColor.WHITE | forge.card.MagicColor.BLACK);
+        // Y de tres a cinco (13-10-2026): en la Quest no hay tope de dos.
+        final byte bug = (byte) (forge.card.MagicColor.BLUE | forge.card.MagicColor.BLACK | forge.card.MagicColor.GREEN);
+        final byte four = (byte) (forge.card.MagicColor.ALL_COLORS & ~forge.card.MagicColor.WHITE);
+        final byte[] asks = {wb, forge.card.MagicColor.GREEN, forge.neo.ascent.AscentSeedDeck.NO_COLOURS,
+                bug, four, forge.card.MagicColor.ALL_COLORS};
+        Deck first = null;
+        for (final byte colours : asks) {
+            final Deck d = NeoQuest.colourStarter("neo-check-colours", colours, null);
+            if (d == null) {
+                System.out.printf(Locale.ROOT, "  Estandar %-6s sin mazo: FALLO%n", colourLetters(colours));
+                ok = false;
+                continue;
+            }
+            if (first == null) {
+                first = d;
+            }
+            int rares = 0;
+            int offColour = 0;
+            for (final PaperCard c : d.getMain().toFlatList()) {
+                if (c.getRarity() == CardRarity.Rare || c.getRarity() == CardRarity.MythicRare) {
+                    rares++;
+                }
+                final byte own = c.getRules().getColor().getColor();
+                if (colours != forge.neo.ascent.AscentSeedDeck.NO_COLOURS
+                        && !c.getRules().getType().isLand() && (own & ~colours) != 0) {
+                    offColour++;
+                }
+            }
+            // Cada color pedido con hechizos Y con tierras que lo den: con tres
+            // o mas, un color sin fuentes es un mazo que no se puede jugar.
+            final StringBuilder missing = new StringBuilder();
+            final StringBuilder perColour = new StringBuilder();
+            for (final byte c : forge.card.MagicColor.WUBRG) {
+                if ((colours & c) == 0) {
+                    continue;
+                }
+                int spells = 0;
+                int sources = 0;
+                for (final PaperCard card : d.getMain().toFlatList()) {
+                    final boolean land = card.getRules().getType().isLand();
+                    final boolean has = card.getRules().getColorIdentity().hasAnyColor(c);
+                    if (land && has) {
+                        sources++;
+                    } else if (!land && card.getRules().getColor().hasAnyColor(c)) {
+                        spells++;
+                    }
+                }
+                perColour.append(' ').append(forge.card.MagicColor.toShortString(c))
+                        .append('=').append(spells).append('/').append(sources);
+                if (spells == 0 || sources == 0) {
+                    missing.append(forge.card.MagicColor.toShortString(c));
+                }
+            }
+            final String problem = forge.deck.DeckFormat.Constructed.getDeckConformanceProblem(d);
+            final int size = d.getMain().countAll();
+            final boolean good = problem == null && size == forge.neo.ascent.AscentSeedDeck.QUEST_SIZE
+                    && rares == 0 && offColour == 0 && missing.length() == 0;
+            System.out.printf(Locale.ROOT, "  Estandar %-6s %d cartas | %d raras | %d de otro color |%s%s%n",
+                    colourLetters(colours), size, rares, offColour, perColour,
+                    good ? "" : "  <- FALLO" + (problem == null ? "" : " (" + problem + ")")
+                            + (missing.length() == 0 ? "" : " (sin hechizos o tierras de " + missing + ")"));
+            ok &= good;
+        }
+        for (final byte colours : asks) {
+            final PaperCard cmd = NeoQuest.commanderOfColours(colours, null);
+            final boolean good = cmd != null && (colours == forge.neo.ascent.AscentSeedDeck.NO_COLOURS
+                    || cmd.getRules().getColorIdentity().getColor() == colours);
+            System.out.printf(Locale.ROOT, "  Commander %-6s -> %s%s%n", colourLetters(colours),
+                    cmd == null ? "(ninguno)" : cmd.getName(), good ? "" : "  <- FALLO");
+            ok &= good;
+        }
+        if (first != null) {
+            final String name = "neo-check-colours";
+            NeoQuest.delete(name);
+            NeoQuest.start(name, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL, first, null);
+            final Deck mine = NeoQuest.currentDeck();
+            final String problem = NeoQuest.problemWith(mine);
+            System.out.printf(Locale.ROOT, "  Quest empezada con %s -> %s%n",
+                    mine == null ? "(ningun mazo)" : mine.getName(),
+                    problem == null ? "legal" : problem);
+            ok &= mine != null && problem == null;
+            NeoQuest.delete(name);
+        }
+        System.out.println(ok ? "  OK" : "  FALLO");
+        return ok;
+    }
+
+    private static String colourLetters(final byte colours) {
+        return colours == forge.neo.ascent.AscentSeedDeck.NO_COLOURS ? "azar"
+                : forge.card.ColorSet.fromMask(colours).toString();
+    }
+
+    private static boolean checkCommanderRivals() {
+        System.out.println("  --- Rivales de una Quest de Commander ---");
+        boolean ok = true;
+        final List<PaperCard> commanders = new java.util.ArrayList<>();
+        for (final String name : new String[] {
+                "Krenko, Mob Boss", "Meren of Clan Nel Toth", "Atraxa, Praetors' Voice"}) {
+            final PaperCard pc = FModel.getMagicDb().getCommonCards().getUniqueByName(name);
+            if (pc != null && forge.neo.ascent.AscentSynergy.knows(pc)) {
+                commanders.add(pc);
+            }
+        }
+        if (commanders.isEmpty()) {
+            System.out.println("  la matriz de sinergias no conoce a ninguno: FALLO");
+            return false;
+        }
+        final forge.gamemodes.quest.QuestEventDifficulty[] tiers =
+                forge.gamemodes.quest.QuestEventDifficulty.values();
+        for (final PaperCard cmd : commanders) {
+            final java.util.Set<String> matrix = new java.util.HashSet<>();
+            for (final java.util.Map.Entry<PaperCard, Integer> e
+                    : forge.neo.ascent.AscentSynergy.poolOf(cmd)) {
+                matrix.add(e.getKey().getName());
+            }
+            for (final java.util.Map.Entry<PaperCard, Integer> e
+                    : forge.neo.ascent.AscentSynergy.popularity()) {
+                matrix.add(e.getKey().getName());
+            }
+            System.out.printf(Locale.ROOT, "  %s%n", cmd.getName());
+
+            final Deck old = forge.deck.DeckgenUtil.generateRandomCommanderDeck(
+                    cmd, forge.deck.DeckFormat.Commander, true, false);
+            System.out.printf(Locale.ROOT, "    %-8s %s%n", "(Forge)", describe(old, matrix));
+
+            for (final forge.gamemodes.quest.QuestEventDifficulty tier : tiers) {
+                final long t0 = System.nanoTime();
+                final Deck d = NeoCommanderDuels.deckFor(cmd, tier);
+                final long ms = (System.nanoTime() - t0) / 1_000_000;
+                if (d == null) {
+                    System.out.printf(Locale.ROOT, "    %-8s sin mazo: FALLO%n", tier);
+                    ok = false;
+                    continue;
+                }
+                final String problem = forge.deck.DeckFormat.Commander.getDeckConformanceProblem(d);
+                final int bracket = forge.deck.CommanderBracketCalculator.getBracket(d);
+                final CardRarity cap = tier == forge.gamemodes.quest.QuestEventDifficulty.EASY
+                        ? CardRarity.Uncommon
+                        : tier == forge.gamemodes.quest.QuestEventDifficulty.MEDIUM
+                                ? CardRarity.Rare : CardRarity.MythicRare;
+                final int maxBracket = tier == forge.gamemodes.quest.QuestEventDifficulty.EASY
+                        || tier == forge.gamemodes.quest.QuestEventDifficulty.MEDIUM ? 2
+                        : tier == forge.gamemodes.quest.QuestEventDifficulty.HARD ? 3 : 5;
+                int overRarity = 0;
+                for (final PaperCard c : d.getMain().toFlatList()) {
+                    if (!c.getRules().getType().isBasicLand()
+                            && NeoCommanderDuels.lowestRarity(c).ordinal() > cap.ordinal()) {
+                        overRarity++;
+                    }
+                }
+                final double fromMatrix = matrixShare(d, matrix);
+                final boolean good = problem == null && bracket <= maxBracket
+                        && overRarity == 0 && fromMatrix >= 0.9;
+                System.out.printf(Locale.ROOT, "    %-8s %s, %d fuera de rareza, %d ms%s%n",
+                        tier, describe(d, matrix), overRarity, ms,
+                        good ? "" : "  <- FALLO" + (problem == null ? "" : " (" + problem + ")"));
+                ok &= good;
+            }
+        }
+        System.out.println(ok ? "  OK" : "  FALLO");
+        return ok;
+    }
+
+    /** Resumen de un mazo de Commander para el registro. */
+    private static String describe(final Deck d, final java.util.Set<String> matrix) {
+        int rares = 0;
+        int lands = 0;
+        for (final PaperCard c : d.getMain().toFlatList()) {
+            if (c.getRules().getType().isLand()) {
+                lands++;
+            } else if (NeoCommanderDuels.lowestRarity(c).ordinal() >= CardRarity.Rare.ordinal()) {
+                rares++;
+            }
+        }
+        return String.format(Locale.ROOT, "%d cartas, %d tierras, %d raras/miticas, bracket %d, %.0f%% de la matriz",
+                d.getMain().countAll(), lands, rares,
+                forge.deck.CommanderBracketCalculator.getBracket(d), 100 * matrixShare(d, matrix));
+    }
+
+    /** Que parte de lo que no es tierra basica sale de la matriz de sinergias. */
+    private static double matrixShare(final Deck d, final java.util.Set<String> matrix) {
+        int total = 0;
+        int in = 0;
+        for (final PaperCard c : d.getMain().toFlatList()) {
+            if (c.getRules().getType().isBasicLand()) {
+                continue;
+            }
+            total++;
+            if (matrix.contains(c.getName())) {
+                in++;
+            }
+        }
+        return total == 0 ? 0 : (double) in / total;
+    }
+
+    /**
+     * Los ajustes que el motor necesita, en CUALQUIER partida.
+     *
+     * <p>Existe por un fallo real: se aplicaban en {@code NeoGame.play} y en
+     * {@code NeoGame.playPuzzle}, y el duelo de la aventura no pasa por
+     * ninguno de los dos — lo monta {@code QuestUtil.finishStartingGame()}. En
+     * la aventura, entonces, {@code UI_SELECT_FROM_CARD_DISPLAYS} seguia en
+     * {@code true} y <b>buscar una tierra en la biblioteca clavaba la
+     * partida</b>: el motor esperaba clicks sobre una biblioteca pintada como
+     * panel, que nuestra mesa no pinta.
+     *
+     * <p>Ahora se aplican en {@code NeoMatchUI.openView}, que el motor llama al
+     * empezar cada partida. Esto lo comprueba: se pone la preferencia al reves
+     * a proposito y se mira que abrir una vista la deje como tiene que estar.
+     * Si alguien mueve esa llamada de sitio, esto se cae.
+     */
+    private static boolean checkEnginePrefs() {
+        System.out.println("  --- Ajustes del motor en cualquier partida ---");
+        final forge.localinstance.properties.ForgePreferences prefs =
+                forge.model.FModel.getPreferences();
+
+        // Al reves de como tienen que quedar, para que el OK signifique algo.
+        prefs.setPref(forge.localinstance.properties.ForgePreferences.FPref
+                .UI_SELECT_FROM_CARD_DISPLAYS, true);
+        // El pase automatico ya no se enciende a la fuerza: sigue al ajuste del
+        // jugador (NeoSettings.AUTO_PASS, 15-09-2026). Se pone al reves de lo
+        // que diga ese ajuste, y abajo se exige que openView lo deje igual que el.
+        final boolean autoPassWanted = forge.neo.NeoSettings.getBool(forge.neo.NeoSettings.AUTO_PASS, true);
+        prefs.setPref(forge.localinstance.properties.ForgePreferences.FPref
+                .YIELD_AUTO_PASS_NO_ACTIONS, !autoPassWanted);
+        // Y las del pase inteligente, tambien al reves de lo que toca con el
+        // ajuste apagado. Ver mas abajo por que esto merece su propia
+        // comprobacion.
+        prefs.setPref(forge.localinstance.properties.ForgePreferences.FPref
+                .YIELD_AUTO_PASS_RESPECTS_INTERRUPTS, true);
+        prefs.setPref(forge.localinstance.properties.ForgePreferences.FPref
+                .YIELD_INTERRUPT_ON_ATTACKERS, false);
+        prefs.setPref(forge.localinstance.properties.ForgePreferences.FPref
+                .YIELD_INTERRUPT_ON_TRIGGERS, true);
+
+        // Sin mesa y sin binder: openView tiene que aguantarlo igual.
+        new forge.neo.match.NeoMatchUI(forge.neo.match.NeoMatchUI.Mode.HUMAN, false)
+                .openView(null);
+
+        final boolean displays = prefs.getPrefBoolean(
+                forge.localinstance.properties.ForgePreferences.FPref.UI_SELECT_FROM_CARD_DISPLAYS);
+        final boolean autoPass = prefs.getPrefBoolean(
+                forge.localinstance.properties.ForgePreferences.FPref.YIELD_AUTO_PASS_NO_ACTIONS);
+
+        // ---- el pase inteligente, APAGADO ----
+        //
+        // Merece comprobacion propia porque "apagado" aqui NO es "todo a
+        // false": es dejarlo como viene de fabrica en Forge, o sea ATTACKERS y
+        // OPPONENT_SPELL en true y las otras cuatro en false. Se escribio mal
+        // la primera vez (30-08-2026) y no lo habria pillado nadie: el
+        // interruptor maestro apagado hace que casi todo de igual, salvo que
+        // YieldController.applyInterrupt limpia un pase activo AUNQUE el
+        // maestro este apagado. O sea que forzarlas a false cambiaba el
+        // comportamiento de quien no ha tocado el ajuste, que es justo lo que
+        // un interruptor apagado no puede hacer.
+        final forge.localinstance.properties.ForgePreferences.FPref respects =
+                forge.localinstance.properties.ForgePreferences.FPref
+                        .YIELD_AUTO_PASS_RESPECTS_INTERRUPTS;
+        final boolean maestro = prefs.getPrefBoolean(respects);
+        final boolean ataques = prefs.getPrefBoolean(
+                forge.localinstance.properties.ForgePreferences.FPref.YIELD_INTERRUPT_ON_ATTACKERS);
+        final boolean disparos = prefs.getPrefBoolean(
+                forge.localinstance.properties.ForgePreferences.FPref.YIELD_INTERRUPT_ON_TRIGGERS);
+        final boolean pase = !maestro && ataques && !disparos;
+
+        System.out.printf(Locale.ROOT,
+                "  Elegir en zonas ocultas por dialogo: %s | auto-pass: %s%n",
+                !displays, autoPass);
+        System.out.printf(Locale.ROOT,
+                "  Pase inteligente apagado: maestro %s, ataques %s (de fabrica), disparos %s%n",
+                maestro, ataques, disparos);
+        final boolean ok = !displays && autoPass == autoPassWanted && pase;
+        System.out.println(ok
+                ? "  OK - abrir una partida deja los ajustes que hace falta"
+                : "  FALLO: openView no aplica los ajustes del motor");
+        return ok;
+    }
+
+    /**
+     * La tienda de sobres, sin ventana.
+     *
+     * <p>Es el pilar del modo, y lo que hay que blindar no es la animacion:
+     * son los <b>numeros</b>. Que se cobre el precio exacto, que la coleccion
+     * crezca exactamente en las cartas que han salido, y que abrir dos veces
+     * seguidas NO de las mismas cartas — que es la trampa de
+     * {@code SealedProduct}, que memoriza su contenido.
+     */
+    private static boolean checkShop() {
+        final String name = "neo-questcheck-shop";
+        NeoQuest.delete(name);
+        System.out.println("  --- Tienda de sobres ---");
+
+        final List<Deck> starters = NeoQuest.starterDecks(NeoQuest.Modalidad.COMMANDER);
+        NeoQuest.start(name, NeoQuest.Modalidad.COMMANDER, NeoQuest.Dificultad.NORMAL,
+                starters.isEmpty() ? null : starters.get(0));
+
+        boolean ok = true;
+
+        // ---- que haya de que elegir ----
+        final List<CardEdition> editions = NeoQuestShop.editions();
+        System.out.printf(Locale.ROOT, "  Expansiones con sobre: %d%n", editions.size());
+        ok &= editions.size() > 50;
+        if (editions.isEmpty()) {
+            System.out.println("  FALLO: no hay ninguna expansion con sobre");
+            NeoQuest.delete(name);
+            return false;
+        }
+
+        // ---- con lo que traes de fabrica no te llega a casi nada ----
+        //
+        // Es progresion sana y esta puesto a proposito, pero conviene dejarlo
+        // por escrito: si un dia el filtro "solo lo que puedo pagar" sale
+        // vacio de golpe, la causa es esta.
+        int affordable = 0;
+        int cheapest = Integer.MAX_VALUE;
+        CardEdition cheapestEdition = null;
+        for (final CardEdition e : editions) {
+            final int price = NeoQuestShop.priceOf(NeoQuestShop.boosterOf(e));
+            if (price < cheapest) {
+                cheapest = price;
+                cheapestEdition = e;
+            }
+            if (price <= NeoQuest.credits()) {
+                affordable++;
+            }
+        }
+        System.out.printf(Locale.ROOT,
+                "  Con %d creditos puedes pagar %d de %d | el mas barato: %s a %d cr.%n",
+                NeoQuest.credits(), affordable, editions.size(),
+                cheapestEdition.getCode(), cheapest);
+
+        // ---- no se fia el sobre ----
+        BoosterPack pack = NeoQuestShop.boosterOf(cheapestEdition);
+        final int price = NeoQuestShop.priceOf(pack);
+        if (NeoQuest.credits() < price) {
+            final boolean refused = NeoQuestShop.buyAndOpen(pack) == null;
+            System.out.printf(Locale.ROOT, "  Sin dinero suficiente la tienda %s%n",
+                    refused ? "no vende (bien)" : "VENDE IGUAL (mal)");
+            ok &= refused;
+        }
+
+        // ---- y con dinero, se compra ----
+        NeoQuest.engine().getAssets().addCredits(20000);
+        final long creditsBefore = NeoQuest.credits();
+        final int collectionBefore = NeoQuest.collectionSize();
+
+        pack = NeoQuestShop.boosterOf(cheapestEdition);
+        final NeoQuestShop.Opened first = NeoQuestShop.buyAndOpen(pack);
+        if (first == null) {
+            System.out.println("  FALLO: no se ha podido comprar el sobre");
+            NeoQuest.delete(name);
+            return false;
+        }
+
+        System.out.printf(Locale.ROOT,
+                "  Abierto %s: %d cartas (%d nuevas) | creditos %d -> %d | coleccion %d -> %d%n",
+                pack.getName(), first.getCards().size(), first.getNewCount(),
+                creditsBefore, NeoQuest.credits(), collectionBefore, NeoQuest.collectionSize());
+        // Informativo, no falla el check: el mismo BoosterGenerator que abre
+        // sobres en draft y sellado los abre aqui (la auditoría del motor, apartado D5) — sortea
+        // foil solo, sin que la tienda tenga que pedirlo. Un sobre puede
+        // tocar cero foil por pura suerte (~4 de cada 5 sobres), asi que no
+        // se puede exigir que salga una.
+        final long questFoils = first.getCards().stream().filter(PaperCard::isFoil).count();
+        System.out.printf(Locale.ROOT, "  De esas, %d son foil%n", questFoils);
+
+        // El precio EXACTO, no "algo menos". Un sobre que cobra de mas o de
+        // menos rompe la economia del modo sin que se note jugando.
+        ok &= first.getPaid() == price;
+        ok &= NeoQuest.credits() == creditsBefore - first.getPaid();
+        // Y la coleccion crece exactamente en lo que ha salido: si crece de
+        // menos, hay cartas del sobre que no han llegado a tu coleccion.
+        ok &= NeoQuest.collectionSize() == collectionBefore + first.getCards().size();
+        ok &= !first.getCards().isEmpty();
+
+        // ---- el sobre usa la plantilla de SU expansion ----
+        int rares = 0;
+        for (final PaperCard c : first.getCards()) {
+            if (c.getRarity() == CardRarity.Rare || c.getRarity() == CardRarity.MythicRare) {
+                rares++;
+            }
+        }
+        System.out.printf(Locale.ROOT, "  Raras o miticas: %d%n", rares);
+        ok &= rares > 0;
+
+        // ---- LA TRAMPA: dos sobres seguidos tienen que ser distintos ----
+        //
+        // SealedProduct.getCards() memoriza. Si no se genera un sobre nuevo
+        // despues de cada compra, el jugador "abre" una y otra vez exactamente
+        // las mismas quince cartas.
+        final BoosterPack second = NeoQuestShop.boosterOf(cheapestEdition);
+        final NeoQuestShop.Opened opened2 = NeoQuestShop.buyAndOpen(second);
+        final boolean different = opened2 != null
+                && !sameCards(first.getCards(), opened2.getCards());
+        System.out.printf(Locale.ROOT, "  El segundo sobre trae cartas %s%n",
+                different ? "distintas (bien)" : "IDENTICAS (mal: se reusa el sobre)");
+        ok &= different;
+
+        // ---- cartas sueltas ----
+        //
+        // El mostrador se genera solo la primera vez que se le pide. Lo que hay
+        // que comprobar es que se cobra el precio del motor, que la carta entra
+        // en la coleccion y que DESAPARECE del mostrador: buyCard no la quita,
+        // asi que sin retirarla a mano se podria comprar la misma copia siempre.
+        final java.util.List<PaperCard> onSale = NeoQuestShop.singles();
+        System.out.printf(Locale.ROOT, "  Mostrador: %d cartas sueltas%n", onSale.size());
+        ok &= !onSale.isEmpty();
+        if (!onSale.isEmpty()) {
+            final PaperCard single = onSale.get(0);
+            final int cardPrice = NeoQuestShop.priceOfCard(single);
+            final long moneyBefore = NeoQuest.credits();
+            final int cardsBefore = NeoQuest.collectionSize();
+            final NeoQuestShop.Opened bought = NeoQuestShop.buySingle(single);
+            final boolean gone = NeoQuestShop.singles().size() < onSale.size();
+            System.out.printf(Locale.ROOT,
+                    "  Comprada \"%s\" por %d cr. | creditos %d -> %d | coleccion %d -> %d | %s%n",
+                    single.getName(), cardPrice, moneyBefore, NeoQuest.credits(),
+                    cardsBefore, NeoQuest.collectionSize(),
+                    gone ? "fuera del mostrador (bien)" : "SIGUE EN VENTA (mal)");
+            ok &= bought != null
+                    && bought.getPaid() == cardPrice
+                    && NeoQuest.credits() == moneyBefore - cardPrice
+                    && NeoQuest.collectionSize() == cardsBefore + 1
+                    && gone;
+        }
+
+        // ---- sobres de colector ----
+        //
+        // Lo que hay que blindar es que de verdad traigan lo que prometen: si
+        // un "sobre de colector" saca las mismas cartas que el normal, es un
+        // sobre normal al triple de precio. Se comprueba que al menos una carta
+        // venga de una hoja de arte especial, comparandola con lo que trae la
+        // hoja normal de la expansion.
+        final java.util.List<CardEdition> collectorSets = NeoQuestShop.collectorEditions();
+        System.out.printf(Locale.ROOT, "  Colector: %d expansiones lo tienen%n",
+                collectorSets.size());
+        ok &= collectorSets.size() > 10;
+
+        if (!collectorSets.isEmpty()) {
+            final CardEdition set = collectorSets.get(0);
+            final java.util.List<String> sheets = NeoQuestShop.artSheetsOf(set);
+            System.out.printf(Locale.ROOT, "  %s (%s) tiene hojas: %s | normal %d cr., colector %d cr.%n",
+                    set.getName(), set.getCode(), sheets,
+                    NeoQuestShop.priceOf(NeoQuestShop.boosterOf(set)),
+                    NeoQuestShop.collectorPrice(set));
+            ok &= NeoQuestShop.collectorPrice(set)
+                    == NeoQuestShop.priceOf(NeoQuestShop.boosterOf(set)) * 3;
+
+            // Los numeros de coleccionista de las hojas de arte de ESTE set.
+            final java.util.Set<String> fancy = new java.util.HashSet<>();
+            for (final String sheet : sheets) {
+                final forge.card.PrintSheet ps = forge.model.FModel.getMagicDb()
+                        .getPrintSheets().get(set.getCode() + " " + sheet);
+                if (ps != null) {
+                    for (final PaperCard c : ps.toFlatList()) {
+                        fancy.add(c.getName() + "|" + c.getCollectorNumber());
+                    }
+                }
+            }
+            System.out.printf(Locale.ROOT, "  La expansion tiene %d impresiones especiales%n",
+                    fancy.size());
+
+            final forge.item.BoosterPack collector = NeoQuestShop.collectorBooster(set);
+            ok &= collector != null;
+            if (collector != null) {
+                final java.util.List<PaperCard> got = collector.getCards();
+                int special = 0;
+                int foils = 0;
+                for (final PaperCard c : got) {
+                    if (fancy.contains(c.getName() + "|" + c.getCollectorNumber())) {
+                        special++;
+                    }
+                    if (c.isFoil()) {
+                        foils++;
+                    }
+                }
+                System.out.printf(Locale.ROOT,
+                        "  Un colector trae %d cartas: %d de arte especial, %d en foil%n",
+                        got.size(), special, foils);
+                ok &= got.size() >= 10 && special > 0 && foils > 0;
+
+                // Y no se puede reusar, igual que los demas sobres.
+                ok &= !sameCards(got, NeoQuestShop.collectorBooster(set).getCards());
+
+                // Y varios de una vez, como los normales (Discord, 11-10-2026):
+                // se cobran los tres y salen las cartas de los tres.
+                final int each = NeoQuestShop.collectorPrice(set);
+                NeoQuest.engine().getAssets().addCredits(each * 3);
+                final long beforeThree = NeoQuest.credits();
+                final NeoQuestShop.Opened three = NeoQuestShop.buyCollector(set, 3);
+                final boolean threeOk = three != null
+                        && beforeThree - NeoQuest.credits() == each * 3L
+                        && three.getPaid() == each * 3
+                        && three.getCards().size() >= got.size() * 3 - 3;
+                System.out.printf(Locale.ROOT, "  Tres de colector de una vez: %s%n",
+                        three == null ? "NO SE HAN COMPRADO"
+                                : three.getCards().size() + " cartas por " + three.getPaid() + " cr."
+                                        + (threeOk ? " (bien)" : " (MAL)"));
+                ok &= threeOk;
+            }
+        }
+
+        // ---- los Jumpstart (Discord, 20-10-2026: Hei Bai no salia en ningun
+        // sobre). Todos los temas de Forge, y el de Hei Bai se compra entero.
+        final java.util.List<NeoJumpstart.Theme> themes = NeoJumpstart.available();
+        NeoJumpstart.Theme heiBai = null;
+        for (final NeoJumpstart.Theme t : themes) {
+            if (heiBai == null && t.highlights().contains("Hei Bai, Forest Guardian")) {
+                heiBai = t;
+            }
+        }
+        System.out.printf(Locale.ROOT, "  Jumpstart: %d temas; Hei Bai en %s%n", themes.size(),
+                heiBai == null ? "NINGUNO (mal)" : heiBai.name());
+        ok &= themes.size() >= 100 && heiBai != null;
+        if (heiBai != null) {
+            final int jp = NeoQuestShop.jumpstartPrice(heiBai);
+            NeoQuest.engine().getAssets().addCredits(jp);
+            final long jBefore = NeoQuest.credits();
+            final int jCards = NeoQuest.collectionSize();
+            final NeoQuestShop.Opened j = NeoQuestShop.buyJumpstart(heiBai);
+            final boolean jOk = j != null && j.getPaid() == jp && NeoQuest.credits() == jBefore - jp
+                    && j.getCards().size() >= 18
+                    && NeoQuest.collectionSize() == jCards + j.getCards().size()
+                    && j.getCards().stream().anyMatch(c -> "Hei Bai, Forest Guardian".equals(c.getName()));
+            System.out.printf(Locale.ROOT, "  Tema comprado: %s por %d cr. -> %d cartas, con Hei Bai%s%n",
+                    heiBai.label, jp, j == null ? 0 : j.getCards().size(), jOk ? " (bien)" : " (MAL)");
+            ok &= jOk;
+        }
+        // Y como se vende: un sobre por Jumpstart, con un tema al azar dentro.
+        final java.util.List<NeoJumpstart.Product> jProducts = NeoJumpstart.products();
+        NeoJumpstart.Product avatar = null;
+        for (final NeoJumpstart.Product p : jProducts) {
+            if (p.name.contains("Avatar")) {
+                avatar = p;
+            }
+        }
+        System.out.printf(Locale.ROOT, "  Sobres Jumpstart: %d; el de Avatar con %d temas%n",
+                jProducts.size(), avatar == null ? 0 : avatar.themes.size());
+        ok &= jProducts.size() >= 8 && avatar != null && avatar.themes.size() >= 50;
+        // NINGUN TEMA VACIO (07-11-2026): el sobre trae uno al azar, y uno que
+        // no se puede abrir dejaba la compra en nada sin decir por que. El
+        // sorteo va con la semilla de la prueba, asi que un tema roto solo
+        // salia cuando algo de antes movia el sorteo.
+        for (final NeoJumpstart.Product p : jProducts) {
+            final java.util.List<String> empty = new java.util.ArrayList<>();
+            for (final NeoJumpstart.Theme t : p.themes) {
+                if (t.contents().isEmpty()) {
+                    empty.add(t.name());
+                }
+            }
+            if (!empty.isEmpty()) {
+                System.out.printf(Locale.ROOT, "  Jumpstart %s: %d de %d temas VACIOS: %s (MAL)%n",
+                        p.name, empty.size(), p.themes.size(), empty);
+                ok = false;
+            }
+        }
+        if (avatar != null) {
+            final int ap = NeoQuestShop.jumpstartPrice(avatar);
+            NeoQuest.engine().getAssets().addCredits(ap);
+            final long aBefore = NeoQuest.credits();
+            final NeoQuestShop.Opened jPack = NeoQuestShop.buyJumpstart(avatar);
+            final boolean packOk = jPack != null && jPack.getPaid() == ap && NeoQuest.credits() == aBefore - ap
+                    && jPack.getCards().size() >= 18;
+            System.out.printf(Locale.ROOT, "  Sobre Jumpstart de Avatar: %d cartas por %d cr.%s%n",
+                    jPack == null ? 0 : jPack.getCards().size(), ap, packOk ? " (bien)" : " (MAL)");
+            ok &= packOk;
+        }
+
+        // ---- los sobres de tierras basicas (Discord, 11-10-2026) ----
+        //
+        // Cinco, uno por tipo, en cualquier mundo: en uno de expansiones viejas
+        // (Shandalar) no habia otra forma de conseguir basicas.
+        int landPacks = 0;
+        LandPack mountains = null;
+        for (final forge.item.SealedProduct b : NeoQuestShop.boxes()) {
+            if (b instanceof LandPack) {
+                landPacks++;
+                if ("Mountain".equals(((LandPack) b).getLand().getName())) {
+                    mountains = (LandPack) b;
+                }
+            }
+        }
+        boolean landsOk = landPacks == 5 && mountains != null
+                && NeoQuestShop.priceOfItem(mountains) == LandPack.PRICE;
+        if (mountains != null) {
+            NeoQuest.engine().getAssets().addCredits(LandPack.PRICE);
+            final long beforeLands = NeoQuest.credits();
+            final int hadMountains = forge.neo.quest.NeoQuestSell.owned(mountains.getLand());
+            final NeoQuestShop.Opened lands = NeoQuestShop.buyBox(mountains);
+            landsOk &= lands != null && lands.getCards().size() == LandPack.CARDS
+                    && beforeLands - NeoQuest.credits() == LandPack.PRICE
+                    && forge.neo.quest.NeoQuestSell.owned(mountains.getLand()) == hadMountains + LandPack.CARDS;
+            System.out.printf(Locale.ROOT, "  Tierras: %d sobres | \"%s\" (%s) por %d cr. -> %d cartas%s%n",
+                    landPacks, NeoQuestShop.productName(mountains), mountains.getLand().getEdition(),
+                    LandPack.PRICE, lands == null ? 0 : lands.getCards().size(), landsOk ? " (bien)" : " (MAL)");
+        } else {
+            System.out.printf(Locale.ROOT, "  Tierras: %d sobres y ninguno de Montanyas (MAL)%n", landPacks);
+        }
+        ok &= landsOk;
+
+        // ---- el sobre de Secret Lair ----
+        //
+        // Lo que hay que blindar es el CRITERIO: que las cartas sean de las que
+        // no salen en ningun otro sitio. Un Secret Lair lleno de Sol Rings con
+        // arte nuevo no le da nada a nadie, porque la carta ya la tienes.
+        final java.util.List<PaperCard> pool = NeoQuestShop.secretLairPool();
+        System.out.printf(Locale.ROOT, "  Secret Lair: %d cartas exclusivas%n", pool.size());
+        // Se listan: son pocas y son EL contenido del producto. Si un dia el
+        // criterio se afloja y empiezan a colarse reimpresiones con arte nuevo,
+        // se ve aqui de un vistazo.
+        for (final PaperCard c : pool) {
+            System.out.println("      . " + c.getName() + " (" + c.getRarity() + ")");
+        }
+        ok &= pool.size() > 20;
+
+        boolean onlyInSecretLair = true;
+        for (final PaperCard c : pool) {
+            for (final PaperCard other
+                    : forge.model.FModel.getMagicDb().getCommonCards().getAllCards(c.getName())) {
+                final String set = other.getEdition();
+                // SLX (Universes Within) es la misma carta reflavorizada y
+                // tampoco sale en ningun sobre: cuenta como Secret Lair.
+                if (!"SLD".equals(set) && !"SLC".equals(set) && !"SLU".equals(set)
+                        && !"SLX".equals(set)) {
+                    onlyInSecretLair = false;
+                    System.out.println("  FALLA: " + c.getName() + " tambien esta en " + set);
+                    break;
+                }
+            }
+            if (!onlyInSecretLair) {
+                break;
+            }
+        }
+        System.out.printf(Locale.ROOT, "  Ninguna sale en otra expansion: %s%n",
+                onlyInSecretLair ? "bien" : "MAL");
+        ok &= onlyInSecretLair;
+
+        final java.util.List<PaperCard> drop = NeoQuestShop.secretLairPack();
+        final java.util.Set<String> distinct = new java.util.HashSet<>();
+        for (final PaperCard c : drop) {
+            distinct.add(c.getName());
+        }
+        System.out.printf(Locale.ROOT, "  Un drop trae %d cartas, %d distintas%n",
+                drop.size(), distinct.size());
+        ok &= drop.size() == NeoQuestShop.SECRET_LAIR_SIZE
+                && distinct.size() == drop.size();
+
+        // Dos drops seguidos no pueden ser el mismo, igual que los sobres.
+        ok &= !sameCards(drop, NeoQuestShop.secretLairPack());
+
+        final long slMoneyBefore = NeoQuest.credits();
+        final int slCardsBefore = NeoQuest.collectionSize();
+        final NeoQuestShop.Opened lair = NeoQuestShop.buySecretLair(drop);
+        System.out.printf(Locale.ROOT,
+                "  Secret Lair comprado por %d cr. | creditos %d -> %d | coleccion %d -> %d%n",
+                NeoQuestShop.SECRET_LAIR_PRICE, slMoneyBefore, NeoQuest.credits(),
+                slCardsBefore, NeoQuest.collectionSize());
+        ok &= lair != null
+                && lair.getPaid() == NeoQuestShop.SECRET_LAIR_PRICE
+                && NeoQuest.credits() == slMoneyBefore - NeoQuestShop.SECRET_LAIR_PRICE
+                && NeoQuest.collectionSize() == slCardsBefore + drop.size();
+
+        // ---- los drops CON NOMBRE ----
+        //
+        // La tabla la escribimos nosotros (Forge no sabe a que drop pertenece
+        // cada carta), asi que lo que hay que comprobar es que sus rangos
+        // siguen resolviendo cartas de verdad: si Forge renumera el fichero de
+        // edicion, un rango se queda vacio y el drop desapareceria de la tienda
+        // en silencio. Aqui se ve.
+        final java.util.List<forge.neo.quest.SecretLairDrops.Drop> named = NeoQuestShop.drops();
+        System.out.printf(Locale.ROOT, "  Drops con nombre: %d%n", named.size());
+        boolean dropsOk = named.size() >= 15;
+        int withExclusives = 0;
+        for (final forge.neo.quest.SecretLairDrops.Drop dr : named) {
+            System.out.printf(Locale.ROOT, "      . %-42s %2d cartas, %d exclusivas, %d cr.%n",
+                    dr.getName(), dr.getCards().size(), dr.getExclusiveCount(), dr.getPrice());
+            // Un drop vacio o sin precio no puede llegar al mostrador.
+            dropsOk &= !dr.getCards().isEmpty() && dr.getPrice() > 0;
+            // Y ninguna carta puede salir dos veces: los rangos se solapan con
+            // las variantes del mismo numero (1508 liso y 1508 con marca).
+            final java.util.Set<String> names = new java.util.HashSet<>();
+            for (final PaperCard c : dr.getCards()) {
+                dropsOk &= names.add(c.getName());
+            }
+            if (dr.getExclusiveCount() > 0) {
+                withExclusives++;
+            }
+        }
+        // Y lo que da sentido a la tabla: casi todos tienen que traer algo que
+        // no se pueda conseguir de otra forma. Si no, son sobres caros.
+        System.out.printf(Locale.ROOT, "  Con al menos una exclusiva: %d de %d%n",
+                withExclusives, named.size());
+        dropsOk &= withExclusives >= named.size() - 1;
+        ok &= dropsOk;
+
+        // Comprar uno: cobra lo que dice y mete EXACTAMENTE sus cartas.
+        if (!named.isEmpty()) {
+            final forge.neo.quest.SecretLairDrops.Drop firstDrop = named.get(0);
+            NeoQuest.engine().getAssets().addCredits(firstDrop.getPrice());
+            final long dropMoney = NeoQuest.credits();
+            final int dropCards = NeoQuest.collectionSize();
+            final NeoQuestShop.Opened bought = NeoQuestShop.buyDrop(firstDrop);
+            System.out.printf(Locale.ROOT,
+                    "  %s comprado por %d cr. | creditos %d -> %d | coleccion %d -> %d%n",
+                    firstDrop.getName(), firstDrop.getPrice(), dropMoney, NeoQuest.credits(),
+                    dropCards, NeoQuest.collectionSize());
+            ok &= bought != null
+                    && bought.getPaid() == firstDrop.getPrice()
+                    && NeoQuest.credits() == dropMoney - firstDrop.getPrice()
+                    && NeoQuest.collectionSize() == dropCards + firstDrop.getCards().size();
+
+            // Un drop trae SIEMPRE lo mismo: es su gracia, y lo contrario de
+            // un sobre. Si esto dejara de cumplirse, lo que se ensenya antes
+            // de pagar dejaria de ser lo que compras.
+            ok &= sameCards(firstDrop.getCards(), NeoQuestShop.drops().get(0).getCards());
+        }
+
+        // Y sin dinero no se vende, que es lo unico que no se puede deshacer.
+        NeoQuest.engine().getAssets().subtractCredits(NeoQuest.credits());
+        final boolean refusedDrop = named.isEmpty()
+                || NeoQuestShop.buyDrop(named.get(0)) == null;
+        System.out.printf(Locale.ROOT, "  Sin dinero, el drop %s%n",
+                refusedDrop ? "no se vende (bien)" : "SE VENDE IGUAL (mal)");
+        ok &= refusedDrop;
+        final boolean refusedLair = NeoQuestShop.buySecretLair(NeoQuestShop.secretLairPack()) == null;
+        System.out.printf(Locale.ROOT, "  Sin dinero, el Secret Lair %s%n",
+                refusedLair ? "no se vende (bien)" : "SE VENDE IGUAL (mal)");
+        ok &= refusedLair;
+        NeoQuest.engine().getAssets().addCredits(5000);
+
+        // ---- el ARTE, restringido a lo que tienes ----
+        //
+        // Es la mitad de la gracia de un sobre de colector: si el editor te
+        // ofrece las 95.000 impresiones de Forge, abrir un borderless no
+        // significa nada porque ya lo tenias puesto de fabrica. Aqui se
+        // comprueba que en la aventura solo se ofrecen los artes abiertos, y
+        // que FUERA de ella se siguen ofreciendo todos.
+        final forge.neo.quest.QuestDeckContext ctx = new forge.neo.quest.QuestDeckContext();
+        PaperCard sample = null;
+        for (final PaperCard c : ctx.pool()) {
+            // Y de la que NO tengas todas: si el azar de la tienda te dio las
+            // tres impresiones de la primera que salga (07-11-2026), la prueba
+            // no demuestra nada y fallaba sin que el juego hiciera nada mal.
+            final int all = forge.model.FModel.getMagicDb().getCommonCards().getAllCards(c.getName()).size();
+            if (all > 2 && ctx.printingsOf(c).size() < all) {
+                sample = c;
+                break;
+            }
+        }
+        if (sample == null) {
+            System.out.println("  - no hay ninguna carta con varias impresiones para probar");
+        } else {
+            final int inTheGame =
+                    forge.model.FModel.getMagicDb().getCommonCards().getAllCards(sample.getName()).size();
+            final java.util.List<PaperCard> mine = ctx.printingsOf(sample);
+            System.out.printf(Locale.ROOT,
+                    "  Arte de \"%s\": tienes %d de las %d impresiones que existen%n",
+                    sample.getName(), mine.size(), inTheGame);
+            ok &= !mine.isEmpty() && mine.size() < inTheGame;
+
+            // Y todas las que ofrece tienen que estar de verdad en tu coleccion.
+            boolean allOwned = true;
+            for (final PaperCard c : mine) {
+                boolean found = false;
+                for (final java.util.Map.Entry<PaperCard, Integer> e : NeoQuest.collection()) {
+                    if (e.getKey().equals(c)) {
+                        found = true;
+                        break;
+                    }
+                }
+                allOwned &= found;
+            }
+            System.out.printf(Locale.ROOT, "  Y todas son tuyas: %s%n", allOwned ? "bien" : "MAL");
+            ok &= allOwned;
+
+            // Una carta que NO tienes no ofrece ningun arte.
+            final PaperCard notMine = forge.model.FModel.getMagicDb()
+                    .getCommonCards().getCard("Black Lotus");
+            if (notMine != null && ctx.owned(notMine) == 0) {
+                System.out.printf(Locale.ROOT, "  Una carta que no tienes ofrece %d artes%n",
+                        ctx.printingsOf(notMine).size());
+                ok &= ctx.printingsOf(notMine).isEmpty();
+            }
+
+            // Fuera de la aventura, todos.
+            final int free = forge.neo.match.NeoFormat.COMMANDER.printingsOf(sample) == null
+                    ? inTheGame : forge.neo.match.NeoFormat.COMMANDER.printingsOf(sample).size();
+            System.out.printf(Locale.ROOT,
+                    "  Fuera de la aventura se ofrecen las %d%n", free);
+            ok &= free == inTheGame;
+        }
+
+
+        // ---- el ida y vuelta del ARTE: abrir uno nuevo de algo que ya tienes ----
+        //
+        // Esto es lo que faltaba por probar de punta a punta. Lo de arriba
+        // comprueba que solo se ofrecen los artes que tienes; lo que no estaba
+        // comprobado es el paso siguiente: que al APARECER un arte nuevo de una
+        // carta que ya tenias, el editor lo ofrezca ademas del viejo.
+        //
+        // ⚠️ Y de paso sale la trampa que tiene montarlo: QuestDeckContext lee
+        // la coleccion en su CONSTRUCTOR. Si se anyade una carta despues, el
+        // contexto que ya estaba abierto no se entera — o sea que comprar un
+        // sobre de colector con el editor abierto no anyade los artes hasta
+        // volver a entrar. Aqui se ve, porque el contexto viejo sigue diciendo
+        // una y el nuevo dice dos.
+        final PaperCard twoArts = pickWithSeveralPrintings();
+        if (twoArts == null) {
+            System.out.println("  - no hay ninguna carta con dos impresiones para el ida y vuelta");
+        } else {
+            final java.util.List<PaperCard> printings = forge.model.FModel.getMagicDb()
+                    .getCommonCards().getAllCards(twoArts.getName());
+            final PaperCard artA = printings.get(0);
+            final PaperCard artB = printings.get(1);
+
+            // Se parte de tener SOLO artA. Se quita todo lo que hubiera de esa
+            // carta y se pone una copia: si quedara alguna otra impresion
+            // suelta de antes, la cuenta de artes empezaria en 2 y la prueba
+            // no probaria nada.
+            NeoQuest.engine().getCards().getCardpool()
+                    .removeIf(c -> c.getName().equals(twoArts.getName()));
+            NeoQuest.engine().getCards().addSingleCard(artA, 1);
+            final forge.neo.quest.QuestDeckContext before =
+                    new forge.neo.quest.QuestDeckContext();
+            final int artsBefore = before.printingsOf(artA).size();
+
+            // Y ahora "abres un colector" que trae la MISMA carta con otro arte.
+            NeoQuest.engine().getCards().addSingleCard(artB, 1);
+            final forge.neo.quest.QuestDeckContext after =
+                    new forge.neo.quest.QuestDeckContext();
+            final int artsAfter = after.printingsOf(artA).size();
+
+            System.out.printf(Locale.ROOT,
+                    "  \"%s\": con un arte el editor ofrece %d; tras abrir el segundo (%s), %d%n",
+                    twoArts.getName(), artsBefore, artB.getEdition(), artsAfter);
+            ok &= artsBefore == 1 && artsAfter == 2;
+
+            // El contexto que ya estaba abierto NO se entera: es un dato real,
+            // no un defecto de la prueba. Quien abra el editor y compre a la vez
+            // tiene que volver a entrar.
+            System.out.printf(Locale.ROOT,
+                    "  El contexto abierto antes sigue ofreciendo %d (hay que reabrir el editor)%n",
+                    before.printingsOf(artA).size());
+
+            // Y cuantas copias llevas se cuenta por NOMBRE, no por impresion:
+            // dos artes distintos de la misma carta son dos copias de esa carta.
+            System.out.printf(Locale.ROOT, "  Copias que posees de \"%s\": %d%n",
+                    twoArts.getName(), after.owned(artA));
+            ok &= after.owned(artA) == 2;
+        }
+
+        // ---- vender las repetidas ----
+        //
+        // La regla la trae el motor (QuestSpellShop.sellExtras) y ya sabe de
+        // Commander: en una aventura de Commander se conserva UNA copia; en una
+        // de Estandar, cuatro. Lo que se comprueba aqui es lo que de verdad se
+        // puede romper: que se cuenta por IMPRESION y no por nombre. Contarlo
+        // por nombre venderia artes que ya no podrias volver a poner en un mazo,
+        // y eso se cargaria justo la restriccion de arte de aqui arriba.
+        final PaperCard dupe = pickWithSeveralPrintings();
+        if (dupe != null) {
+            final java.util.List<PaperCard> printings = forge.model.FModel.getMagicDb()
+                    .getCommonCards().getAllCards(dupe.getName());
+            final PaperCard artA = printings.get(0);
+            final PaperCard artB = printings.get(1);
+            NeoQuest.engine().getCards().getCardpool()
+                    .removeIf(c -> c.getName().equals(dupe.getName()));
+
+            // Un arte y otro arte: en Commander eso NO es una repetida.
+            NeoQuest.engine().getCards().addSingleCard(artA, 1);
+            NeoQuest.engine().getCards().addSingleCard(artB, 1);
+            forge.neo.quest.NeoQuestSell.Sold preview =
+                    forge.neo.quest.NeoQuestSell.preview();
+            boolean touchesArts = false;
+            for (final PaperCard c : preview.getCards()) {
+                touchesArts |= c.getName().equals(dupe.getName());
+            }
+            System.out.printf(Locale.ROOT,
+                    "  Dos ARTES de \"%s\": la venta automatica %s%n", dupe.getName(),
+                    touchesArts ? "SE LOS LLEVA (mal)" : "no los toca (bien)");
+            ok &= !touchesArts;
+
+            // Dos copias de la MISMA impresion si lo son.
+            NeoQuest.engine().getCards().addSingleCard(artA, 2);
+            preview = forge.neo.quest.NeoQuestSell.preview();
+            int spare = 0;
+            for (final PaperCard c : preview.getCards()) {
+                if (c.equals(artA)) {
+                    spare = 1;
+                }
+            }
+            System.out.printf(Locale.ROOT,
+                    "  Tres copias del MISMO arte: sobran, la venta las ve: %s%n",
+                    spare == 1 ? "bien" : "MAL");
+            ok &= spare == 1;
+
+            // Y una tierra basica no se vende nunca, por muchas que tengas.
+            final PaperCard forest = forge.model.FModel.getMagicDb()
+                    .getCommonCards().getCard("Forest");
+            if (forest != null) {
+                System.out.printf(Locale.ROOT, "  De \"Forest\" se conservan %d%n",
+                        forge.neo.quest.NeoQuestSell.howManyToKeep(forest));
+                ok &= forge.neo.quest.NeoQuestSell.howManyToKeep(forest) > 4;
+            }
+
+            // Vender de verdad: paga, quita las copias y las devuelve al
+            // mostrador, que es lo que hace que sea reversible.
+            final long moneyBefore = NeoQuest.credits();
+            final int shopBefore = NeoQuestShop.singles().size();
+            final forge.neo.quest.NeoQuestSell.Sold done =
+                    forge.neo.quest.NeoQuestSell.sell();
+            System.out.printf(Locale.ROOT,
+                    "  Vendidas %d copias por %d cr. | creditos %d -> %d | mostrador %d -> %d%n",
+                    done.getCopies(), done.getCredits(), moneyBefore, NeoQuest.credits(),
+                    shopBefore, NeoQuestShop.singles().size());
+            ok &= done.getCopies() > 0
+                    && NeoQuest.credits() == moneyBefore + done.getCredits()
+                    && NeoQuestShop.singles().size() == shopBefore + done.getCopies();
+
+            // Y despues de vender no queda nada que vender: si esto fallara,
+            // llamarlo dos veces seguidas seguiria sacando dinero de la nada.
+            final forge.neo.quest.NeoQuestSell.Sold again =
+                    forge.neo.quest.NeoQuestSell.preview();
+            System.out.printf(Locale.ROOT, "  Y una segunda pasada vende %d%n",
+                    again.getCopies());
+            ok &= again.isEmpty();
+
+            // Y vender a mano UNA carta concreta, que es la otra mitad del
+            // mostrador: aqui si se puede vender la ultima copia.
+            final long handMoney = NeoQuest.credits();
+            final int had = forge.neo.quest.NeoQuestSell.owned(artA);
+            final int paid = forge.neo.quest.NeoQuestSell.sellOne(artA, 1);
+            System.out.printf(Locale.ROOT,
+                    "  A mano: vendida 1 de \"%s\" por %d cr. | tenias %d, quedan %d%n",
+                    artA.getName(), paid, had,
+                    forge.neo.quest.NeoQuestSell.owned(artA));
+            ok &= paid > 0
+                    && forge.neo.quest.NeoQuestSell.owned(artA) == had - 1
+                    && NeoQuest.credits() == handMoney + paid;
+
+            // Y no se pueden vender mas copias de las que tienes: pedir cien
+            // vende las que haya y ni una mas.
+            final int left = forge.neo.quest.NeoQuestSell.owned(artA);
+            forge.neo.quest.NeoQuestSell.sellOne(artA, 100);
+            System.out.printf(Locale.ROOT,
+                    "  Pedir 100 con %d en la mano deja %d%n", left,
+                    forge.neo.quest.NeoQuestSell.owned(artA));
+            ok &= forge.neo.quest.NeoQuestSell.owned(artA) == 0;
+
+            // ---- vender por lotes sin tocar los mazos (27-09-2026) ----
+            //
+            // Tres copias de un arte y un mazo que lleva dos: se puede vender
+            // UNA sin tocar el mazo. Lo que se rompe si la cuenta esta mal es
+            // justo lo que no se ve: el motor quita del mazo lo vendido
+            // (QuestUtilCards.removeCard), y el mazo se queda corto en silencio.
+            NeoQuest.engine().getCards().addSingleCard(artB, 2);
+            final forge.deck.Deck test = new forge.deck.Deck("neo-sellcheck");
+            test.getMain().add(artB, 2);
+            NeoQuest.engine().getMyDecks().add(test);
+            final java.util.Map<PaperCard, Integer> used =
+                    forge.neo.quest.NeoQuestSell.usedByDecks();
+            final int free = forge.neo.quest.NeoQuestSell.notInDecks(artB, used);
+            final java.util.Map<PaperCard, Integer> plan =
+                    forge.neo.quest.NeoQuestSell.notInDecksPlan();
+            System.out.printf(Locale.ROOT,
+                    "  Lote: tienes %d de \"%s\", un mazo usa %d -> libres %d, el boton gordo vende %d%n",
+                    forge.neo.quest.NeoQuestSell.owned(artB), artB.getName(),
+                    used.getOrDefault(artB, 0), free, plan.getOrDefault(artB, 0));
+            ok &= used.getOrDefault(artB, 0) == 2 && free == 1 && plan.getOrDefault(artB, 0) == 1;
+
+            // El boton gordo de verdad: despues no queda nada libre, y cada
+            // mazo sigue entero.
+            final long bulkMoney = NeoQuest.credits();
+            final forge.neo.quest.NeoQuestSell.Sold bulk =
+                    forge.neo.quest.NeoQuestSell.sell(plan);
+            boolean decksIntact = true;
+            for (final java.util.Map.Entry<PaperCard, Integer> e : used.entrySet()) {
+                decksIntact &= forge.neo.quest.NeoQuestSell.owned(e.getKey()) >= e.getValue();
+            }
+            final forge.deck.Deck reread = NeoQuest.engine().getMyDecks().get("neo-sellcheck");
+            decksIntact &= reread != null && reread.getMain().count(artB) == 2;
+            final boolean nothingLeft = forge.neo.quest.NeoQuestSell
+                    .preview(forge.neo.quest.NeoQuestSell.notInDecksPlan()).isEmpty();
+            System.out.printf(Locale.ROOT,
+                    "  Vender todo lo que no va en un mazo: %d copias por %d cr. | mazos %s | queda libre: %s%n",
+                    bulk.getCopies(), bulk.getCredits(), decksIntact ? "enteros" : "ROTOS",
+                    nothingLeft ? "nada" : "ALGO");
+            ok &= decksIntact && nothingLeft
+                    && NeoQuest.credits() == bulkMoney + bulk.getCredits();
+            NeoQuest.deleteDeck("neo-sellcheck");
+
+            // ---- vender desde el BOTIN (NeoQuestHaul, Discord 16-10-2026) ----
+            //
+            // Un mazo que usa 2 y 3 en la coleccion: desde el botin se vende la
+            // que sobra, y ni una mas (la de los mazos dice "en un mazo").
+            final int haveB = forge.neo.quest.NeoQuestSell.owned(artB);
+            NeoQuest.engine().getCards().addSingleCard(artB, Math.max(0, 3 - haveB));
+            final forge.deck.Deck haulDeck = new forge.deck.Deck("neo-haulcheck");
+            haulDeck.getMain().add(artB, 2);
+            NeoQuest.engine().getMyDecks().add(haulDeck);
+            final forge.neo.quest.NeoQuestHaul haul = new forge.neo.quest.NeoQuestHaul();
+            final int byNameBefore = haul.ownedByName(artB);
+            final boolean couldSell = haul.canSell(artB);
+            final long haulMoney = NeoQuest.credits();
+            final int haulGot = haul.sell(artB);
+            final boolean blockedAfter = !haul.canSell(artB) && haul.keptForDecks(artB) && haul.sell(artB) == 0;
+            System.out.printf(Locale.ROOT,
+                    "  Botin: tienes %d de \"%s\" (un mazo usa 2) -> vende %s por %d cr., luego %s | tienes %d%n",
+                    byNameBefore, artB.getName(), couldSell ? "una" : "NADA", haulGot,
+                    blockedAfter ? "\"en un mazo\"" : "SIGUE VENDIENDO", haul.ownedByName(artB));
+            ok &= couldSell && haulGot > 0 && blockedAfter
+                    && haul.ownedByName(artB) == byNameBefore - 1 && haul.sold() == 1
+                    && haul.earned() == haulGot && NeoQuest.credits() == haulMoney + haulGot;
+            NeoQuest.deleteDeck("neo-haulcheck");
+
+            // ---- el mazo lleva OTRA impresion que la tuya (Discord, 12-10-2026) ----
+            //
+            // "accidentally sold half of my commander deck": el editor de la
+            // Quest da por tuya una carta si tienes alguna de su nombre, asi que
+            // un mazo puede llevar artA y la coleccion solo artB. Mirando solo
+            // la impresion, artB salia libre y "vender lo que no va en un mazo"
+            // se la llevaba; el mazo se quedaba con una carta que ya no tienes.
+            NeoQuest.engine().getCards().getCardpool()
+                    .removeIf(c -> c.getName().equals(dupe.getName()));
+            NeoQuest.engine().getCards().addSingleCard(artB, 2);
+            final forge.deck.Deck other = new forge.deck.Deck("neo-sellcheck-name");
+            other.getMain().add(artA, 1);
+            NeoQuest.engine().getMyDecks().add(other);
+            final java.util.Map<PaperCard, Integer> usedName =
+                    forge.neo.quest.NeoQuestSell.usedByDecks();
+            final java.util.Map<PaperCard, Integer> planName =
+                    forge.neo.quest.NeoQuestSell.notInDecksPlan();
+            System.out.printf(Locale.ROOT,
+                    "  Mazo con %s y coleccion con 2 de %s: se guardan %d, libres %d, el boton gordo vende %d%n",
+                    artA.getEdition(), artB.getEdition(), usedName.getOrDefault(artB, 0),
+                    forge.neo.quest.NeoQuestSell.notInDecks(artB, usedName),
+                    planName.getOrDefault(artB, 0));
+            ok &= usedName.getOrDefault(artB, 0) == 1
+                    && forge.neo.quest.NeoQuestSell.notInDecks(artB, usedName) == 1
+                    && planName.getOrDefault(artB, 0) == 1;
+            forge.neo.quest.NeoQuestSell.sell(planName);
+            final forge.deck.Deck rereadName = NeoQuest.engine().getMyDecks().get("neo-sellcheck-name");
+            final boolean stillYours = forge.neo.quest.NeoQuestSell.owned(artB) == 1
+                    && rereadName != null && rereadName.getMain().count(artA) == 1;
+            System.out.printf(Locale.ROOT, "  Despues de venderlo: te queda %d de %s y el mazo %s%n",
+                    forge.neo.quest.NeoQuestSell.owned(artB), artB.getEdition(),
+                    stillYours ? "sigue siendo tuyo" : "SE HA QUEDADO SIN ELLA");
+            ok &= stillYours;
+            NeoQuest.deleteDeck("neo-sellcheck-name");
+
+            // ---- cambiar el arte, pagando (Discord, 11-10-2026) ----
+            //
+            // Tres copias y un mazo que usa dos: cambiar todas menos una deja
+            // en el mazo una vieja y una nueva; cambiar la que queda, las dos
+            // nuevas. Lo que se rompe si la cuenta esta mal es el mazo, y en
+            // silencio: llevaria una impresion que ya no tienes.
+            final PaperCard elf = forge.model.FModel.getMagicDb().getCommonCards().getCard("Llanowar Elves");
+            NeoQuest.engine().getCards().addSingleCard(elf, 3);
+            PaperCard plainArt = null;
+            PaperCard fancyArt = null;
+            for (final PaperCard p : NeoQuestArt.printingsOf(elf)) {
+                if (NeoQuestArt.isSpecial(p)) {
+                    fancyArt = fancyArt == null ? p : fancyArt;
+                } else if (plainArt == null) {
+                    plainArt = p;
+                }
+            }
+            System.out.printf(Locale.ROOT,
+                    "  Arte: \"%s\" (%s) tiene %d impresiones mas | normal %s a %d cr. | especial %s a %d cr.%n",
+                    elf.getName(), elf.getEdition(), NeoQuestArt.printingsOf(elf).size(),
+                    plainArt == null ? "-" : plainArt.getEdition(), NeoQuestArt.priceOf(plainArt),
+                    fancyArt == null ? "-" : fancyArt.getEdition(), NeoQuestArt.priceOf(fancyArt));
+            ok &= plainArt != null && NeoQuestArt.canChange(elf)
+                    && NeoQuestArt.priceOf(plainArt) > 0
+                    && (fancyArt == null || NeoQuestArt.priceOf(fancyArt) >= NeoQuestArt.COMMON * 3);
+            if (plainArt != null) {
+                final forge.deck.Deck artDeck = new forge.deck.Deck("neo-artcheck");
+                artDeck.getMain().add(elf, 2);
+                NeoQuest.engine().getMyDecks().add(artDeck);
+                NeoQuest.engine().getAssets().addCredits(10000);
+                final int hadElf = forge.neo.quest.NeoQuestSell.owned(elf);
+                final int hadNew = forge.neo.quest.NeoQuestSell.owned(plainArt);
+                final long artMoney = NeoQuest.credits();
+                final int paidArt = NeoQuestArt.change(elf, plainArt, hadElf - 1);
+                final forge.deck.Deck d1 = NeoQuest.engine().getMyDecks().get("neo-artcheck");
+                final boolean partOk = paidArt == NeoQuestArt.priceOf(plainArt) * (hadElf - 1)
+                        && NeoQuest.credits() == artMoney - paidArt
+                        && forge.neo.quest.NeoQuestSell.owned(elf) == 1
+                        && forge.neo.quest.NeoQuestSell.owned(plainArt) == hadNew + hadElf - 1
+                        && d1 != null && d1.getMain().count(elf) == 1 && d1.getMain().count(plainArt) == 1;
+                System.out.printf(Locale.ROOT,
+                        "  Cambiadas %d de %d por %d cr.: el mazo lleva %d vieja y %d nueva%s%n",
+                        hadElf - 1, hadElf, paidArt, d1 == null ? -1 : d1.getMain().count(elf),
+                        d1 == null ? -1 : d1.getMain().count(plainArt), partOk ? " (bien)" : " (MAL)");
+                final int paidLast = NeoQuestArt.change(elf, plainArt, 1);
+                final boolean allOk = paidLast == NeoQuestArt.priceOf(plainArt)
+                        && forge.neo.quest.NeoQuestSell.owned(elf) == 0
+                        && d1 != null && d1.getMain().count(elf) == 0 && d1.getMain().count(plainArt) == 2;
+                System.out.printf(Locale.ROOT, "  Y la ultima: el mazo lleva las dos nuevas%s%n",
+                        allOk ? " (bien)" : " (MAL)");
+                // Sin la carta, no se cambia nada ni se cobra.
+                final long noMoney = NeoQuest.credits();
+                final boolean refused = NeoQuestArt.change(elf, plainArt, 1) == -1
+                        && NeoQuest.credits() == noMoney;
+                System.out.printf(Locale.ROOT, "  Sin copias, no cobra: %s%n", refused ? "bien" : "MAL");
+                ok &= partOk && allOk && refused;
+                NeoQuest.deleteDeck("neo-artcheck");
+            }
+        }
+
+        // ---- y lo comprado sobrevive a guardar ----
+        NeoQuest.save();
+        final int collection = NeoQuest.collectionSize();
+        final long credits = NeoQuest.credits();
+        ok &= NeoQuest.load(name)
+                && NeoQuest.collectionSize() == collection
+                && NeoQuest.credits() == credits;
+        System.out.printf(Locale.ROOT, "  Guardado y recargado: %d cartas, %d creditos%n",
+                NeoQuest.collectionSize(), NeoQuest.credits());
+
+        NeoQuest.delete(name);
+        System.out.println(ok ? "  OK" : "  FALLO");
+        return ok;
+    }
+
+    /**
+     * Todos los rivales con nombre ensenyan una carta. El sorpresa, no.
+     *
+     * <p><b>Lo que esto protege es una decision, no un adorno.</b> En Estandar
+     * la mitad de los duelos salia con un interrogante — el mismo que el duelo
+     * sorpresa — porque su {@code Title} no es una carta ("King Goldemar",
+     * "Bamm Bamm Rubble"). Y si todos van a ciegas, coger siempre al sorpresa
+     * es gratis: la ventaja de elegir un rival conocido no existe.
+     *
+     * <p>Se recorren <b>los 1.145 duelos</b> de {@code res/quest/duels}, no los
+     * cuatro que te tocan hoy: el fallo depende del nombre de cada mazo, asi
+     * que mirando una tanda se escapa. Y se comprueba ademas que la eleccion es
+     * <b>estable</b>: la casilla se repinta cada vez que vuelves al cuartel
+     * general, y un {@code CardPool} sin orden garantizado haria que el rival
+     * cambiara de carta entre un repintado y el siguiente.
+     */
+    private static boolean checkEveryRivalHasAFace() {
+        System.out.println("  --- Con que carta se presenta cada rival ---");
+        boolean ok = true;
+
+        final forge.gamemodes.quest.QuestEventDuelManagerInterface duels =
+                new forge.gamemodes.quest.MainWorldEventDuelManager(
+                        new java.io.File(forge.localinstance.properties
+                                .ForgeConstants.DEFAULT_DUELS_DIR));
+
+        int total = 0;
+        int byName = 0;
+        int byDeck = 0;
+        final List<String> sinCara = new java.util.ArrayList<>();
+        String ejemplo = null;
+
+        for (final QuestEventDuel d : duels.getAllDuels()) {
+            if (d.getEventDeck() == null || d.getEventDeck().getMain().isEmpty()) {
+                continue;   // los mazos de construido que el lector cuela como "wild"
+            }
+            total++;
+            final PaperCard face = DuelFace.of(d);
+            if (face == null) {
+                sinCara.add(d.getTitle());
+                continue;
+            }
+            if (face.getName().equalsIgnoreCase(d.getTitle())) {
+                byName++;
+            } else {
+                byDeck++;
+                if (ejemplo == null) {
+                    ejemplo = d.getTitle() + " -> " + face.getName()
+                            + " (" + face.getRarity() + ")";
+                }
+            }
+            // Estable: preguntar dos veces tiene que dar lo mismo.
+            final PaperCard again = DuelFace.of(d);
+            if (again == null || !again.getName().equals(face.getName())) {
+                System.out.println("  FALLO: " + d.getTitle() + " cambia de carta al repintar");
+                ok = false;
+            }
+        }
+
+        System.out.printf(Locale.ROOT,
+                "  %d duelos | %d se presentan con su propio nombre | %d con la mejor carta"
+                        + " de su mazo | %d sin cara%n",
+                total, byName, byDeck, sinCara.size());
+        if (ejemplo != null) {
+            System.out.println("    p.ej. " + ejemplo);
+        }
+        for (final String s : sinCara.subList(0, Math.min(5, sinCara.size()))) {
+            System.out.println("    SIN CARA: " + s);
+        }
+        ok &= total > 0 && sinCara.isEmpty();
+
+        // Y el sorpresa NO tiene que ensenyar nada: su mazo es el de otro rival
+        // prestado, asi que una carta suya seria informacion falsa.
+        boolean surpriseChecked = false;
+        for (final QuestEventDuel d : NeoQuest.duels()) {
+            if (!d.showDifficulty()) {
+                // Y lleva la marca con la que el motor dobla los creditos: la
+                // Quest normal de Forge no se la ponia (Discord, 04-11-2026).
+                System.out.println("  [" + (d.getIsRandomMatch() ? "OK " : "MAL")
+                        + "] El duelo sorpresa se marca como tal (sin carta) y paga el doble");
+                surpriseChecked = d.getIsRandomMatch();
+            }
+        }
+        ok &= surpriseChecked;
+
+        System.out.println(ok
+                ? "  OK - elegir rival vuelve a ser una decision"
+                : "  FALLO - hay rivales que no ensenyan nada");
+        return ok;
+    }
+
+    /**
+     * El banquillo que no se ve, que es lo que dejaba el mazo injugable.
+     *
+     * <p><b>El fallo, tal cual se reporto:</b> se empieza una aventura de
+     * Estandar con el preconstruido <i>Cavalcade Charge</i>, se meten tres
+     * Experimental Frenzy desde el catalogo — el editor deja — y el cuartel
+     * general contesta <i>"must not contain more than 4 copies"</i> con un mazo
+     * en el que solo se ven tres. Las otras tres estaban en el <b>banquillo</b>
+     * del preconstruido: una zona que ninguna pantalla de NeoForge ensenya, que
+     * en un duelo de la aventura no se usa nunca (cada duelo es UNA partida) y
+     * que sin embargo el motor <b>si suma</b> al contar copias.
+     *
+     * <p>Se comprueban las dos mitades del arreglo, porque son independientes:
+     *
+     * <ol>
+     *   <li>Que el mazo adoptado llegue <b>sin banquillo</b> y que sus cartas
+     *       sigan estando en tu coleccion — si no, seria una perdida.</li>
+     *   <li>Que {@code DeckEditor} cuente como cuenta el motor: por
+     *       <b>nombre</b> y en <b>todas las zonas</b>. Eso se prueba con un mazo
+     *       montado a mano, porque el caso puede volver por otro camino (una
+     *       lista pegada, un mazo viejo).</li>
+     * </ol>
+     */
+    /**
+     * Mazos con cartas que NO tienes: la lista de deseos (Discord, 15-10-2026:
+     * <i>"being able to import or build decks with cards you don't have"</i>).
+     *
+     * <p>El ciclo entero, porque cada paso se rompe por un sitio distinto:
+     * con "Mis cartas" no entra; con "Todas" entra y el mazo se GUARDA; no se
+     * puede jugar y dice que falta; al reabrirlo con "Mis cartas" ni es ilegal
+     * ni "Limpiar" se la lleva; vender la copia que tenias no borra las que
+     * nunca tuviste (el motor si lo hacia); conseguirlas lo deja jugable solo;
+     * y vender una carta de un mazo normal la sigue quitando, como siempre.
+     */
+    private static boolean checkWishlist() {
+        final String name = "neo-questcheck-deseos";
+        NeoQuest.delete(name);
+        System.out.println("  --- Mazos con cartas que no tienes (lista de deseos) ---");
+        final boolean[] ok = {true};
+        final java.util.function.BiConsumer<String, Boolean> ck = (what, good) -> {
+            System.out.printf(Locale.ROOT, "  [%s] %s%n", good ? "OK " : "MAL", what);
+            ok[0] &= good;
+        };
+        final Deck precon = NeoQuest.starterDecks(NeoQuest.Modalidad.ESTANDAR).get(0);
+        NeoQuest.start(name, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL, precon);
+        try {
+            final Deck mine = NeoQuest.currentDeck();
+            ck.accept("el mazo de inicio se puede jugar", NeoQuest.problemWith(mine) == null);
+
+            final QuestDeckContext ctx = new QuestDeckContext();
+            // Una criatura normal que no tengas, de cuatro copias.
+            PaperCard want = null;
+            for (final PaperCard c : FModel.getMagicDb().getCommonCards().getUniqueCards()) {
+                if (c.getRules() != null && !c.getRules().isCustom()
+                        && c.getRules().getType().isCreature() && !c.getRules().getType().isLegendary()
+                        && !c.getName().startsWith("A-") && ctx.owned(c) == 0
+                        && forge.game.GameType.Quest.getDeckFormat().getMaxCardCopies(c) >= 4
+                        && FModel.getMagicDb().getCommonCards().getAllCards(c.getName()).size() > 1) {
+                    want = c;
+                    break;
+                }
+            }
+            ck.accept("hay una carta que no tienes para probar: " + (want == null ? "-" : want.getName()),
+                    want != null);
+            if (want == null) {
+                return false;
+            }
+            final String wantName = want.getName();
+
+            final Deck copy = new Deck(mine, "NeoCheck deseos");
+            final DeckEditor ed = new DeckEditor(ctx, copy);
+            ck.accept("con «Mis cartas» una que no tienes no entra", ed.rejectionReason(want) != null);
+            final long t0 = System.nanoTime();
+            ed.setShowAllCards(true);
+            final long firstMs = (System.nanoTime() - t0) / 1_000_000;
+            ed.setShowAllCards(false);
+            final long t1 = System.nanoTime();
+            ed.setShowAllCards(true);
+            final long againMs = (System.nanoTime() - t1) / 1_000_000;
+            System.out.printf(Locale.ROOT, "        pasar a «Todas»: %d ms la primera vez, %d ms al volver%n",
+                    firstMs, againMs);
+            ck.accept("volver a «Todas» no rehace el catalogo (" + againMs + " ms)", againMs < 200);
+            boolean inCatalogue = false;
+            final java.util.Set<String> relics = forge.neo.ascent.AscentRelics.allCardNames();
+            final List<String> unobtainable = new java.util.ArrayList<>();
+            for (final PaperCard c : ctx.pool()) {
+                if (c.getName().equals(wantName)) {
+                    inCatalogue = true;
+                }
+                if (ctx.owned(c) == 0 && (c.getName().startsWith("A-") || relics.contains(c.getName())
+                        || forge.card.CardEdition.UNKNOWN_CODE.equals(c.getEdition()))) {
+                    unobtainable.add(c.getName());
+                }
+            }
+            ck.accept("con «Todas las cartas» sale en el catalogo (" + ctx.pool().size() + " cartas)",
+                    inCatalogue && ctx.pool().size() > 10_000);
+            ck.accept("sin rebalanceadas A-, set desconocido ni reliquias de Ascenso"
+                    + (unobtainable.isEmpty() ? "" : ": " + unobtainable.subList(0, Math.min(5, unobtainable.size()))),
+                    unobtainable.isEmpty());
+            ck.accept("y entra", ed.rejectionReason(want) == null);
+            ck.accept("con «Todas», la cabecera del grupo cuenta cartas, no copias",
+                    ed.catalogueCopies(want) == 1);
+            ed.add(want, 2);
+            ck.accept("el editor dice que faltan 2", ed.missingOf(want) == 2);
+            ck.accept("el mazo con lo que falta se puede GUARDAR", ed.blockingProblem() == null);
+            ed.save();
+            final Deck saved = forge.model.FModel.getQuest().getMyDecks().get("NeoCheck deseos");
+            ck.accept("se ha guardado", saved != null && countByName(saved, wantName) == 2);
+            final String problem = NeoQuest.problemWith(saved);
+            System.out.println("        " + problem);
+            ck.accept("pero no se puede jugar, y dice cual falta",
+                    problem != null && problem.contains(forge.neo.card.CardText.nameOf(want)));
+
+            // La tienda avisa de lo que te falta (Discord, 15-10-2026), por
+            // CARTA y no por arte: se pone a la venta OTRA impresion.
+            final Integer wantedCopies = NeoQuest.wantedByName().get(wantName.toLowerCase(Locale.ROOT));
+            ck.accept("la tienda sabe que te faltan 2 (" + wantedCopies + ")",
+                    wantedCopies != null && wantedCopies == 2);
+            // Y el sobre dice para QUE mazo (Discord, 21-10-2026): la apertura lo
+            // lee de aqui ANTES de comprar.
+            final List<String> wantedIn = NeoQuest.wantedDecksByName().get(wantName.toLowerCase(Locale.ROOT));
+            ck.accept("al abrir un sobre se sabe que mazo la echa de menos (" + wantedIn + ")",
+                    wantedIn != null && wantedIn.contains("NeoCheck deseos"));
+            // Mejor de otra edicion; si no hay, otro arte de la misma. Y si la
+            // carta solo tiene una impresion, se busca una que tenga varias.
+            PaperCard otherArt = null;
+            for (final PaperCard p : FModel.getMagicDb().getCommonCards().getAllCards(wantName)) {
+                if (!p.getEdition().equals(want.getEdition())) {
+                    otherArt = p;
+                    break;
+                }
+                if (otherArt == null && p.getArtIndex() != want.getArtIndex()) {
+                    otherArt = p;
+                }
+            }
+            ck.accept("la carta tiene otra impresion para probar", otherArt != null);
+            if (otherArt == null) {
+                otherArt = want;
+            }
+            // IMPORTAR no da artes que no tienes (Discord, 16-10-2026). Una que no
+            // tienes entra con su arte de siempre, no con el de la lista...
+            final PaperCard plain = FModel.getMagicDb().getCommonCards().getCard(wantName);
+            PaperCard fancy = null;
+            for (final PaperCard p : FModel.getMagicDb().getCommonCards().getAllCards(wantName)) {
+                if (!p.equals(plain)) {
+                    fancy = p;
+                    break;
+                }
+            }
+            if (fancy != null) {
+                final DeckEditor imp = new DeckEditor(ctx, new Deck(mine, "NeoCheck importar"));
+                imp.addAnyway(fancy, 1);
+                ck.accept("importar una que no tienes (" + fancy.getEdition() + "#" + fancy.getArtIndex()
+                        + ") la deja con su arte de siempre", countExact(imp.getDeck(), plain) == 1
+                        && countExact(imp.getDeck(), fancy) == 0);
+            }
+            // ...y una que SI tienes, con un arte tuyo.
+            PaperCard ownedOne = null;
+            PaperCard otherPrint = null;
+            for (final java.util.Map.Entry<PaperCard, Integer> e : NeoQuest.collection()) {
+                final PaperCard c = e.getKey();
+                if (c == null || c.isVeryBasicLand()) {
+                    continue;
+                }
+                final List<PaperCard> mineArts = ctx.printingsOf(c);
+                for (final PaperCard p : FModel.getMagicDb().getCommonCards().getAllCards(c.getName())) {
+                    if (!mineArts.contains(p)) {
+                        ownedOne = c;
+                        otherPrint = p;
+                        break;
+                    }
+                }
+                if (otherPrint != null) {
+                    break;
+                }
+            }
+            ck.accept("hay una carta tuya con otro arte que no tienes", otherPrint != null);
+            if (otherPrint != null) {
+                final DeckEditor imp = new DeckEditor(ctx, new Deck(mine, "NeoCheck importar 2"));
+                final int before = countExact(imp.getDeck(), otherPrint);
+                imp.addAnyway(otherPrint, 1);
+                ck.accept("importar " + ownedOne.getName() + " con un arte que no tienes la deja con uno tuyo",
+                        countExact(imp.getDeck(), otherPrint) == before);
+                // Y en un mazo que YA lo traia (importado antes), "Cambiar arte"
+                // ofrece los tuyos: el actual va el primero y hay mas de uno.
+                final DeckEditor old = new DeckEditor(ctx, new Deck(mine, "NeoCheck importar 3"));
+                old.getDeck().getMain().add(otherPrint, 1);
+                final List<PaperCard> arts = old.printingsOf(otherPrint);
+                ck.accept("con un arte que no es tuyo, «Cambiar arte» ofrece los tuyos (" + arts.size() + ")",
+                        arts.size() >= 2 && arts.get(0).equals(otherPrint));
+
+                // ARTES DESEADOS (Ana, 16-10-2026): con "Todos" se puede elegir
+                // un arte que no tienes, pero esas copias no se juegan.
+                final DeckEditor wish = new DeckEditor(ctx, new Deck("NeoCheck deseo"));
+                wish.getDeck().getMain().add(ownedOne, 1);
+                ck.accept("deseo: con la tuya no falta nada (falta " + wish.missingOf(ownedOne) + ", tienes " + ctx.owned(ownedOne) + "/" + ctx.ownedExact(ownedOne) + ", " + ownedOne.getEdition() + ")", wish.missingOf(ownedOne) == 0);
+                ck.accept("deseo: «Todos» trae el arte que no tienes, marcado como no tuyo",
+                        wish.allowsArtWishes() && wish.allPrintingsOf(ownedOne).contains(otherPrint)
+                                && !wish.ownsPrinting(otherPrint) && wish.ownsPrinting(ownedOne));
+                wish.switchPrinting(ownedOne, otherPrint);
+                ck.accept("deseo: elegirlo lo apunta en el mazo",
+                        forge.neo.deck.ArtWishes.isWished(wish.getDeck(), otherPrint));
+                ck.accept("deseo: y esa copia FALTA aunque tengas la carta con otro arte (falta "
+                        + wish.missingOf(otherPrint) + ", " + sum(NeoQuest.missingCards(wish.getDeck())) + ")",
+                        wish.missingOf(otherPrint) == 1 && sum(NeoQuest.missingCards(wish.getDeck())) == 1);
+                ck.accept("deseo: con esa impresion en la coleccion ya no falta",
+                        java.util.Arrays.equals(forge.neo.deck.ArtWishes.missing(wish.getDeck(),
+                                otherPrint.getName(), 1, c -> 1), new int[] {0, 0}));
+                ck.accept("deseo: la tienda marca ESA impresion y no otra",
+                        NeoQuestShop.isWanted(otherPrint, java.util.Map.of(),
+                                java.util.Set.of(forge.neo.deck.ArtWishes.printKey(otherPrint)))
+                                && !NeoQuestShop.isWanted(ownedOne, java.util.Map.of(),
+                                java.util.Set.of(forge.neo.deck.ArtWishes.printKey(otherPrint))));
+                wish.switchPrinting(otherPrint, ownedOne);
+                ck.accept("deseo: volver a tu arte quita la marca y ya no falta",
+                        !forge.neo.deck.ArtWishes.isWished(wish.getDeck(), otherPrint)
+                                && wish.missingOf(ownedOne) == 0);
+            }
+
+            final int shopBefore = NeoQuestShop.wantedInShop();
+            NeoQuest.engine().getCards().getShopList().add(otherArt, 1);
+            final int shopAfter = NeoQuestShop.wantedInShop();
+            NeoQuest.engine().getCards().getShopList().remove(otherArt, 1);
+            ck.accept("con otra impresion a la venta (" + want.getEdition() + "#" + want.getArtIndex() + " -> "
+                    + otherArt.getEdition() + "#" + otherArt.getArtIndex()
+                    + "), el aviso de la tienda la cuenta (" + shopBefore + " -> " + shopAfter + ")",
+                    shopAfter == shopBefore + 1);
+            ck.accept("el mazo de inicio sigue siendo jugable", NeoQuest.problemWith(mine) == null);
+
+            // Al reabrirlo con "Mis cartas", nada se pierde.
+            final DeckEditor again = new DeckEditor(new QuestDeckContext(), new Deck(saved, saved.getName()));
+            ck.accept("al reabrirlo con «Mis cartas» no es ilegal", again.blockingProblem() == null);
+            ck.accept("y «Limpiar» no quita la lista de deseos",
+                    again.removeIllegal() == 0 && again.countOf(want) == 2);
+            ck.accept("y el mazo entero dice que faltan 2", again.missingTotal() == 2);
+
+            // Importar una lista (addAnyway): lo que no tienes entra igual, sin
+            // ser ilegal, y se cuenta para avisarlo.
+            final DeckEditor imp = new DeckEditor(new QuestDeckContext(), new Deck(mine, "NeoCheck importada"));
+            imp.addAnyway(want, 3);
+            ck.accept("importar con 3 que no tienes: entran, no son ilegales y faltan 3 ("
+                    + imp.illegalCards().size() + " ilegales, faltan " + imp.missingTotal() + ")",
+                    imp.countOf(want) == 3 && imp.illegalCards().isEmpty() && imp.missingTotal() == 3);
+
+            // El banquillo tambien cuenta: el motor lo carga, y de ahi salen el
+            // companero y lo que busca un Wish. Si no, una carta que no tienes se
+            // jugaba con solo pasarla al banquillo (revisor, 15-10-2026).
+            final Deck withSide = new Deck(mine, "NeoCheck banquillo");
+            withSide.getOrCreate(forge.deck.DeckSection.Sideboard).add(want, 1);
+            ck.accept("una que no tienes en el BANQUILLO cuenta como que falta",
+                    sum(NeoQuest.missingCards(withSide)) == 1);
+            final DeckEditor side = new DeckEditor(new QuestDeckContext(), new Deck(mine, "NeoCheck banquillo"));
+            side.setShowAllCards(true);
+            if (side.hasSideboard() && side.addToSideboard(want) == null) {
+                ck.accept("y el editor tambien la cuenta (falta " + side.missingOf(want) + ")",
+                        side.missingOf(want) == 1 && side.missingTotal() == 1);
+            }
+
+            // Vender la que tenias no se lleva las que nunca tuviste.
+            NeoQuest.engine().getCards().addSingleCard(want, 1);
+            ck.accept("con 1 de 2, falta 1", sum(NeoQuest.missingCards(saved)) == 1);
+            NeoQuestSell.sellOne(want, 1);
+            final Deck afterSale = forge.model.FModel.getQuest().getMyDecks().get("NeoCheck deseos");
+            ck.accept("vender la que tenias no borra del mazo las 2 deseadas",
+                    afterSale != null && countByName(afterSale, wantName) == 2);
+
+            // Conseguirlas lo deja jugable solo.
+            NeoQuest.engine().getCards().addSingleCard(want, 2);
+            ck.accept("al conseguirlas, el mazo se puede jugar sin tocar nada",
+                    NeoQuest.problemWith(afterSale) == null);
+
+            // Por NOMBRE, no por impresion: 2 de una edicion y 2 de otra, con 2
+            // de la primera. Por impresion no parecia un mazo de deseos y vender
+            // una de las tuyas lo dejaba en 3 (revisor, 15-10-2026).
+            final List<PaperCard> bolts = new java.util.ArrayList<>();
+            for (final PaperCard b : FModel.getMagicDb().getCommonCards().getAllCards("Lightning Bolt")) {
+                final boolean newSet = bolts.stream().noneMatch(x -> x.getEdition().equals(b.getEdition()));
+                if (!b.isFoil() && newSet && NeoQuest.engine().getCards().getCardpool().count(b) == 0) {
+                    bolts.add(b);
+                }
+                if (bolts.size() == 2) {
+                    break;
+                }
+            }
+            if (bolts.size() == 2) {
+                final PaperCard a = bolts.get(0);
+                final PaperCard b = bolts.get(1);
+                NeoQuest.engine().getCards().addSingleCard(a, 2);
+                final Deck mixed = new Deck("NeoCheck por nombre");
+                mixed.getMain().add(a, 2);
+                mixed.getMain().add(b, 2);
+                forge.model.FModel.getQuest().getMyDecks().add(mixed);
+                ck.accept("2 de " + a.getEdition() + " y 2 de " + b.getEdition() + ", con 2 de la primera: faltan 2",
+                        sum(NeoQuest.missingCards(mixed)) == 2);
+                NeoQuestSell.sellOne(a, 1);
+                final Deck mixedAfter = forge.model.FModel.getQuest().getMyDecks().get("NeoCheck por nombre");
+                final int left = mixedAfter == null ? -1 : countByName(mixedAfter, "Lightning Bolt");
+                ck.accept("vender 1 de las tuyas no quita nada de ese mazo (" + left + " de 4)", left == 4);
+                // Y perder la apuesta (ante) pasa por el mismo envoltorio.
+                NeoQuestSell.keepingWishlist(() -> NeoQuest.engine().getCards().loseCards(List.of(a)));
+                final int afterAnte = mixedAfter == null ? -1 : countByName(mixedAfter, "Lightning Bolt");
+                ck.accept("perder la otra en el ante tampoco (" + afterAnte + " de 4, te quedan "
+                        + NeoQuest.engine().getCards().getCardpool().count(a) + ")",
+                        afterAnte == 4 && NeoQuest.engine().getCards().getCardpool().count(a) == 0);
+            }
+
+            // Y un mazo normal: vender una carta suya la sigue quitando.
+            PaperCard used = null;
+            for (final java.util.Map.Entry<PaperCard, Integer> e : mine.getMain()) {
+                final PaperCard c = e.getKey();
+                if (!c.getRules().getType().isLand()
+                        && NeoQuest.engine().getCards().getCardpool().count(c) == e.getValue()) {
+                    used = c;
+                    break;
+                }
+            }
+            if (used != null) {
+                final int before = mine.getMain().count(used);
+                NeoQuestSell.sellOne(used, 1);
+                ck.accept("vender una carta de un mazo normal la quita de el, como siempre ("
+                        + used.getName() + " " + before + " -> " + mine.getMain().count(used) + ")",
+                        mine.getMain().count(used) == before - 1);
+            }
+        } finally {
+            NeoQuest.delete(name);
+        }
+        System.out.println(ok[0]
+                ? "  OK - un mazo puede llevar lo que te falta, y se juega en cuanto lo tienes"
+                : "  FALLO - la lista de deseos");
+        return ok[0];
+    }
+
+    /**
+     * Intentar ROMPER la lista de deseos (Ana, 15-10-2026: "intenta romperlo
+     * y si lo haces arreglalo"). Cada bloque es un camino por el que un mazo
+     * con cartas que no tienes podia perder la lista, colarse en una partida o
+     * regalar algo: guardar y cargar, las ventas en bloque y la automatica,
+     * el cambio de arte de pago, quitar lo que falta y el arranque del duelo.
+     */
+    private static boolean checkWishlistAttacks() {
+        final String name = "neo-questcheck-deseos-ataques";
+        NeoQuest.delete(name);
+        System.out.println("  --- Intentar romper la lista de deseos ---");
+        final boolean[] ok = {true};
+        final java.util.function.BiConsumer<String, Boolean> ck = (what, good) -> {
+            System.out.printf(Locale.ROOT, "  [%s] %s%n", good ? "OK " : "MAL", what);
+            ok[0] &= good;
+        };
+        final Deck precon = NeoQuest.starterDecks(NeoQuest.Modalidad.ESTANDAR).get(0);
+        NeoQuest.start(name, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL, precon);
+        try {
+            final QuestDeckContext ctx = new QuestDeckContext();
+            PaperCard want = null;
+            for (final PaperCard c : FModel.getMagicDb().getCommonCards().getUniqueCards()) {
+                if (c.getRules() != null && !c.getRules().isCustom()
+                        && c.getRules().getType().isCreature() && !c.getRules().getType().isLegendary()
+                        && !c.getName().startsWith("A-") && ctx.owned(c) == 0
+                        && forge.game.GameType.Quest.getDeckFormat().getMaxCardCopies(c) == 4) {
+                    want = c;
+                    break;
+                }
+            }
+            if (want == null) {
+                ck.accept("hay una carta que no tienes para probar", false);
+                return false;
+            }
+            final String wantName = want.getName();
+            final String deckName = "NeoCheck ataques";
+
+            // 1. El tope de copias del formato sigue mandando con "Todas".
+            final DeckEditor ed = new DeckEditor(ctx, new Deck(NeoQuest.currentDeck(), deckName));
+            ed.setShowAllCards(true);
+            final int got = ed.add(want, 10);
+            ck.accept("con «Todas», pedir 10 mete " + got + " (el tope del formato es 4)",
+                    got == 4 && ed.countOf(want) == 4);
+            ed.save();
+
+            // 2. Guardar y volver a cargar la Quest no le quita nada.
+            NeoQuest.save();
+            NeoQuest.load(name);
+            final Deck reloaded = FModel.getQuest().getMyDecks().get(deckName);
+            final int afterLoad = reloaded == null ? -1 : countByName(reloaded, wantName);
+            ck.accept("al volver a cargar la Quest sigue con las 4 (" + afterLoad + ")", afterLoad == 4);
+            ck.accept("y sigue sin poderse jugar", reloaded != null && NeoQuest.problemWith(reloaded) != null);
+
+            // 3. Las ventas en bloque y la automatica no se llevan las que usa.
+            NeoQuest.engine().getCards().addSingleCard(want, 1);
+            final java.util.Map<PaperCard, Integer> plan = NeoQuestSell.notInDecksPlan();
+            int offered = 0;
+            for (final java.util.Map.Entry<PaperCard, Integer> e : plan.entrySet()) {
+                if (e.getKey().getName().equals(wantName)) {
+                    offered += e.getValue();
+                }
+            }
+            ck.accept("«Vender lo que no va en un mazo» no ofrece la que usa (" + offered + ")", offered == 0);
+            NeoQuestSell.sell();
+            final Deck afterAuto = FModel.getQuest().getMyDecks().get(deckName);
+            ck.accept("la venta automatica tampoco (tienes " + NeoQuestSell.owned(want) + ", el mazo lleva "
+                            + (afterAuto == null ? -1 : countByName(afterAuto, wantName)) + ")",
+                    NeoQuestSell.owned(want) == 1 && afterAuto != null && countByName(afterAuto, wantName) == 4);
+
+            // 4. "Quitar las que no tengo": deja solo las tuyas.
+            final DeckEditor clean = new DeckEditor(new QuestDeckContext(), new Deck(afterAuto, deckName));
+            final int removed = clean.removeMissing();
+            ck.accept("«Quitar las que no tengo» quita " + removed + " y deja " + clean.countOf(want),
+                    removed == 3 && clean.countOf(want) == 1 && clean.missingTotal() == 0);
+
+            // 5. El cambio de arte de pago solo cambia las copias que pagas.
+            final List<PaperCard> bolts = new java.util.ArrayList<>();
+            for (final PaperCard b : FModel.getMagicDb().getCommonCards().getAllCards("Lightning Bolt")) {
+                final boolean newSet = bolts.stream().noneMatch(x -> x.getEdition().equals(b.getEdition()));
+                if (!b.isFoil() && newSet && NeoQuestSell.owned(b) == 0) {
+                    bolts.add(b);
+                }
+                if (bolts.size() == 2) {
+                    break;
+                }
+            }
+            if (bolts.size() == 2) {
+                final PaperCard a = bolts.get(0);
+                final PaperCard b = bolts.get(1);
+                NeoQuest.engine().getCards().addSingleCard(a, 1);
+                NeoQuest.engine().getAssets().addCredits(100_000);
+                final Deck art = new Deck("NeoCheck arte");
+                art.getMain().add(a, 4);
+                FModel.getQuest().getMyDecks().add(art);
+                final int paid = NeoQuestArt.change(a, b, 1);
+                final Deck artAfter = FModel.getQuest().getMyDecks().get("NeoCheck arte");
+                final int nb = artAfter == null ? -1 : artAfter.getMain().count(b);
+                final int na = artAfter == null ? -1 : artAfter.getMain().count(a);
+                ck.accept("pagar el arte de 1 cambia 1, no las 4 (" + nb + " de " + b.getEdition() + ", "
+                        + na + " de " + a.getEdition() + ")", paid >= 0 && nb == 1 && na == 3);
+            }
+
+            // 6. Y el candado al ARRANCAR el duelo, no solo en el boton.
+            NeoQuest.setCurrentDeck(deckName);
+            ck.accept("con ese mazo el cuartel no deja jugar", NeoQuest.problemWith(NeoQuest.currentDeck()) != null);
+            final List<QuestEventDuel> duels = NeoQuest.duels();
+            if (!duels.isEmpty()) {
+                final Object[] out = {"sin volver"};
+                final Thread t = new Thread(() -> out[0] = NeoQuestMatch.playFully(duels.get(0), null, true,
+                        forge.neo.match.NeoMatchUI.Mode.AUTO_PLAY), "neo-check-candado");
+                t.setDaemon(true);
+                t.start();
+                try {
+                    t.join(30_000);
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                ck.accept("y si algo llama al duelo igual, no arranca (" + (t.isAlive() ? "SIGUE JUGANDO" : "vuelve") + ")",
+                        !t.isAlive() && out[0] == null);
+            }
+        } finally {
+            NeoQuest.delete(name);
+        }
+        System.out.println(ok[0]
+                ? "  OK - ni guardar, ni vender, ni el arte, ni arrancar el duelo rompen la lista"
+                : "  FALLO - la lista de deseos se puede romper");
+        return ok[0];
+    }
+
+    /**
+     * "Guardar una copia" no puede tocar el ORIGINAL (Ana, 15-10-2026, en su
+     * "Quest 5"): abrir el mazo, Guardar, Guardar una copia, editar la copia
+     * y renombrarla... y el original se quedaba con el nombre de la copia
+     * guardado bajo su clave de siempre, sin poderse elegir ("No deck
+     * picked"). Guardar metia en el almacen el MISMO objeto que el editor
+     * seguia editando. Se repite la secuencia tal cual, y ademas: lo que se
+     * cambia sin guardar no se cuela, y una Quest ya rota se repara al cargar.
+     */
+    /**
+     * "Lo ultimo primero" en el constructor de la Quest (Discord, 16-10-2026:
+     * <i>"the most recent cards from booster packs are at the top"</i>). Lo que
+     * se rompe sin avisar: que las cartas de salida, o cargar la partida, cuenten
+     * como "recien conseguidas", y entonces el orden no sirve de nada.
+     */
+    private static boolean checkNewestFirst() {
+        final String name = "neo-questcheck-ultimo";
+        NeoQuest.delete(name);
+        System.out.println("  --- Lo ultimo primero ---");
+        final boolean[] ok = {true};
+        final java.util.function.BiConsumer<String, Boolean> ck = (what, good) -> {
+            System.out.printf(Locale.ROOT, "  [%s] %s%n", good ? "OK " : "MAL", what);
+            ok[0] &= good;
+        };
+        final Deck precon = NeoQuest.starterDecks(NeoQuest.Modalidad.ESTANDAR).get(0);
+        NeoQuest.start(name, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL, precon);
+        try {
+            final QuestDeckContext ctx = new QuestDeckContext();
+            ck.accept("la Quest lleva la cuenta", ctx.tracksAcquisition());
+            final PaperCard starter = NeoQuest.collection().iterator().next().getKey();
+            ck.accept("las cartas de salida no son \"lo ultimo\" (" + starter.getName() + ")",
+                    QuestAcquired.acquiredAt(starter) == 0);
+
+            PaperCard fresh = null;
+            for (final String candidate : new String[] {"Counterspell", "Lightning Bolt", "Llanowar Elves",
+                    "Giant Growth", "Dark Ritual", "Swords to Plowshares"}) {
+                final PaperCard c = FModel.getMagicDb().getCommonCards().getCard(candidate);
+                if (c != null && ctx.owned(c) == 0) {
+                    fresh = c;
+                    break;
+                }
+            }
+            ck.accept("hay una carta que no tienes para probar", fresh != null);
+            if (fresh != null) {
+                FModel.getQuest().getCards().addSingleCard(fresh, 1);
+                NeoQuest.save();
+                ck.accept("al guardar, la que acaba de entrar lleva hora",
+                        QuestAcquired.acquiredAt(fresh) > 0);
+                final DeckEditor ed = DeckEditor.copyOf(new QuestDeckContext(), NeoQuest.currentDeck());
+                ed.setSort(DeckEditor.Sort.NEWEST);
+                final List<PaperCard> first = ed.find("", false, null, 3).cards;
+                ck.accept("y sale la PRIMERA del catalogo (" + (first.isEmpty() ? "nada" : first.get(0).getName()) + ")",
+                        !first.isEmpty() && first.get(0).getName().equals(fresh.getName()));
+                NeoQuest.load(name);
+                QuestAcquired.sync();
+                ck.accept("cargar la Quest no la olvida ni pone hora a lo demas",
+                        QuestAcquired.acquiredAt(fresh) > 0 && QuestAcquired.acquiredAt(starter) == 0);
+            }
+        } finally {
+            NeoQuest.delete(name);
+        }
+        ck.accept("borrar la Quest borra su registro",
+                !new java.io.File(forge.localinstance.properties.ForgeConstants.QUEST_SAVE_DIR,
+                        name + ".neo-adquiridas").exists());
+        return ok[0];
+    }
+
+    private static boolean checkSaveAsCopy() {
+        final String name = "neo-questcheck-copia";
+        NeoQuest.delete(name);
+        System.out.println("  --- Guardar una copia no toca el original ---");
+        final boolean[] ok = {true};
+        final java.util.function.BiConsumer<String, Boolean> ck = (what, good) -> {
+            System.out.printf(Locale.ROOT, "  [%s] %s%n", good ? "OK " : "MAL", what);
+            ok[0] &= good;
+        };
+        final Deck precon = NeoQuest.starterDecks(NeoQuest.Modalidad.ESTANDAR).get(0);
+        NeoQuest.start(name, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL, precon);
+        try {
+            final String original = NeoQuest.currentDeck().getName();
+            final int originalCount = NeoQuest.currentDeck().getMain().countAll();
+            final forge.util.storage.IStorage<Deck> mine = FModel.getQuest().getMyDecks();
+
+            // La secuencia del autor: abrir, Guardar, Guardar una copia.
+            final DeckEditor ed = DeckEditor.copyOf(new QuestDeckContext(), NeoQuest.currentDeck());
+            ed.save();
+            final String copyName = ed.copyName();
+            ck.accept("se guarda la copia «" + copyName + "»", ed.saveAsCopy(copyName));
+            final Deck stored = mine.get(original);
+            ck.accept("el original sigue llamandose «" + original + "» ("
+                            + (stored == null ? "NO ESTA" : stored.getName()) + ")",
+                    stored != null && original.equals(stored.getName()));
+
+            // Editar la copia (sin guardar) no toca el original...
+            final PaperCard first = ed.getDeck().getMain().toFlatList().get(0);
+            ed.remove(first, 1);
+            ck.accept("quitar una carta de la copia, sin guardar, no cambia el original ("
+                    + (stored == null ? -1 : stored.getMain().countAll()) + " de " + originalCount + ")",
+                    stored != null && stored.getMain().countAll() == originalCount);
+            // ...ni la copia guardada.
+            final Deck storedCopy = mine.get(copyName);
+            ck.accept("ni la copia guardada, hasta que se guarda",
+                    storedCopy != null && storedCopy.getMain().countAll() == originalCount);
+
+            // Renombrar la copia y guardar: el original sigue elegible.
+            ed.getDeck().setName("NeoCheck renombrada");
+            ed.save();
+            NeoQuest.setCurrentDeck(original);
+            ck.accept("el original se puede elegir y jugar",
+                    NeoQuest.currentDeck() != null && original.equals(NeoQuest.currentDeck().getName()));
+            ck.accept("la copia vive con su nombre nuevo, y la de antes ya no",
+                    mine.get("NeoCheck renombrada") != null && mine.get(copyName) == null);
+
+            // Una Quest YA rota (como la del autor): un mazo guardado con otro
+            // nombre, y el mazo elegido apuntando a ese nombre. Al cargar se arregla.
+            final Deck broken = new Deck(mine.get(original), original);
+            mine.add(broken);
+            broken.setName(original + " (9)");
+            FModel.getQuest().setCurrentDeck(original + " (9)");
+            NeoQuest.save();
+            NeoQuest.load(name);
+            final Deck repaired = FModel.getQuest().getMyDecks().get(original);
+            ck.accept("al cargar, el mazo vuelve a llamarse como su clave ("
+                            + (repaired == null ? "NO ESTA" : repaired.getName()) + ")",
+                    repaired != null && original.equals(repaired.getName()));
+            ck.accept("y vuelve a ser el elegido (" + FModel.getQuest().getCurrentDeck() + ")",
+                    NeoQuest.currentDeck() != null && original.equals(NeoQuest.currentDeck().getName()));
+
+            // Duplicar desde "Tus mazos" (Android, decision 381): copia con
+            // nombre libre, el original y el elegido intactos.
+            final String dup = NeoQuest.duplicateDeck(original);
+            final Deck dupDeck = dup == null ? null : FModel.getQuest().getMyDecks().get(dup);
+            ck.accept("duplicar deja «" + dup + "» con las mismas cartas",
+                    dupDeck != null && dup.equals(dupDeck.getName())
+                            && dupDeck.getMain().countAll() == FModel.getQuest().getMyDecks().get(original).getMain().countAll());
+            ck.accept("y el elegido sigue siendo el original",
+                    NeoQuest.currentDeck() != null && original.equals(NeoQuest.currentDeck().getName()));
+            final String dup2 = NeoQuest.duplicateDeck(original);
+            ck.accept("otra vez: «" + dup2 + "», sin pisar la primera",
+                    dup2 != null && !dup2.equals(dup) && FModel.getQuest().getMyDecks().get(dup) != null);
+        } finally {
+            NeoQuest.delete(name);
+        }
+        System.out.println(ok[0] ? "  OK - la copia y el original van cada uno por su lado"
+                : "  FALLO - guardar una copia toca el original");
+        return ok[0];
+    }
+
+    /**
+     * "Montar uno con lo que tengo" (itch.io, 23-10-2026): con cuatro Sol Ring
+     * de cuatro expansiones en la coleccion metia los cuatro, se quedaba en 98
+     * y el comandante era siempre el primero. Ahora: una carta por nombre, al
+     * minimo del formato, y con el comandante que se pide.
+     */
+    private static boolean checkBuildFromCollection() {
+        final String name = "neo-questcheck-montar";
+        NeoQuest.delete(name);
+        System.out.println("  --- Montar uno con lo que tengo (Commander) ---");
+        final List<Deck> starters = NeoQuest.starterDecks(NeoQuest.Modalidad.COMMANDER);
+        if (starters.isEmpty()) {
+            System.out.println("  (sin mazos de inicio de Commander: no se prueba)");
+            return true;
+        }
+        boolean ok = true;
+        NeoQuest.start(name, NeoQuest.Modalidad.COMMANDER, NeoQuest.Dificultad.NORMAL, starters.get(0));
+        try {
+            int printings = 0;
+            for (final PaperCard c : FModel.getMagicDb().getCommonCards().getAllCards("Sol Ring")) {
+                NeoQuest.engine().getCards().getCardpool().add(c);
+                if (++printings >= 4) {
+                    break;
+                }
+            }
+            final List<PaperCard> candidates = NeoQuest.commanderCandidates();
+            ok &= !candidates.isEmpty();
+            final PaperCard chosen = candidates.get(candidates.size() - 1);
+            final Deck deck = NeoQuest.buildStarterDeck("NeoCheck montado", chosen);
+            final java.util.Map<String, Integer> byName = new java.util.HashMap<>();
+            for (final java.util.Map.Entry<PaperCard, Integer> e : deck.getMain()) {
+                if (!e.getKey().isVeryBasicLand()) {
+                    byName.merge(e.getKey().getName(), e.getValue(), Integer::sum);
+                }
+            }
+            final long repeated = byName.values().stream().filter(v -> v > 1).count();
+            final int size = deck.getMain().countAll();
+            final PaperCard cmd = deck.get(forge.deck.DeckSection.Commander).get(0);
+            System.out.printf(Locale.ROOT, "  [%s] %d candidatos; el pedido es el comandante (%s)%n",
+                    cmd.getName().equals(chosen.getName()) ? "OK " : "MAL", candidates.size(), cmd.getName());
+            ok &= cmd.getName().equals(chosen.getName());
+            System.out.printf(Locale.ROOT, "  [%s] ninguna carta repetida (%d nombres de mas; Sol Ring x%d en la coleccion)%n",
+                    repeated == 0 ? "OK " : "MAL", repeated, printings + 1);
+            ok &= repeated == 0;
+            System.out.printf(Locale.ROOT, "  [%s] 99 cartas mas el comandante (%d)%n", size == 99 ? "OK " : "MAL", size);
+            ok &= size == 99;
+        } finally {
+            NeoQuest.delete(name);
+        }
+        return ok;
+    }
+
+    /**
+     * Un COMANDANTE que no tienes (revisor, 15-10-2026): al importar una lista
+     * con "Mis cartas" se perdia, porque setCommander exigia tenerlo. En la
+     * Quest entra como cualquier otra carta que falta, y lo que impide jugar es
+     * NeoQuest.problemWith.
+     */
+    private static boolean checkWishlistCommander() {
+        final String name = "neo-questcheck-deseos-cmd";
+        NeoQuest.delete(name);
+        System.out.println("  --- Un comandante que no tienes (lista de deseos) ---");
+        final List<Deck> starters = NeoQuest.starterDecks(NeoQuest.Modalidad.COMMANDER);
+        if (starters.isEmpty()) {
+            System.out.println("  (sin mazos de inicio de Commander: no se prueba)");
+            return true;
+        }
+        boolean ok = true;
+        NeoQuest.start(name, NeoQuest.Modalidad.COMMANDER, NeoQuest.Dificultad.NORMAL, starters.get(0));
+        try {
+            final QuestDeckContext ctx = new QuestDeckContext();
+            final DeckEditor ed = new DeckEditor(ctx, new Deck(NeoQuest.currentDeck(), "NeoCheck comandante"));
+            PaperCard cmd = null;
+            for (final PaperCard c : FModel.getMagicDb().getCommonCards().getUniqueCards()) {
+                if (c.getRules() != null && !c.getName().startsWith("A-") && ctx.owned(c) == 0
+                        && ed.deckFormat().isLegalCommander(c.getRules())) {
+                    cmd = c;
+                    break;
+                }
+            }
+            if (cmd == null) {
+                System.out.println("  (no hay comandante que no tengas: no se prueba)");
+                return true;
+            }
+            final boolean set = ed.setCommander(cmd);
+            System.out.printf(Locale.ROOT, "  [%s] con «Mis cartas» (lo de importar), %s entra de comandante%n",
+                    set ? "OK " : "MAL", cmd.getName());
+            ok &= set;
+            final int miss = ed.missingOf(cmd);
+            System.out.printf(Locale.ROOT, "  [%s] y cuenta como que falta (%d)%n", miss == 1 ? "OK " : "MAL", miss);
+            ok &= miss == 1;
+            // Lo que impide jugarlo: NeoQuest.problemWith pone delante los
+            // problemas de reglas (este mazo de prueba ya tiene uno), asi que se
+            // mira la lista de lo que falta, que es de donde sale su aviso.
+            final String cmdName = cmd.getName();
+            final boolean listed = NeoQuest.missingCards(ed.getDeck()).keySet().stream()
+                    .anyMatch(c -> c.getName().equals(cmdName));
+            final boolean blocked = NeoQuest.problemWith(ed.getDeck()) != null;
+            System.out.printf(Locale.ROOT, "  [%s] y el mazo no se puede jugar: esta en lo que falta%n",
+                    listed && blocked ? "OK " : "MAL");
+            ok &= listed && blocked;
+
+            // "Generar mazo" con "Mis cartas": solo con lo que tienes. Antes
+            // lo que no tenias salia ilegal y "Limpiar" lo quitaba; con la
+            // lista de deseos se habria quedado entero, sin poder jugarse.
+            final DeckEditor gen = new DeckEditor(new QuestDeckContext(),
+                    new Deck(NeoQuest.currentDeck(), "NeoCheck generado"));
+            final int added = gen.generateForCommander();
+            System.out.printf(Locale.ROOT, "  [%s] «Generar mazo» con «Mis cartas» usa solo lo tuyo (%d cartas, faltan %d)%n",
+                    added >= 0 && gen.missingTotal() == 0 ? "OK " : "MAL", added, gen.missingTotal());
+            ok &= added >= 0 && gen.missingTotal() == 0;
+
+            // Con "Todas", el mazo entero, como lista de deseos: es lo pedido.
+            final DeckEditor genAll = new DeckEditor(new QuestDeckContext(),
+                    new Deck(NeoQuest.currentDeck(), "NeoCheck generado entero"));
+            genAll.setShowAllCards(true);
+            final int addedAll = genAll.generateForCommander();
+            System.out.printf(Locale.ROOT, "  [%s] con «Todas», el mazo entero (%d cartas, faltan %d)%n",
+                    addedAll >= 90 ? "OK " : "MAL", addedAll, genAll.missingTotal());
+            ok &= addedAll >= 90;
+
+            // "Quitar las que no tengo" tambien se lleva un COMANDANTE que no tienes.
+            final int before = ed.commanders().size();
+            ed.removeMissing();
+            final boolean gone = ed.commanders().stream().noneMatch(c -> c.getName().equals(cmdName))
+                    && ed.missingTotal() == 0;
+            System.out.printf(Locale.ROOT, "  [%s] «Quitar las que no tengo» quita el comandante que no tienes (%d -> %d)%n",
+                    gone ? "OK " : "MAL", before, ed.commanders().size());
+            ok &= gone;
+
+            // En la Quest no hay banquillo libre: lo borraba cargar la Quest
+            // (NeoQuest.dropSideboards), con lo que hubiera dentro.
+            System.out.printf(Locale.ROOT, "  [%s] en la Quest no hay banquillo libre%n", !gen.hasSideboard() ? "OK " : "MAL");
+            ok &= !gen.hasSideboard();
+
+            // Pero el companero si, y sobrevive a cargar la Quest.
+            PaperCard companion = null;
+            for (final PaperCard c : FModel.getMagicDb().getCommonCards().getUniqueCards()) {
+                if (DeckEditor.isCompanionCard(c)) {
+                    companion = c;
+                    break;
+                }
+            }
+            if (companion != null) {
+                final Deck withCompanion = new Deck(NeoQuest.currentDeck(), "NeoCheck companero");
+                withCompanion.getOrCreate(DeckSection.Sideboard).add(companion, 1);
+                withCompanion.getOrCreate(DeckSection.Sideboard).add(cmd, 1);
+                FModel.getQuest().getMyDecks().add(withCompanion);
+                NeoQuest.dropSideboards();
+                final Deck after = FModel.getQuest().getMyDecks().get("NeoCheck companero");
+                final forge.deck.CardPool side = after == null ? null : after.get(DeckSection.Sideboard);
+                final boolean kept = side != null && side.count(companion) == 1 && side.countAll() == 1;
+                System.out.printf(Locale.ROOT, "  [%s] cargar la Quest conserva el companero (%s) y quita lo demas%n",
+                        kept ? "OK " : "MAL", companion.getName());
+                ok &= kept;
+            }
+        } finally {
+            NeoQuest.delete(name);
+        }
+        System.out.println(ok ? "  OK - el comandante que te falta se apunta y bloquea jugar"
+                : "  FALLO - el comandante que no tienes");
+        return ok;
+    }
+
+    private static int countByName(final Deck deck, final String name) {
+        int n = 0;
+        for (final java.util.Map.Entry<PaperCard, Integer> e : deck.getMain()) {
+            if (e.getKey().getName().equals(name)) {
+                n += e.getValue();
+            }
+        }
+        return n;
+    }
+
+    private static int sum(final java.util.Map<PaperCard, Integer> m) {
+        int n = 0;
+        for (final int v : m.values()) {
+            n += v;
+        }
+        return n;
+    }
+
+    private static boolean checkSideboardTrap() {
+        final String name = "neo-questcheck-banquillo";
+        NeoQuest.delete(name);
+        System.out.println("  --- El banquillo invisible ---");
+        boolean ok = true;
+
+        // Un preconstruido de Estandar que TENGA banquillo. El de la captura es
+        // Cavalcade Charge, pero vale cualquiera: lo que se prueba es la forma.
+        Deck precon = null;
+        for (final Deck d : NeoQuest.starterDecks(NeoQuest.Modalidad.ESTANDAR)) {
+            if (d.has(DeckSection.Sideboard)) {
+                precon = d;
+                break;
+            }
+        }
+        if (precon == null) {
+            System.out.println("  FALLO: ningun preconstruido de Estandar trae banquillo");
+            return false;
+        }
+        final int sideCards = precon.get(DeckSection.Sideboard).countAll();
+        final List<PaperCard> sideList = precon.get(DeckSection.Sideboard).toFlatList();
+        System.out.printf(Locale.ROOT, "  Preconstruido: %s (%d principal + %d banquillo)%n",
+                precon.getName(), precon.getMain().countAll(), sideCards);
+
+        NeoQuest.start(name, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL, precon);
+
+        // 1a. El mazo de la aventura ya no lo lleva.
+        final Deck mine = NeoQuest.currentDeck();
+        final boolean stripped = mine != null && !mine.has(DeckSection.Sideboard);
+        System.out.printf(Locale.ROOT, "  Tu mazo tras adoptarlo: %s%n",
+                stripped ? "sin banquillo (bien)" : "SIGUE CON BANQUILLO (mal)");
+        ok &= stripped;
+
+        // 1b. Pero el preconstruido del catalogo sigue entero: es el MISMO
+        //     objeto que usa la tienda, y vaciarlo se lo quitaria a todos.
+        final boolean preconIntact = precon.has(DeckSection.Sideboard)
+                && precon.get(DeckSection.Sideboard).countAll() == sideCards;
+        System.out.printf(Locale.ROOT, "  El preconstruido del catalogo: %s%n",
+                preconIntact ? "intacto (bien)" : "LO HEMOS VACIADO (mal)");
+        ok &= preconIntact;
+
+        // 1c. Y no se ha perdido ni una carta: estan en tu coleccion.
+        final QuestDeckContext context = new QuestDeckContext();
+        int missing = 0;
+        for (final PaperCard c : sideList) {
+            if (context.owned(c) <= 0) {
+                missing++;
+            }
+        }
+        System.out.printf(Locale.ROOT, "  Cartas del banquillo en tu coleccion: %d de %d%n",
+                sideList.size() - missing, sideList.size());
+        ok &= missing == 0;
+
+        // 1d. Y el mazo se puede jugar tal cual, que es lo que fallaba.
+        final String problem = NeoQuest.problemWith(mine);
+        System.out.printf(Locale.ROOT, "  Se puede jugar: %s%n",
+                problem == null ? "si" : problem);
+        ok &= problem == null;
+
+        // ---- 2. Y que contar copias mire donde mira el motor ----
+        ok &= checkCountsLikeEngine(context);
+
+        NeoQuest.delete(name);
+        System.out.println(ok
+                ? "  OK - el banquillo ya no puede dejar un mazo injugable"
+                : "  FALLO - el banquillo sigue contando a escondidas");
+        return ok;
+    }
+
+    /**
+     * Contar copias como el motor: por NOMBRE y en TODAS las zonas.
+     *
+     * <p>Se monta el mazo a mano con las dos trampas juntas — copias en el
+     * banquillo y copias de <b>otra impresion</b> — porque las dos daban cero
+     * en el editor y cuatro en el motor.
+     */
+    private static boolean checkCountsLikeEngine(final QuestDeckContext context) {
+        boolean ok = true;
+
+        // Una carta de la que tengas al menos dos impresiones distintas; si no
+        // hay ninguna, vale con una sola y se prueba solo lo del banquillo.
+        PaperCard artA = null;
+        PaperCard artB = null;
+        for (final PaperCard c : context.pool()) {
+            if (c.getRules().getType().isBasicLand()) {
+                continue;
+            }
+            final List<PaperCard> arts = FModel.getMagicDb().getCommonCards().getAllCards(c);
+            if (arts.size() >= 2) {
+                artA = arts.get(0);
+                artB = arts.get(1);
+                break;
+            }
+            if (artA == null) {
+                artA = c;
+                artB = c;
+            }
+        }
+        if (artA == null) {
+            System.out.println("  FALLO: la coleccion no da ninguna carta con la que probar");
+            return false;
+        }
+
+        final Deck test = new Deck("neo-questcheck-contar");
+        test.getMain().add(artA, 3);
+        test.getOrCreate(DeckSection.Sideboard).add(artB, 3);
+        final DeckEditor editor = new DeckEditor(context, test);
+
+        final int counted = editor.countOf(artA);
+        System.out.printf(Locale.ROOT,
+                "  %s: 3 en el principal (%s) + 3 en el banquillo (%s) -> el editor cuenta %d%n",
+                artA.getName(), artA.getEdition(), artB.getEdition(), counted);
+        ok &= counted == 6;
+
+        // Y con seis copias tiene que verlo ILEGAL y saber arreglarlo. Sin lo
+        // segundo el jugador se queda encerrado: las copias que sobran estan en
+        // la zona que no puede abrir.
+        final String flaggedName = artA.getName();
+        final boolean flagged = editor.illegalCards().stream()
+                .anyMatch(c -> c.getName().equals(flaggedName));
+        System.out.printf(Locale.ROOT, "  Lo marca como que no cabe: %s%n",
+                flagged ? "si" : "NO (mal)");
+        ok &= flagged;
+
+        final int byRules = editor.deckFormat().getMaxCardCopies(artA);
+        final int have = context.owned(artA);
+        final int removed = editor.removeIllegal();
+        final int left = editor.countOf(artA);
+        final int leftMain = test.getMain().count(artA);
+        System.out.printf(Locale.ROOT,
+                "  Al quitar lo que sobra: %d fuera | quedan %d (tope del formato %s)"
+                        + " | %d en el principal (tienes %d)%n",
+                removed, left, byRules == Integer.MAX_VALUE ? "sin limite" : byRules,
+                leftMain, have);
+        // Los dos techos, cada uno sobre lo suyo: el del formato cuenta TODO,
+        // el de tu coleccion solo lo que has puesto en el principal.
+        ok &= byRules == Integer.MAX_VALUE || left <= byRules;
+        if (context.allowsMissing()) {
+            // Desde la lista de deseos (15-10-2026) lo que pasa de lo que TIENES
+            // no se quita: se guarda, y lo que impide es JUGARLO. Lo que tiene
+            // que pasar es que se sepa que falta.
+            int missing = 0;
+            for (final int n : NeoQuest.missingCards(test).values()) {
+                missing += n;
+            }
+            // Y cuenta TODO lo que lleva, banquillo incluido: el motor lo carga
+            // (companero, Wish), asi que tambien tiene que faltar.
+            System.out.printf(Locale.ROOT, "  Lo que pasa de lo que tienes no se quita: falta %d%n", missing);
+            ok &= missing == Math.max(0, left - have);
+        } else {
+            ok &= have == Integer.MAX_VALUE || leftMain <= have;
+        }
+
+        return ok;
+    }
+
+    /**
+     * Montar un mazo con TU coleccion.
+     *
+     * <p>Lo que hay que blindar aqui es el techo: en la aventura no se monta
+     * con lo que existe, se monta con lo que tienes. Que el editor deje meter
+     * una carta que no tienes no se ve en una captura — se ve tres duelos
+     * despues, cuando el mazo no arranca.
+     */
+    private static boolean checkDeckBuilding() {
+        final String name = "neo-questcheck-deck";
+        NeoQuest.delete(name);
+        System.out.println("  --- Montar mazo con tu coleccion ---");
+
+        final List<Deck> starters = NeoQuest.starterDecks(NeoQuest.Modalidad.ESTANDAR);
+        NeoQuest.start(name, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL,
+                starters.isEmpty() ? null : starters.get(0));
+
+        boolean ok = true;
+
+        final QuestDeckContext context = new QuestDeckContext();
+        System.out.printf(Locale.ROOT,
+                "  Tu coleccion: %d cartas distintas, %d en total | catalogo del editor: %d%n",
+                context.uniqueCount(), context.totalCount(), context.pool().size());
+        ok &= context.isLimited();
+        ok &= context.uniqueCount() > 0;
+        ok &= context.pool().size() == context.uniqueCount();
+
+        // ---- una carta que NO tienes no se puede meter ----
+        //
+        // Se busca a proposito una que exista en Magic y no este en tu
+        // coleccion: es el caso que rompe el modo si se cuela.
+        PaperCard notOwned = null;
+        for (final PaperCard c
+                : forge.model.FModel.getMagicDb().getCommonCards().getUniqueCards()) {
+            if (context.owned(c) == 0) {
+                notOwned = c;
+                break;
+            }
+        }
+        final forge.neo.deck.DeckEditor editor =
+                forge.neo.deck.DeckEditor.createNew(context, name + "-mazo");
+        if (notOwned != null) {
+            final String why = editor.rejectionReason(notOwned);
+            final int added = editor.add(notOwned, 1);
+            System.out.printf(Locale.ROOT, "  %s (no la tienes): %s | metidas: %d%n",
+                    notOwned.getName(), why == null ? "LA DEJA METER (mal)" : why, added);
+            ok &= why != null && added == 0;
+        }
+
+        // ---- y de las que tienes, no mas de las que tienes ----
+        PaperCard owned = null;
+        for (final PaperCard c : context.pool()) {
+            if (!c.getRules().getType().isBasicLand()) {
+                owned = c;
+                break;
+            }
+        }
+        if (owned == null) {
+            System.out.println("  FALLO: la coleccion no tiene ninguna carta que meter");
+            NeoQuest.delete(name);
+            return false;
+        }
+        final int have = context.owned(owned);
+        final int room = editor.roomFor(owned);
+        final int got = editor.add(owned, 99);
+        System.out.printf(Locale.ROOT,
+                "  %s: tienes %d | caben %d | al pedir 99 mete %d%n",
+                owned.getName(), have, room, got);
+        // El techo es el menor de los dos: las reglas del formato y lo que
+        // tienes. Pedir de mas nunca puede pasarse de ninguno.
+        ok &= got <= have;
+        ok &= got <= editor.deckFormat().getMaxCardCopies(owned);
+        // La cabecera de su grupo en el catalogo suma las COPIAS que tienes
+        // (Discord, 15-10-2026: "Lands (2)" con 18 en el mazo no decia nada).
+        System.out.printf(Locale.ROOT, "  En la cabecera de su grupo cuenta %d (tienes %d)%n",
+                editor.catalogueCopies(owned), have);
+        ok &= editor.catalogueCopies(owned) == have;
+        ok &= editor.rejectionReason(owned) != null || editor.countOf(owned) < have;
+
+        // ---- un comandante que no tienes ----
+        //
+        // Desde la lista de deseos (15-10-2026) entra, como cualquier otra carta
+        // que te falta: lo que no puede es entrar SIN contar como que falta, que
+        // es lo que dejaria jugarlo. Lo prueba entero checkWishlistCommander.
+        if (notOwned != null) {
+            final boolean set = editor.setCommander(notOwned);
+            final boolean counted = !set || editor.missingOf(notOwned) > 0;
+            System.out.printf(Locale.ROOT, "  Nombrar comandante una carta que no tienes: %s%n",
+                    !set ? "no entra (no es comandante aqui)"
+                            : counted ? "entra y cuenta como que falta (bien)" : "ENTRA SIN CONTAR COMO QUE FALTA (mal)");
+            ok &= counted;
+            if (set) {
+                editor.removeCommander(notOwned);
+            }
+        }
+
+        // ---- se guarda, y aparece en los mazos de la aventura ----
+        // ⚠️ SIN NeoQuest.save() a mano detras: hasta el 11-10-2026 estaba, y
+        // tapaba justo el fallo de Android (su editor no lo llamaba, y salir de
+        // la Quest sin jugar perdia el mazo). Guardar en el editor tiene que
+        // bastar: lo hace QuestDeckContext.storage().
+        final int decksBefore = NeoQuest.decks().size();
+        editor.save();
+        final int decksAfter = NeoQuest.decks().size();
+        System.out.printf(Locale.ROOT, "  Mazos de la aventura: %d -> %d (guardado '%s')%n",
+                decksBefore, decksAfter, editor.getName());
+        ok &= decksAfter == decksBefore + 1;
+
+        // ---- y sobrevive a recargar la aventura ----
+        NeoQuest.load(name);
+        boolean found = false;
+        for (final Deck d : NeoQuest.decks()) {
+            if (d.getName().equals(editor.getName())) {
+                found = true;
+                break;
+            }
+        }
+        System.out.printf(Locale.ROOT, "  Tras recargar la aventura, el mazo %s%n",
+                found ? "sigue ahi" : "SE HA PERDIDO");
+        ok &= found;
+
+        // ---- y borrarlo tambien se escribe ----
+        final String extra = name + "-borrar";
+        final forge.neo.deck.DeckEditor second =
+                forge.neo.deck.DeckEditor.createNew(new QuestDeckContext(), extra);
+        second.add(owned, 1);
+        second.save();
+        new QuestDeckContext().storage().delete(extra);
+        NeoQuest.load(name);
+        boolean gone = true;
+        for (final Deck d : NeoQuest.decks()) {
+            if (d.getName().equals(extra)) {
+                gone = false;
+                break;
+            }
+        }
+        System.out.printf(Locale.ROOT, "  Un mazo borrado, tras recargar: %s%n",
+                gone ? "no esta (bien)" : "HA VUELTO");
+        ok &= gone;
+
+        // ---- las reglas que se aplican son las de la AVENTURA ----
+        //
+        // No las del formato general: en Quest se juntan el reglamento de Quest
+        // y, si la modalidad lo es, ademas el de Commander.
+        final String problem = editor.problem();
+        System.out.printf(Locale.ROOT, "  El mazo a medias dice: %s%n",
+                problem == null ? "listo para jugar" : problem);
+        // Un mazo de dos cartas NO puede estar listo: si lo dice, es que se
+        // esta preguntando al reglamento equivocado.
+        ok &= problem != null;
+
+        NeoQuest.delete(name);
+        System.out.println(ok ? "  OK" : "  FALLO");
+        return ok;
+    }
+
+    /**
+     * El sorteo del sobre de premio.
+     *
+     * <p>Esto no se puede comprobar jugando: haria falta ganar cincuenta
+     * duelos para saber si las expansiones caras salen menos. Se sortea 300
+     * veces y se miran los numeros.
+     */
+    private static boolean checkPrize() {
+        final String name = "neo-questcheck-prize";
+        NeoQuest.delete(name);
+        System.out.println("  --- Sobre de premio ---");
+
+        final List<Deck> starters = NeoQuest.starterDecks(NeoQuest.Modalidad.COMMANDER);
+        NeoQuest.start(name, NeoQuest.Modalidad.COMMANDER, NeoQuest.Dificultad.NORMAL,
+                starters.isEmpty() ? null : starters.get(0));
+
+        boolean ok = true;
+
+        // La ventana de "lo nuevo": las cinco primeras, que vienen ordenadas de
+        // la mas nueva a la mas vieja.
+        final List<CardEdition> all = NeoQuestShop.editions();
+        final java.util.Set<String> newest = new java.util.HashSet<>();
+        for (int i = 0; i < Math.min(5, all.size()); i++) {
+            newest.add(all.get(i).getCode());
+        }
+
+        // El precio medio del catalogo entero, para comparar.
+        long catalogTotal = 0;
+        for (final CardEdition e : all) {
+            catalogTotal += NeoQuestShop.priceOf(NeoQuestShop.boosterOf(e));
+        }
+        final long catalogAvg = all.isEmpty() ? 0 : catalogTotal / all.size();
+
+        final int rounds = 300;
+        long offeredTotal = 0;
+        int offeredCount = 0;
+        int worstRecent = Integer.MAX_VALUE;
+        int expensiveSeen = 0;
+        for (int r = 0; r < rounds; r++) {
+            final List<CardEdition> options = NeoQuestPrize.choices();
+            if (options.size() != 10) {
+                System.out.printf(Locale.ROOT, "  FALLO: %d opciones en vez de 10%n",
+                        options.size());
+                ok = false;
+                break;
+            }
+            final java.util.Set<String> seen = new java.util.HashSet<>();
+            int recent = 0;
+            for (final CardEdition e : options) {
+                if (!seen.add(e.getCode())) {
+                    System.out.println("  FALLO: la misma expansion dos veces en el sorteo");
+                    ok = false;
+                }
+                if (newest.contains(e.getCode())) {
+                    recent++;
+                }
+                final int price = NeoQuestShop.priceOf(NeoQuestShop.boosterOf(e));
+                offeredTotal += price;
+                offeredCount++;
+                if (price >= 5000) {
+                    expensiveSeen++;
+                }
+            }
+            worstRecent = Math.min(worstRecent, recent);
+        }
+
+        final long offeredAvg = offeredCount == 0 ? 0 : offeredTotal / offeredCount;
+        System.out.printf(Locale.ROOT,
+                "  %d sorteos de 10 | de las 5 mas nuevas, en el PEOR caso: %d%n",
+                rounds, worstRecent);
+        System.out.printf(Locale.ROOT,
+                "  Precio medio ofrecido: %d cr. (el del catalogo entero es %d)%n",
+                offeredAvg, catalogAvg);
+        System.out.printf(Locale.ROOT,
+                "  Sobres de 5.000 cr. o mas ofrecidos: %d de %d (%.1f%%)%n",
+                expensiveSeen, offeredCount, 100.0 * expensiveSeen / Math.max(1, offeredCount));
+
+        // Siempre al menos las dos garantizadas.
+        ok &= worstRecent >= 2;
+        // Y las caras tienen que salir MENOS: si el peso por precio no se
+        // aplicara, la media ofrecida seria la del catalogo.
+        ok &= offeredAvg < catalogAvg;
+
+        // Cada cuantas victorias toca, y que la preferencia del motor se repone.
+        // OJO: la preferencia va por dificultad, y esta aventura es Normal ->
+        // WINS_BOOSTER_MEDIUM. Preguntar por la de siempre (_EASY) daba un
+        // FALLO que no existia.
+        final forge.gamemodes.quest.data.QuestPreferences.QPref pref =
+                NeoQuestPrize.boosterPref();
+        final String was = forge.model.FModel.getQuestPreferences().getPref(pref);
+        final String muted = NeoQuestPrize.muteEngineBooster();
+        final String during = forge.model.FModel.getQuestPreferences().getPref(pref);
+        NeoQuestPrize.unmuteEngineBooster(muted);
+        final String after = forge.model.FModel.getQuestPreferences().getPref(pref);
+        System.out.printf(Locale.ROOT,
+                "  Sobre del motor (%s): %s -> %s -> %s (toca cada %d victorias)%n",
+                pref, was, during, after, NeoQuestPrize.winsPerPrize());
+        // Apagado mientras reparte, y REPUESTO antes de que se guarde: ese
+        // fichero se comparte con la instalacion normal de Forge del usuario.
+        ok &= "0".equals(during) && was.equals(after);
+
+        // ---- Y LO MAS IMPORTANTE: un premio es GRATIS ----
+        //
+        // El sobre que eliges al ganar entra en la coleccion sin cobrar. Es
+        // facil que esto se rompa sin que se note (basta con que award() acabe
+        // pasando por buyAndOpen en vez de por grantFree), y el jugador lo
+        // descubriria pagando por su propio premio.
+        final long creditsBefore = NeoQuest.credits();
+        final int collectionBefore = NeoQuest.collectionSize();
+        final forge.neo.quest.NeoQuestShop.Opened prize = NeoQuestPrize.award();
+        System.out.printf(Locale.ROOT,
+                "  Premio cobrado: %d cr. | creditos %d -> %d | coleccion %d -> %d%n",
+                prize == null ? -1 : prize.getPaid(), creditsBefore, NeoQuest.credits(),
+                collectionBefore, NeoQuest.collectionSize());
+        ok &= prize != null && prize.getPaid() == 0;
+        ok &= NeoQuest.credits() == creditsBefore;
+        ok &= NeoQuest.collectionSize() == collectionBefore + (prize == null ? -1
+                : prize.getCards().size());
+
+        NeoQuest.delete(name);
+        System.out.println(ok ? "  OK" : "  FALLO");
+        return ok;
+    }
+
+    /** Mismas cartas y en el mismo orden: es lo que pasa si se reusa el sobre. */
+    /**
+     * Los desafios, sin ventana.
+     *
+     * <p>Lo que hay que blindar no es la pantalla: es que los 37 ficheros de
+     * {@code res/quest/challenges} se lean, que el motor abra los que tocan
+     * segun tus victorias, y sobre todo que un desafio se pueda <b>jugar por el
+     * mismo camino que un duelo</b> — {@code QuestUtil.setEvent} recibe la
+     * clase padre, asi que si eso se rompiera lo haria en silencio.
+     */
+    private static boolean checkChallenges() {
+        System.out.println("  --- Desafios ---");
+        final String name = "neo-questcheck-challenge";
+        NeoQuest.delete(name);
+        final List<Deck> starters = NeoQuest.starterDecks(NeoQuest.Modalidad.COMMANDER);
+        // Uno que pase las reglas. Desde que el duelo no arranca con un mazo que
+        // no vale (NeoQuestMatch.playFully, 15-10-2026), coger el primero sin
+        // mas fallaba: es Abzan Armor [TDC], que en los datos de Forge trae 98
+        // cartas y no 99. Se dice aqui, para que se vea si alguno mas se rompe.
+        // Las reglas son las de la Quest CARGADA: primero se crea la de Commander.
+        NeoQuest.start(name, NeoQuest.Modalidad.COMMANDER, NeoQuest.Dificultad.FACIL,
+                starters.isEmpty() ? null : starters.get(0));
+        Deck starter = null;
+        int bad = 0;
+        for (final Deck d : starters) {
+            final String rules = forge.neo.deck.DeckProblem.translate(
+                    forge.gamemodes.quest.QuestUtil.getDeckConformanceProblemsBeforeGame(d));
+            if (rules == null) {
+                if (starter == null) {
+                    starter = d;
+                }
+            } else {
+                bad++;
+                System.out.printf(Locale.ROOT, "  (aviso) mazo de inicio que no pasa las reglas: %s -> %s%n",
+                        d.getName(), rules);
+            }
+        }
+        System.out.printf(Locale.ROOT, "  Mazos de inicio de Commander: %d, %d no pasan las reglas%n",
+                starters.size(), bad);
+        NeoQuest.delete(name);
+        NeoQuest.start(name, NeoQuest.Modalidad.COMMANDER, NeoQuest.Dificultad.FACIL, starter);
+
+        boolean ok = true;
+
+        // Sin victorias no hay ninguno abierto, y la pantalla tiene que poder
+        // decir cuantas faltan en vez de un "no hay" a secas.
+        NeoQuest.forgetChallenges();
+        System.out.printf(Locale.ROOT, "  Recien empezada: %d abiertos, uno cada %d victorias,"
+                + " faltan %d%n", NeoQuest.challenges().size(), NeoQuest.winsPerChallenge(),
+                NeoQuest.winsToNextChallenge());
+        ok &= NeoQuest.winsPerChallenge() > 0;
+
+        // Con victorias se abren, y como mucho cinco: lo decide
+        // regenerateChallenges(), no nosotros.
+        for (int i = 0; i < 40; i++) {
+            NeoQuest.engine().getAchievements().addWin();
+        }
+        NeoQuest.forgetChallenges();
+        final java.util.List<forge.gamemodes.quest.QuestEventChallenge> open =
+                NeoQuest.challenges();
+        System.out.printf(Locale.ROOT, "  Con 40 victorias: %d desafios abiertos%n", open.size());
+        ok &= !open.isEmpty() && open.size() <= 5;
+
+        for (final forge.gamemodes.quest.QuestEventChallenge c : open) {
+            System.out.printf(Locale.ROOT, "      . %-34s %s | rival a %d vidas | %d cr. | %s%n",
+                    c.getTitle(), c.getDifficulty(), c.getAILife(), c.getCreditsReward(),
+                    c.isRepeatable() ? "repetible" : "una sola vez");
+            // Un desafio sin mazo no se puede jugar, y eso no se ve hasta que
+            // le das a JUGAR y la partida no arranca.
+            ok &= c.getEventDeck() != null && !c.getEventDeck().getMain().isEmpty();
+        }
+
+        // Y jugarlo de verdad, que es lo unico que demuestra que el camino
+        // comun con los duelos funciona. Se amanya para ganar: al rival se le
+        // deja un mazo minusculo y se queda sin biblioteca.
+        if (!open.isEmpty()) {
+            final forge.gamemodes.quest.QuestEventChallenge c = open.get(0);
+            c.setEventDeck(NeoQuest.tinyCopyOf(c.getEventDeck()));
+            final int playedBefore = NeoQuest.challengesPlayed();
+            final long creditsBefore = NeoQuest.credits();
+            System.out.printf(Locale.ROOT, "  Jugando el desafio \"%s\"...%n", c.getTitle());
+            final NeoQuestRewards rewards = NeoQuestMatch.play(c, null, true,
+                    forge.neo.match.NeoMatchUI.Mode.AUTO_PLAY);
+            System.out.printf(Locale.ROOT,
+                    "  Resultado: desafios jugados %d -> %d | creditos %d -> %d%n",
+                    playedBefore, NeoQuest.challengesPlayed(), creditsBefore, NeoQuest.credits());
+            for (final String line : rewards == null
+                    ? List.of("(NO SE HA JUGADO: el mazo no vale)") : rewards.getMessages()) {
+                System.out.println("    " + line);
+            }
+            // Lo que de verdad prueba que el motor lo ha tratado COMO desafio y
+            // no como un duelo cualquiera: el contador de desafios jugados.
+            ok &= NeoQuest.challengesPlayed() > playedBefore;
+        }
+
+        System.out.println(ok ? "  OK" : "  FALLO");
+        NeoQuest.delete(name);
+        return ok;
+    }
+
+    /**
+     * El bazar, sin ventana.
+     *
+     * <p>Lo que se comprueba no es que la lista se lea — eso se ve en la
+     * captura — sino que <b>comprar hace efecto</b>, que es justo lo que una
+     * captura no puede ver. El bazar toca cosas que estan lejos: las vidas de
+     * partida, cada cuantas victorias llega un desafio, lo que te pagan al
+     * vender. Si una de esas dejara de moverse, la pantalla seguiria
+     * ensenyandolo todo perfecto.
+     */
+    private static boolean checkBazaar() {
+        System.out.println("  --- Bazar ---");
+        final String name = "neo-questcheck-bazaar";
+        NeoQuest.delete(name);
+        final List<Deck> starters = NeoQuest.starterDecks(NeoQuest.Modalidad.COMMANDER);
+        NeoQuest.start(name, NeoQuest.Modalidad.COMMANDER, NeoQuest.Dificultad.NORMAL,
+                starters.isEmpty() ? null : starters.get(0));
+        NeoQuest.engine().getAssets().addCredits(100000);
+
+        boolean ok = true;
+        final java.util.List<forge.neo.quest.NeoQuestBazaar.Stall> stalls =
+                forge.neo.quest.NeoQuestBazaar.stalls();
+        System.out.printf(Locale.ROOT, "  Puestos: %d%n", stalls.size());
+        ok &= stalls.size() >= 5;
+
+        int items = 0;
+        for (final forge.neo.quest.NeoQuestBazaar.Stall s : stalls) {
+            System.out.printf(Locale.ROOT, "      %s (%d a la venta)%n",
+                    s.getTitle(), s.getItems().size());
+            items += s.getItems().size();
+            // Por su nombre DE VENTA, que no es el interno: "Map" se vende
+            // como "Adventurer's Map". Buscarlo por el interno no lo encuentra
+            // y la comprobacion se saltaria sin decir nada.
+            for (final forge.gamemodes.quest.bazaar.IQuestBazaarItem it : s.getItems()) {
+                System.out.printf(Locale.ROOT, "          - %-28s %d cr.%n",
+                        it.getPurchaseName(), forge.neo.quest.NeoQuestBazaar.priceOf(it));
+            }
+            // Un puesto sin nombre ni ambientacion es un puesto que no se ha
+            // leido bien del XML.
+            ok &= s.getTitle() != null && !s.getTitle().isBlank();
+        }
+        System.out.printf(Locale.ROOT, "  Objetos a la venta hoy: %d%n", items);
+        ok &= items >= 10;
+
+        // El Elixir sube las vidas de partida. Es el efecto mas facil de
+        // comprobar y el mas facil de romper sin enterarse.
+        final int lifeBefore = NeoQuest.life();
+        final forge.gamemodes.quest.bazaar.IQuestBazaarItem elixir =
+                findItem(stalls, "Elixir of Life");
+        if (elixir != null) {
+            final long before = NeoQuest.credits();
+            final boolean bought = forge.neo.quest.NeoQuestBazaar.buy(elixir);
+            System.out.printf(Locale.ROOT,
+                    "  Elixir of Life: comprado %s | creditos %d -> %d | vidas %d -> %d%n",
+                    bought, before, NeoQuest.credits(), lifeBefore, NeoQuest.life());
+            ok &= bought && NeoQuest.life() == lifeBefore + 1;
+        } else {
+            System.out.println("  FALLA: no esta el Elixir of Life en ningun puesto");
+            ok = false;
+        }
+
+        // Pound of Flesh: precio 0 y TE PAGA, a cambio de una vida.  La
+        // pantalla ensenya "+250 cr." con gainOf y pregunta antes (decision
+        // 295); si gainOf dejara de decir lo que paga el motor, volveria a
+        // salir "0 cr." como si fuera gratis.  Y el resto no paga nada: si
+        // pagara, preguntaria al comprar un elixir.
+        final forge.gamemodes.quest.bazaar.IQuestBazaarItem flesh =
+                findItem(forge.neo.quest.NeoQuestBazaar.stalls(), "Pound of Flesh");
+        if (flesh == null) {
+            System.out.println("  FALLA: no esta Pound of Flesh en ningun puesto");
+            ok = false;
+        } else {
+            final int gain = forge.neo.quest.NeoQuestBazaar.gainOf(flesh);
+            final long creditsBefore = NeoQuest.credits();
+            final int lifeBeforeFlesh = NeoQuest.life();
+            final boolean sold = forge.neo.quest.NeoQuestBazaar.buy(flesh);
+            System.out.printf(Locale.ROOT,
+                    "  Pound of Flesh: precio %d, paga %d | creditos %d -> %d | vidas %d -> %d%n",
+                    forge.neo.quest.NeoQuestBazaar.priceOf(flesh), gain,
+                    creditsBefore, NeoQuest.credits(), lifeBeforeFlesh, NeoQuest.life());
+            ok &= forge.neo.quest.NeoQuestBazaar.priceOf(flesh) == 0 && gain > 0;
+            ok &= sold && NeoQuest.credits() == creditsBefore + gain
+                    && NeoQuest.life() == lifeBeforeFlesh - 1;
+        }
+        // Estates: ademas de los creditos por victoria, vender mas caro. El
+        // motor solo lo suma en el modo Fantasy y las nuestras son Classic: lo
+        // suma NeoQuestSell (18-10-2026). Si deja de sumarse, esto lo dice.
+        final forge.gamemodes.quest.bazaar.IQuestBazaarItem estates =
+                findItem(forge.neo.quest.NeoQuestBazaar.stalls(), "Estates");
+        if (estates == null) {
+            System.out.println("  FALLA: no esta Estates en ningun puesto");
+            ok = false;
+        } else {
+            final double multBefore = NeoQuestSell.sellMultiplier();
+            NeoQuest.engine().getAssets().addCredits(
+                    forge.neo.quest.NeoQuestBazaar.priceOf(estates) + 1000L);
+            final boolean boughtEstates = forge.neo.quest.NeoQuestBazaar.buy(estates);
+            final double multAfter = NeoQuestSell.sellMultiplier();
+            final boolean better = boughtEstates && Math.abs(multAfter - multBefore - 0.01) < 1e-9;
+            System.out.printf(Locale.ROOT, "  [%s] Estates: comprado %s | vender x%.4f -> x%.4f (se espera +0,01)%n",
+                    better ? "OK " : "MAL", boughtEstates, multBefore, multAfter);
+            ok &= better;
+        }
+        int payers = 0;
+        for (final forge.neo.quest.NeoQuestBazaar.Stall s : forge.neo.quest.NeoQuestBazaar.stalls()) {
+            for (final forge.gamemodes.quest.bazaar.IQuestBazaarItem it : s.getItems()) {
+                if (forge.neo.quest.NeoQuestBazaar.gainOf(it) > 0) {
+                    payers++;
+                }
+            }
+        }
+        System.out.printf(Locale.ROOT, "  Objetos que te pagan: %d (solo Pound of Flesh)%n", payers);
+        ok &= payers == 1;
+
+        // El mapa acorta la espera de los desafios, y esa cuenta la hace el
+        // motor en getTurnsToUnlockChallenge(). Si esto se rompiera, la
+        // pantalla de desafios diria mal cuantas victorias faltan.
+        final int everyBefore = NeoQuest.winsPerChallenge();
+        final forge.gamemodes.quest.bazaar.IQuestBazaarItem map =
+                findItem(forge.neo.quest.NeoQuestBazaar.stalls(), "Adventurer's Map");
+        if (map == null) {
+            System.out.println("  FALLA: no esta el mapa en ningun puesto");
+            ok = false;
+        } else {
+            forge.neo.quest.NeoQuestBazaar.buy(map);
+            System.out.printf(Locale.ROOT,
+                    "  Map: un desafio cada %d victorias -> cada %d%n",
+                    everyBefore, NeoQuest.winsPerChallenge());
+            ok &= NeoQuest.winsPerChallenge() < everyBefore;
+        }
+
+        // Lo comprado desaparece del mostrador: es como el motor dice "ya lo
+        // tienes", y si no pasara se podria comprar dos veces.
+        final boolean stillThere =
+                findItem(forge.neo.quest.NeoQuestBazaar.stalls(), "Adventurer's Map") != null;
+        System.out.printf(Locale.ROOT, "  Y el mapa %s%n",
+                stillThere ? "SIGUE A LA VENTA (mal)" : "ya no se vende (bien)");
+        ok &= !stillThere;
+
+        // Una mascota: comprarla no basta, hay que ponersela. Son dos cosas y
+        // la segunda se olvida — sin selectPet la mascota esta pagada y no sale
+        // a la mesa.
+        final forge.gamemodes.quest.bazaar.IQuestBazaarItem pet =
+                findItem(forge.neo.quest.NeoQuestBazaar.stalls(), "Hound");
+        if (pet != null) {
+            forge.neo.quest.NeoQuestBazaar.buy(pet);
+            // Los animales van en el hueco 1; el 0 es de la planta. Lo dice
+            // index.xml y no es evidente: buscar el perro en el hueco 0 no lo
+            // encuentra y parece que la compra no ha hecho nada.
+            final java.util.List<forge.gamemodes.quest.bazaar.QuestPetController> owned =
+                    forge.neo.quest.NeoQuestBazaar.ownedPets(1);
+            System.out.printf(Locale.ROOT, "  Mascotas tuyas en el hueco 2: %d%n", owned.size());
+            ok &= !owned.isEmpty();
+
+            forge.neo.quest.NeoQuestBazaar.selectPet(1, "Hound");
+            System.out.printf(Locale.ROOT, "  Puesta: %s%n",
+                    forge.neo.quest.NeoQuestBazaar.selectedPet(1));
+            ok &= "Hound".equals(forge.neo.quest.NeoQuestBazaar.selectedPet(1));
+
+            // Y quitarsela tiene que poder hacerse.
+            forge.neo.quest.NeoQuestBazaar.selectPet(1, null);
+            ok &= forge.neo.quest.NeoQuestBazaar.selectedPet(1) == null;
+        }
+
+        // ---- los mundos ----
+        //
+        // Un mundo cambia CON QUE se juega: sus expansiones, sus rivales y sus
+        // desafios. Lo que hay que blindar es que viajar cambie las TRES cosas:
+        // setWorld solo apunta el nombre, y sin resetDuelsManager() /
+        // resetChallengesManager() sigues peleando con los rivales del mundo
+        // anterior mientras la pantalla ya dice el nombre del nuevo.
+        final java.util.List<forge.gamemodes.quest.QuestWorld> worlds =
+                forge.neo.quest.NeoQuestWorlds.all();
+        System.out.printf(Locale.ROOT, "  Mundos: %d | estas en %s%n", worlds.size(),
+                forge.neo.quest.NeoQuestWorlds.current() == null ? "(ninguno)"
+                        : forge.neo.quest.NeoQuestWorlds.current().getName());
+        ok &= worlds.size() >= 20;
+
+        forge.gamemodes.quest.QuestWorld target = null;
+        for (final forge.gamemodes.quest.QuestWorld w : worlds) {
+            // Uno con expansiones de verdad, no un "aleatorio": los de rotacion
+            // no publican su lista sin partida en curso.
+            if (!forge.neo.quest.NeoQuestWorlds.describe(w).isEmpty()) {
+                target = w;
+                break;
+            }
+        }
+        if (target == null) {
+            System.out.println("  FALLA: ningun mundo dice sus expansiones");
+            ok = false;
+        } else {
+            final int duelsBefore = NeoQuest.duels().size();
+            final boolean travelled = forge.neo.quest.NeoQuestWorlds.travelTo(target);
+            System.out.printf(Locale.ROOT, "  Viaje a %s (%s): %s | rivales %d -> %d%n",
+                    target.getName(), forge.neo.quest.NeoQuestWorlds.describe(target),
+                    travelled, duelsBefore, NeoQuest.duels().size());
+            ok &= travelled
+                    && forge.neo.quest.NeoQuestWorlds.current() != null
+                    && target.getName().equals(
+                            forge.neo.quest.NeoQuestWorlds.current().getName());
+            // Y viajar al mismo sitio no hace nada, que es lo que evita
+            // regenerar rivales por clicar dos veces.
+            ok &= !forge.neo.quest.NeoQuestWorlds.travelTo(target);
+
+            // El filtro "Solo de <mundo>" del editor: lo que se imprimio en sus
+            // expansiones pasa, lo de fuera no.
+            final forge.gamemodes.quest.QuestWorld fw = NeoQuestWorlds.deckFilterWorld();
+            final java.util.function.Predicate<forge.item.PaperCard> inWorld = NeoQuestWorlds.deckFilter(fw);
+            final java.util.Set<String> codes = new java.util.HashSet<>(target.getFormat().getAllowedSetCodes());
+            forge.item.PaperCard from = null;
+            forge.item.PaperCard outside = null;
+            for (final forge.item.PaperCard c : FModel.getMagicDb().getCommonCards().getAllCards()) {
+                if (from == null && codes.contains(c.getEdition())
+                        && !c.getRules().getType().isBasicLand()) {
+                    from = c;
+                }
+                if (outside == null && "TDM".equals(c.getEdition()) && !codes.contains("TDM")
+                        && FModel.getMagicDb().getCommonCards().getAllCards(c.getName()).stream()
+                                .noneMatch(p -> codes.contains(p.getEdition()))) {
+                    outside = c;
+                }
+                if (from != null && outside != null) {
+                    break;
+                }
+            }
+            final boolean filterOk = fw != null && inWorld != null && from != null && outside != null
+                    && inWorld.test(from) && !inWorld.test(outside);
+            System.out.printf(Locale.ROOT, "  Filtro del editor \"Solo de %s\": %s entra, %s no -> %s%n",
+                    fw == null ? "(ninguno)" : fw.getName(),
+                    from == null ? "?" : from.getName(), outside == null ? "?" : outside.getName(),
+                    filterOk ? "bien" : "FALLA");
+            ok &= filterOk;
+
+            // Los sobres del mundo (ajuste NeoQuest.WORLD_SHOP, encendido de
+            // fabrica): apagado, todas; encendido - o sin tocar -, solo las de
+            // este mundo.
+            final String was = forge.neo.NeoSettings.get(NeoQuest.WORLD_SHOP, null);
+            try {
+                forge.neo.NeoSettings.setBool(NeoQuest.WORLD_SHOP, false);
+                final int allPacks = NeoQuestShop.editions().size();
+                // Sin tocar es encendido: el de fabrica tiene que limitar.
+                forge.neo.NeoSettings.set(NeoQuest.WORLD_SHOP, null);
+                final java.util.Set<String> world = NeoQuest.worldSets();
+                final java.util.List<forge.card.CardEdition> local = NeoQuestShop.editions();
+                boolean inside = world != null && !local.isEmpty();
+                for (final forge.card.CardEdition e : local) {
+                    inside &= world.contains(e.getCode());
+                }
+                for (final forge.card.CardEdition e : NeoQuestPrize.choices()) {
+                    inside &= world != null && world.contains(e.getCode());
+                }
+                System.out.printf(Locale.ROOT, "  Sobres del mundo: %d de todas -> %d de %s%n",
+                        allPacks, local.size(), target.getName());
+                ok &= inside && local.size() < allPacks;
+            } finally {
+                forge.neo.NeoSettings.set(NeoQuest.WORLD_SHOP, was);
+            }
+        }
+
+        // Y todo esto sobrevive a guardar y recargar, que es donde se pierde
+        // lo que no se apunta.
+        NeoQuest.save();
+        final int life = NeoQuest.life();
+        NeoQuest.load(name);
+        System.out.printf(Locale.ROOT, "  Tras recargar: %d vidas, un desafio cada %d, en %s%n",
+                NeoQuest.life(), NeoQuest.winsPerChallenge(),
+                forge.neo.quest.NeoQuestWorlds.current() == null ? "(ninguno)"
+                        : forge.neo.quest.NeoQuestWorlds.current().getName());
+        ok &= NeoQuest.life() == life;
+        // El mundo es parte de la partida: si se perdiera al guardar, el
+        // jugador viaja, sale y vuelve a estar donde estaba.
+        ok &= target == null || (forge.neo.quest.NeoQuestWorlds.current() != null
+                && target.getName().equals(forge.neo.quest.NeoQuestWorlds.current().getName()));
+
+        System.out.println(ok ? "  OK" : "  FALLO");
+        NeoQuest.delete(name);
+        return ok;
+    }
+
+    /** Busca un objeto del bazar por su nombre, mire en el puesto que mire. */
+    private static forge.gamemodes.quest.bazaar.IQuestBazaarItem findItem(
+            final java.util.List<forge.neo.quest.NeoQuestBazaar.Stall> stalls,
+            final String name) {
+        for (final forge.neo.quest.NeoQuestBazaar.Stall s : stalls) {
+            for (final forge.gamemodes.quest.bazaar.IQuestBazaarItem item : s.getItems()) {
+                if (name.equalsIgnoreCase(item.getPurchaseName())) {
+                    return item;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Una carta de tu coleccion que exista en dos impresiones o mas.
+     *
+     * <p>Hace falta para probar el arte: sin dos artes no hay nada que
+     * comparar. Se busca en la coleccion y no en la base entera para que la
+     * carta sea manipulable con {@code addSingleCard} sin inventarse nada.
+     */
+    /**
+     * Una Quest con solo unas expansiones (Discord, 03-10-2026: "choosing
+     * sets by year"). Con el bloque de Zendikar, en las dos modalidades: el
+     * mazo de salida convertido y legal, la tienda de sobres, las sueltas y
+     * el sobre de premio de esas expansiones, sin Secret Lair, y que se
+     * guarda con la Quest. Y una Quest de las de siempre, sin cambiar nada.
+     */
+    private static boolean checkSetPool() {
+        System.out.println("  --- Quest con solo unas expansiones (Zendikar, Worldwake, Rise of the Eldrazi) ---");
+        boolean ok = true;
+        final forge.neo.ascent.AscentPool pool = forge.neo.ascent.AscentPool.sets(
+                java.util.Arrays.asList("ZEN", "WWK", "ROE"));
+        final java.util.Set<String> codes = pool.codes();
+
+        // Estandar, con un preconstruido moderno: se convierte.
+        final String name = "neo-check-pool";
+        NeoQuest.delete(name);
+        Deck precon = null;
+        for (final Deck d : NeoQuest.starterDecks(NeoQuest.Modalidad.ESTANDAR)) {
+            if (!d.getMain().toFlatList().stream().allMatch(pool::allows)) {
+                precon = d;
+                break;
+            }
+        }
+        if (precon == null) {
+            System.out.println("  FALLO: ningun preconstruido con cartas de fuera del bloque");
+            return false;
+        }
+        try {
+            NeoQuest.start(name, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL, precon, null, pool);
+            final java.util.Set<String> chosen = NeoQuest.chosenSets();
+            final Deck mine = NeoQuest.currentDeck();
+            final boolean deckIn = mine != null && mine.getMain().toFlatList().stream().allMatch(pool::allows)
+                    && mine.getMain().countAll() == precon.getMain().countAll()
+                    && NeoQuest.problemWith(mine) == null;
+            final List<CardEdition> packs = forge.neo.quest.NeoQuestShop.editions();
+            final boolean packsIn = !packs.isEmpty() && packs.stream().allMatch(ed -> codes.contains(ed.getCode()));
+            int outside = 0;
+            final List<PaperCard> singles = forge.neo.quest.NeoQuestShop.singles();
+            for (final PaperCard c : singles) {
+                if (!c.getRules().getType().isBasicLand() && !codes.contains(c.getEdition())) {
+                    outside++;
+                }
+            }
+            final boolean prizeIn = forge.neo.quest.NeoQuestPrize.choices().stream()
+                    .allMatch(ed -> codes.contains(ed.getCode()));
+            final boolean noLair = !forge.neo.quest.NeoQuestShop.secretLairAllowed()
+                    && forge.neo.quest.NeoQuestShop.drops().isEmpty()
+                    && forge.neo.quest.NeoQuestShop.secretLairPack().isEmpty();
+            NeoQuest.save();
+            final boolean kept = NeoQuest.load(name) && codes.equals(NeoQuest.chosenSets());
+            final String label = NeoQuest.worldLabel(NeoQuestWorlds.current());
+            forge.gamemodes.quest.QuestWorld elsewhere = null;
+            for (final forge.gamemodes.quest.QuestWorld w : NeoQuestWorlds.all()) {
+                if (!forge.gamemodes.quest.QuestWorld.MAINWORLDNAME.equals(w.getName())) {
+                    elsewhere = w;
+                    break;
+                }
+            }
+            final boolean stays = elsewhere == null || !NeoQuestWorlds.travelTo(elsewhere);
+            System.out.printf(Locale.ROOT, "  En la cabecera: %s | viajar: %s%n", label, stays ? "no (bien)" : "HA VIAJADO");
+            ok &= "Zendikar, Worldwake, Rise of the Eldrazi".equals(label) && stays;
+            System.out.printf(Locale.ROOT,
+                    "  Estandar con %s: mazo %s (%d cartas, %s) | sobres %d %s | sueltas %d, %d de fuera | premio %s | Secret Lair %s | al recargar %s%n",
+                    precon.getName(), deckIn ? "convertido" : "MAL", mine == null ? 0 : mine.getMain().countAll(),
+                    mine == null ? "-" : String.valueOf(NeoQuest.problemWith(mine) == null ? "legal" : NeoQuest.problemWith(mine)),
+                    packs.size(), packsIn ? "del bloque" : "CON OTRAS", singles.size(), outside,
+                    prizeIn ? "del bloque" : "CON OTRAS", noLair ? "fuera" : "SIGUE", kept ? "igual" : "PERDIDO");
+            ok &= chosen != null && chosen.equals(codes) && deckIn && packsIn && outside == 0
+                    && prizeIn && noLair && kept;
+        } finally {
+            NeoQuest.delete(name);
+        }
+
+        // Commander: un comandante del bloque y su mazo, convertido y legal.
+        // Kozilek SIEMPRE (incoloro: el cambio de una carta de fuera podia ser
+        // el mismo y salian dos copias) y otro al azar.
+        final List<PaperCard> cmds = new java.util.ArrayList<>();
+        final PaperCard kozilek = pool.printing(FModel.getMagicDb().getCommonCards()
+                .getUniqueByName("Kozilek, Butcher of Truth"));
+        if (kozilek != null) {
+            cmds.add(kozilek);
+        }
+        cmds.add(forge.neo.ascent.AscentSeedDeck.randomCommander(pool));
+        for (final PaperCard cmd : cmds) {
+            final String cname = "neo-check-pool-cmd";
+            NeoQuest.delete(cname);
+            try {
+                final Deck d = cmd == null ? null : NeoCommanderDuels.starter(cmd);
+                if (d == null) {
+                    System.out.println("  FALLO: sin comandante o sin mazo en el bloque");
+                    return false;
+                }
+                NeoQuest.start(cname, NeoQuest.Modalidad.COMMANDER, NeoQuest.Dificultad.NORMAL, d, null, pool);
+                final Deck mine = NeoQuest.currentDeck();
+                final String problem = mine == null ? "(sin mazo)" : NeoQuest.problemWith(mine);
+                final boolean in = mine != null && mine.getMain().toFlatList().stream().allMatch(pool::allows)
+                        && mine.get(DeckSection.Commander).toFlatList().stream().allMatch(pool::allows);
+                System.out.printf(Locale.ROOT, "  Commander con %s: %d cartas, %s, %s%n", cmd.getName(),
+                        mine == null ? 0 : mine.getMain().countAll(), in ? "todas del bloque" : "CON OTRAS",
+                        problem == null ? "legal" : problem);
+                ok &= in && problem == null;
+            } finally {
+                NeoQuest.delete(cname);
+            }
+        }
+
+        // Y una de siempre: nada cambia.
+        final String plain = "neo-check-pool-plain";
+        NeoQuest.delete(plain);
+        try {
+            NeoQuest.start(plain, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL, precon, null);
+            int all = 0;
+            for (final CardEdition ed : FModel.getMagicDb().getEditions()) {
+                // Los sets de Commander tambien tienen sobre en la tienda
+                // desde el 09-10-2026 (NeoQuestShop.isCommanderSet).
+                if (ed != null && (ed.hasBoosterTemplate() || forge.neo.quest.NeoQuestShop.hasBuiltPack(ed))) {
+                    all++;
+                }
+            }
+            final boolean same = NeoQuest.chosenSets() == null
+                    && forge.neo.quest.NeoQuestShop.editions().size() == all
+                    && forge.neo.quest.NeoQuestShop.secretLairAllowed();
+            System.out.printf(Locale.ROOT, "  Quest de siempre: %d sobres de %d, Secret Lair %s%n",
+                    forge.neo.quest.NeoQuestShop.editions().size(), all,
+                    forge.neo.quest.NeoQuestShop.secretLairAllowed() ? "si" : "NO");
+            ok &= same;
+        } finally {
+            NeoQuest.delete(plain);
+        }
+        System.out.println(ok ? "  OK" : "  FALLO");
+        return ok;
+    }
+
+    /**
+     * Empezar en un mundo con sus expansiones (Shandalar) y SIN mazo: las
+     * cartas sueltas de salida son de ese mundo (Discord, 07-10-2026: "The
+     * cards I got were not from Shandalar"). Las basicas no cuentan: el motor
+     * las regala aparte.
+     */
+    private static boolean checkWorldStartingPool() {
+        System.out.println("  Quest en Shandalar sin mazo: las cartas de salida, de Shandalar");
+        final forge.gamemodes.quest.QuestWorld w = FModel.getWorlds().get("Shandalar");
+        if (w == null || w.getFormat() == null) {
+            System.out.println("  FALLO: no esta el mundo Shandalar o no tiene expansiones");
+            return false;
+        }
+        final java.util.Set<String> sets = new java.util.HashSet<>(w.getFormat().getAllowedSetCodes());
+        final String name = "neo-check-world-pool";
+        NeoQuest.delete(name);
+        try {
+            NeoQuest.start(name, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL, null, "Shandalar");
+            int total = 0;
+            int outside = 0;
+            String example = null;
+            for (final java.util.Map.Entry<PaperCard, Integer> e : NeoQuest.collection()) {
+                final PaperCard c = e.getKey();
+                if (c == null || (c.getRules() != null && c.getRules().getType().isBasicLand())) {
+                    continue;
+                }
+                total += e.getValue();
+                if (!sets.contains(c.getEdition())) {
+                    outside += e.getValue();
+                    if (example == null) {
+                        example = c.getName() + " (" + c.getEdition() + ")";
+                    }
+                }
+            }
+            boolean ok = total > 0 && outside == 0;
+            System.out.printf(Locale.ROOT, "  %d cartas sueltas, %d de fuera de %s%s%n", total, outside, sets,
+                    example == null ? "" : " - p. ej. " + example);
+
+            // Y lo que llevas del mundo (NeoQuestCollection, Discord 07-10-2026):
+            // todo lo que tienes es de Shandalar, asi que "tienes" son tus nombres
+            // distintos (sin basicas), y una carta tuya no es "Nueva".
+            final java.util.Set<String> owned = NeoQuestCollection.ownedNames();
+            final NeoQuestCollection.Progress pr = NeoQuestCollection.worldProgress();
+            int mine = 0;
+            PaperCard sample = null;
+            for (final java.util.Map.Entry<PaperCard, Integer> e : NeoQuest.collection()) {
+                if (e.getKey() != null && !e.getKey().getRules().getType().isBasicLand()) {
+                    sample = e.getKey();
+                }
+            }
+            for (final String n : owned) {
+                final PaperCard c = FModel.getMagicDb().getCommonCards().getCard(n);
+                if (c != null && !c.getRules().getType().isBasicLand()) {
+                    mine++;
+                }
+            }
+            final boolean progressOk = pr != null && "Shandalar".equals(pr.world) && pr.total > 500
+                    && pr.owned == mine && pr.missing() == pr.total - mine
+                    && sample != null && !NeoQuestCollection.isNew(sample, owned);
+            System.out.printf(Locale.ROOT, "  de Shandalar: tienes %d de %d (te faltan %d); %s no sale como nueva%n",
+                    pr == null ? -1 : pr.owned, pr == null ? -1 : pr.total, pr == null ? -1 : pr.missing(),
+                    sample == null ? "?" : sample.getName());
+            ok &= progressOk;
+
+            // Exportar la coleccion (itch.io, 21-10-2026): una linea por impresion,
+            // "N Nombre (SET) num", y las copias suman lo que tienes.
+            final String exported = NeoQuestCollection.exportText();
+            int copies = 0;
+            int lines = 0;
+            int bad = 0;
+            String badLine = null;
+            for (final String line : exported.split("\n")) {
+                if (line.isEmpty()) {
+                    continue;
+                }
+                lines++;
+                if (!line.matches("\\d+ .+ \\([A-Z0-9]+\\)( \\S+)?( \\*F\\*)?")) {
+                    bad++;
+                    if (badLine == null) {
+                        badLine = line;
+                    }
+                    continue;
+                }
+                copies += Integer.parseInt(line.substring(0, line.indexOf(' ')));
+            }
+            int owns = 0;
+            for (final java.util.Map.Entry<PaperCard, Integer> e : NeoQuest.collection()) {
+                owns += e.getValue();
+            }
+            final boolean exportOk = lines > 0 && bad == 0 && copies == owns;
+            System.out.printf(Locale.ROOT, "  exportar: %d lineas, %d copias de %d%s%n", lines, copies, owns,
+                    badLine == null ? "" : " - mal: " + badLine);
+            ok &= exportOk;
+            System.out.println(ok ? "  OK" : "  FALLO");
+            return ok;
+        } finally {
+            NeoQuest.delete(name);
+        }
+    }
+
+    private static PaperCard pickWithSeveralPrintings() {
+        for (final java.util.Map.Entry<PaperCard, Integer> e : NeoQuest.collection()) {
+            final PaperCard c = e.getKey();
+            // Sin basicas: la venta automatica no las vende nunca, y si tocaba
+            // una (segun salga la coleccion: "Mountain" el 16-10-2026) la prueba
+            // de las repetidas salia en rojo sin que nada estuviera roto.
+            if (c != null && !c.isVeryBasicLand() && forge.model.FModel.getMagicDb()
+                    .getCommonCards().getAllCards(c.getName()).size() >= 2) {
+                return c;
+            }
+        }
+        return null;
+    }
+
+    private static boolean sameCards(final List<PaperCard> a, final List<PaperCard> b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (int i = 0; i < a.size(); i++) {
+            if (!a.get(i).getName().equals(b.get(i).getName())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Discord, 15-10-2026 ("Android Quest no rewards", dos jugadores): en UNA
+     * Quest (no en otra nueva) ni las victorias ni las derrotas se apuntan, y
+     * el que da mas pistas habia viajado a Bloomburrow antes de jugar. Se viaja
+     * y se juega, ganando y perdiendo, y se VUELVE A CARGAR la Quest del disco:
+     * apuntarlo en memoria y no guardarlo se veria igual en la pantalla.
+     */
+    /**
+     * Las cartas con estrella (Discord, 23-10-2026): las ventas automaticas
+     * —repetidas y lo que no esta en un mazo— se las saltan; sin estrella,
+     * vuelven a entrar. La estrella es de Forge y del jugador: se deja como
+     * estaba.
+     */
+    /**
+     * Las mejoras del bazar se apagan y se bajan (Discord, 26-10-2026): el
+     * Elixir comprado a 3, bajado a 0, da 3 vidas menos y NO se vuelve a
+     * vender (pagarias por lo que ya tienes); subido otra vez, gratis, vuelve
+     * la vida. Lo comprado no se pierde por el camino.
+     */
+    private static boolean checkUpgradeLevels() {
+        System.out.println("  --- Mejoras del bazar: apagar y bajar ---");
+        final String name = "neo-questcheck-mejoras";
+        NeoQuest.delete(name);
+        boolean ok = true;
+        try {
+            final List<Deck> starters = NeoQuest.starterDecks(NeoQuest.Modalidad.ESTANDAR);
+            NeoQuest.start(name, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL,
+                    starters.isEmpty() ? null : starters.get(0));
+            final forge.gamemodes.quest.QuestController q = NeoQuest.engine();
+            final forge.gamemodes.quest.bazaar.QuestItemType elixir =
+                    forge.gamemodes.quest.bazaar.QuestItemType.ELIXIR_OF_LIFE;
+            q.getAssets().setItemLevel(elixir, 3);
+            QuestUpgradeLevels.remember(elixir);
+            final int full = q.getAssets().getLife(q.getMode());
+            final long credits = NeoQuest.credits();
+            QuestUpgradeLevels.setActive(elixir, 0);
+            final int low = q.getAssets().getLife(q.getMode());
+            boolean offered = false;
+            for (final NeoQuestBazaar.Stall s : NeoQuestBazaar.stalls()) {
+                for (final forge.gamemodes.quest.bazaar.IQuestBazaarItem i : s.getItems()) {
+                    offered |= i instanceof forge.gamemodes.quest.bazaar.QuestItemBasic b && b.getItemType() == elixir;
+                }
+            }
+            final boolean listed = NeoQuestBazaar.ownedUpgrades().stream()
+                    .anyMatch(u -> u.type() == elixir && u.level() == 0 && u.owned() == 3);
+            final int back = QuestUpgradeLevels.setActive(elixir, 7);
+            final int again = q.getAssets().getLife(q.getMode());
+            final boolean free = NeoQuest.credits() == credits;
+            final boolean good = low == full - 3 && !offered && listed && back == 3 && again == full
+                    && free && QuestUpgradeLevels.owned(elixir) == 3 && !QuestUpgradeLevels.parked(elixir);
+            System.out.printf(Locale.ROOT,
+                    "  [%s] vida %d -> apagado %d -> otra vez %d | no se vende bajado: %s | sale en Tus mejoras: %s | subir no cobra: %s | no pasa de lo comprado: %s%n",
+                    good ? "OK " : "MAL", full, low, again, !offered, listed, free, back == 3);
+            ok &= good;
+
+            // Pound of Flesh NO se baja (Discord, 27-10-2026): te paga por la
+            // vida, y bajarla devolvia la vida dejando los creditos.  Y quien
+            // ya la habia bajado, al cargar la Quest la recupera entera.
+            final forge.gamemodes.quest.bazaar.QuestItemType flesh =
+                    forge.gamemodes.quest.bazaar.QuestItemType.POUND_FLESH;
+            q.getAssets().setItemLevel(flesh, 5);
+            QuestUpgradeLevels.remember(flesh);
+            final int stays = QuestUpgradeLevels.setActive(flesh, 0);
+            final boolean fixedInList = NeoQuestBazaar.ownedUpgrades().stream()
+                    .anyMatch(u -> u.type() == flesh && !u.adjustable());
+            q.getAssets().setItemLevel(flesh, 0); // lo que dejo el agujero
+            final boolean restored = QuestUpgradeLevels.restoreFixed();
+            final boolean fleshGood = stays == 5 && fixedInList && restored
+                    && q.getAssets().getItemLevel(flesh) == 5 && !QuestUpgradeLevels.restoreFixed();
+            System.out.printf(Locale.ROOT,
+                    "  [%s] Pound of Flesh no se baja: %s | sin botones: %s | la bajada de antes vuelve a 5: %s%n",
+                    fleshGood ? "OK " : "MAL", stays == 5, fixedInList, q.getAssets().getItemLevel(flesh) == 5);
+            ok &= fleshGood;
+        } finally {
+            NeoQuest.delete(name);
+        }
+        final boolean gone = !new java.io.File(forge.localinstance.properties.ForgeConstants.QUEST_SAVE_DIR,
+                name + ".neo-mejoras").exists();
+        System.out.printf(Locale.ROOT, "  [%s] al borrar la Quest se borra su fichero de mejoras%n", gone ? "OK " : "MAL");
+        return ok && gone;
+    }
+
+    private static boolean checkKept() {
+        System.out.println("  --- Cartas con estrella: no se venden solas ---");
+        final String name = "neo-questcheck-estrella";
+        NeoQuest.delete(name);
+        boolean ok = true;
+        final PaperCard card = FModel.getMagicDb().getCommonCards().getCard("Grizzly Bears");
+        final boolean before = NeoQuestSell.isKept(card);
+        try {
+            final List<Deck> starters = NeoQuest.starterDecks(NeoQuest.Modalidad.ESTANDAR);
+            NeoQuest.start(name, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL,
+                    starters.isEmpty() ? null : starters.get(0));
+            NeoQuest.engine().getCards().addSingleCard(card, 9);
+            if (NeoQuestSell.isKept(card)) {
+                NeoQuestSell.toggleKept(card);
+            }
+            final boolean soldBefore = NeoQuestSell.preview().getCards().contains(card)
+                    && NeoQuestSell.notInDecksPlan().containsKey(card);
+            NeoQuestSell.toggleKept(card);
+            final boolean keptNow = NeoQuestSell.isKept(card);
+            final boolean skipped = !NeoQuestSell.preview().getCards().contains(card)
+                    && !NeoQuestSell.notInDecksPlan().containsKey(card);
+            final int owned = NeoQuestSell.owned(card);
+            NeoQuestSell.sell();
+            final boolean stayed = NeoQuestSell.owned(card) == owned;
+            System.out.printf(Locale.ROOT, "  [%s] sin estrella entra en las dos ventas: %s | con estrella no: %s | vender repetidas la deja (%d): %s%n",
+                    soldBefore && keptNow && skipped && stayed ? "OK " : "MAL", soldBefore, skipped, owned, stayed);
+            ok &= soldBefore && keptNow && skipped && stayed;
+        } finally {
+            if (NeoQuestSell.isKept(card) != before) {
+                NeoQuestSell.toggleKept(card);
+            }
+            NeoQuest.delete(name);
+        }
+        return ok;
+    }
+
+    /**
+     * Renombrar una Quest (Discord, 23-10-2026): no se puede pisar otra (ni
+     * cambiando solo mayusculas), ni usar lo que un fichero no admite; y al
+     * renombrar se va todo con ella, lo nuestro incluido.
+     */
+    private static boolean checkRename() {
+        System.out.println("  --- Renombrar una Quest ---");
+        final String a = "neo-questcheck-renombrar-a";
+        final String b = "neo-questcheck-renombrar-b";
+        final String c = "neo-questcheck-renombrar-c";
+        for (final String n : new String[] {a, b, c}) {
+            NeoQuest.delete(n);
+        }
+        boolean ok = true;
+        try {
+            final List<Deck> starters = NeoQuest.starterDecks(NeoQuest.Modalidad.ESTANDAR);
+            final Deck starter = starters.isEmpty() ? null : starters.get(0);
+            NeoQuest.start(b, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL, starter);
+            NeoQuest.start(a, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL, starter);
+            QuestLowLife.set(a, true);
+            final long credits = NeoQuest.credits();
+
+            final String taken = NeoQuest.rename(a, b.toUpperCase(Locale.ROOT));
+            final String bad = NeoQuest.rename(a, "mal/nombre");
+            final String empty = NeoQuest.rename(a, "   ");
+            System.out.printf(Locale.ROOT, "  [%s] el de otra (en mayusculas): %s | con /: %s | vacio: %s%n",
+                    "questPick.rename.taken".equals(taken) && "questPick.rename.invalid".equals(bad)
+                            && "questPick.rename.empty".equals(empty) ? "OK " : "MAL", taken, bad, empty);
+            ok &= "questPick.rename.taken".equals(taken) && "questPick.rename.invalid".equals(bad)
+                    && "questPick.rename.empty".equals(empty);
+
+            final String done = NeoQuest.rename(a, "  " + c + "  ");
+            final java.io.File dir = new java.io.File(forge.localinstance.properties.ForgeConstants.QUEST_SAVE_DIR);
+            final boolean moved = done == null && new java.io.File(dir, c + ".dat").isFile()
+                    && !new java.io.File(dir, a + ".dat").isFile()
+                    && new java.io.File(dir, c + ".neo-vida-baja").isFile()
+                    && !new java.io.File(dir, a + ".neo-vida-baja").isFile();
+            final boolean loaded = c.equals(NeoQuest.name()) && NeoQuest.credits() == credits
+                    && QuestLowLife.isOn() && NeoQuest.saves().contains(b);
+            System.out.printf(Locale.ROOT, "  [%s] renombrada: %s | ficheros movidos: %s | sigue cargada con lo suyo: %s%n",
+                    moved && loaded ? "OK " : "MAL", done, moved, loaded);
+            ok &= moved && loaded;
+        } finally {
+            for (final String n : new String[] {a, b, c}) {
+                NeoQuest.delete(n);
+            }
+        }
+        return ok;
+    }
+
+    /**
+     * La vida baja (Discord, 18-10-2026): 15 en Estandar, 30 en Commander, y
+     * que llegue de verdad a la partida, no solo al numero del cuartel.
+     */
+    private static boolean checkLowLife() {
+        System.out.println("  --- Empezar con menos vida ---");
+        boolean ok = true;
+        for (final NeoQuest.Modalidad mode : NeoQuest.Modalidad.values()) {
+            final String name = "neo-questcheck-vidabaja-" + mode.name().toLowerCase(Locale.ROOT);
+            NeoQuest.delete(name);
+            final List<Deck> starters = NeoQuest.starterDecks(mode);
+            NeoQuest.start(name, mode, NeoQuest.Dificultad.NORMAL, starters.isEmpty() ? null : starters.get(0));
+            try {
+                final int normal = NeoQuest.life();
+                QuestLowLife.set(name, true);
+                final int low = NeoQuest.life();
+                final int want = mode == NeoQuest.Modalidad.COMMANDER ? 30 : 15;
+                System.out.printf(Locale.ROOT, "  [%s] %s: vida %d -> %d (se espera %d)%n",
+                        low == want && normal == want + (want == 30 ? 10 : 5) ? "OK " : "MAL",
+                        mode.getLabel(), normal, low, want);
+                ok &= low == want && normal == want + (want == 30 ? 10 : 5);
+                if (mode != NeoQuest.Modalidad.COMMANDER) {
+                    // Que llegue a la mesa: un duelo de verdad.
+                    QuestLowLife.lastApplied = -1;
+                    ok &= playOneDuel(true);
+                    System.out.printf(Locale.ROOT, "  [%s] en la partida empiezas con %d%n",
+                            QuestLowLife.lastApplied == want ? "OK " : "MAL", QuestLowLife.lastApplied);
+                    ok &= QuestLowLife.lastApplied == want;
+                }
+                NeoQuest.load(name);
+                final boolean kept = QuestLowLife.isOn() && NeoQuest.life() == want;
+                // Otra Quest con el mismo nombre no la hereda.
+                NeoQuest.start(name, mode, NeoQuest.Dificultad.NORMAL, starters.isEmpty() ? null : starters.get(0));
+                final boolean fresh = !QuestLowLife.isOn() && NeoQuest.life() == normal;
+                System.out.printf(Locale.ROOT, "  [%s] se guarda al reabrir: %s; una Quest nueva con su nombre no la hereda: %s%n",
+                        kept && fresh ? "OK " : "MAL", kept, fresh);
+                ok &= kept && fresh;
+            } finally {
+                NeoQuest.delete(name);
+            }
+        }
+        return ok;
+    }
+
+    /**
+     * Los rivales con las expansiones de la Quest (QuestRivalSets, 03-11-2026):
+     * con la marca, el mazo del rival solo trae cartas de esas expansiones y al
+     * acabar vuelve el original; sin la marca no se toca; y tras viajar a un
+     * mundo, las de ese mundo.
+     */
+    private static boolean checkRivalSets() {
+        System.out.println("  --- Rivales con las expansiones de la Quest ---");
+        boolean ok = true;
+        final String name = "neo-questcheck-rivales";
+        NeoQuest.delete(name);
+        final java.util.List<String> codes = java.util.List.of("ZEN", "WWK", "ROE");
+        try {
+            NeoQuest.start(name, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL, null,
+                    null, forge.neo.ascent.AscentPool.sets(codes));
+            final List<QuestEventDuel> duels = NeoQuest.duels();
+            if (duels.isEmpty()) {
+                System.out.println("  [MAL] la Quest no tiene duelos");
+                return false;
+            }
+            final QuestEventDuel duel = duels.get(0);
+            final Deck original = duel.getEventDeck();
+            // Sin la marca: nada.
+            QuestRivalSets.apply(duel).run();
+            final boolean untouched = duel.getEventDeck() == original;
+            // Con la marca.
+            QuestRivalSets.set(name, true);
+            final Runnable restore = QuestRivalSets.apply(duel);
+            final Deck converted = duel.getEventDeck();
+            final List<String> outside = outsideSets(converted, new java.util.HashSet<>(codes));
+            restore.run();
+            final boolean back = duel.getEventDeck() == original;
+            final boolean good = untouched && converted != original && converted.getMain().countAll() >= 40
+                    && outside.isEmpty() && back;
+            System.out.printf(Locale.ROOT, "  [%s] %s: sin marca igual %s; con marca %d cartas, fuera de %s: %s; vuelve el original %s%n",
+                    good ? "OK " : "MAL", duel.getTitle(), untouched, converted.getMain().countAll(), codes,
+                    outside.isEmpty() ? "ninguna" : outside, back);
+            ok &= good;
+        } finally {
+            NeoQuest.delete(name);
+        }
+        // Sin expansiones elegidas, viajando: las del mundo.
+        final String travel = "neo-questcheck-rivales-viaje";
+        NeoQuest.delete(travel);
+        try {
+            final List<Deck> starters = NeoQuest.starterDecks(NeoQuest.Modalidad.ESTANDAR);
+            NeoQuest.start(travel, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL,
+                    starters.isEmpty() ? null : starters.get(0));
+            QuestRivalSets.set(travel, true);
+            final boolean noLimit = QuestRivalSets.sets() == null;
+            final forge.gamemodes.quest.QuestWorld bloom = NeoQuestWorlds.byName("Bloomburrow (*)");
+            final boolean went = bloom != null && NeoQuestWorlds.travelTo(bloom);
+            final java.util.Set<String> worldCodes = QuestRivalSets.sets();
+            final List<QuestEventDuel> duels = NeoQuest.duels();
+            boolean good = noLimit && went && worldCodes != null && !duels.isEmpty();
+            String detail = "";
+            if (good) {
+                final QuestEventDuel duel = duels.get(0);
+                final Runnable restore = QuestRivalSets.apply(duel);
+                final List<String> outside = outsideSets(duel.getEventDeck(), worldCodes);
+                restore.run();
+                good = outside.isEmpty();
+                detail = outside.isEmpty() ? "todas de " + worldCodes : "fuera: " + outside;
+            }
+            System.out.printf(Locale.ROOT, "  [%s] sin limite no convierte (%s); en Bloomburrow, de sus expansiones: %s%n",
+                    good ? "OK " : "MAL", noLimit, detail);
+            ok &= good;
+        } finally {
+            NeoQuest.delete(travel);
+        }
+        return ok;
+    }
+
+    /**
+     * TODOS los duelos de la Quest, de todas las dificultades, con un pozo
+     * pequenyo (Alpha a Revised): ninguno puede quedarse sin convertir.
+     * Discord, 03-11-2026: <i>"It worked fine for the first set of opponents
+     * ... but doesn't work beyond that"</i>.
+     */
+    private static boolean checkRivalSetsEveryDuel() {
+        System.out.println("  --- Rivales con Alpha-Revised, todos los duelos ---");
+        final String name = "neo-questcheck-rivales-todos";
+        NeoQuest.delete(name);
+        final java.util.List<String> codes = java.util.List.of("LEA", "LEB", "2ED", "ARN", "ATQ", "3ED");
+        final java.util.Set<String> allowed = new java.util.HashSet<>(codes);
+        int total = 0;
+        int bad = 0;
+        final long t0 = System.nanoTime();
+        try {
+            NeoQuest.start(name, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL, null,
+                    null, forge.neo.ascent.AscentPool.sets(codes));
+            QuestRivalSets.set(name, true);
+            for (final QuestEventDuel duel : FModel.getQuest().getDuelsManager().getAllDuels()) {
+                final Deck original = duel.getEventDeck();
+                if (original == null) {
+                    continue;
+                }
+                total++;
+                final Runnable restore = QuestRivalSets.apply(duel);
+                final Deck played = duel.getEventDeck();
+                final List<String> outside = outsideSets(played, allowed);
+                restore.run();
+                final PaperCard face = DuelFace.of(duel);
+                final boolean faceOk = face == null || inSets(face, allowed);
+                if (played == original || !outside.isEmpty() || !faceOk) {
+                    if (bad++ < 15) {
+                        System.out.printf(Locale.ROOT, "  [MAL] %s (%s): %s%s%n", duel.getTitle(),
+                                duel.getDifficulty(), played == original ? "sin convertir" : "fuera " + outside,
+                                faceOk ? "" : "; cara " + face.getName() + " de " + face.getEdition());
+                    }
+                }
+            }
+        } finally {
+            NeoQuest.delete(name);
+        }
+        final boolean ok = total > 100 && bad == 0;
+        System.out.printf(Locale.ROOT, "  [%s] %d duelos, %d mal (%d s)%n", ok ? "OK " : "MAL", total, bad,
+                (System.nanoTime() - t0) / 1_000_000_000L);
+        return ok;
+    }
+
+    /**
+     * El torneo y el Coliseo sientan comandantes de las expansiones de la
+     * Quest (QuestRivalSets.tableCommanders, Discord 07-11-2026: salian de
+     * expansiones sin desbloquear), y con la marca sus mazos se convierten.
+     */
+    private static boolean checkTableRivalSets() {
+        System.out.println("  --- Torneo y Coliseo con las expansiones de la Quest ---");
+        final String name = "neo-questcheck-mesa";
+        NeoQuest.delete(name);
+        final java.util.List<String> codes = java.util.List.of("DOM");
+        final java.util.Set<String> allowed = new java.util.HashSet<>(codes);
+        boolean ok;
+        try {
+            NeoQuest.start(name, NeoQuest.Modalidad.COMMANDER, NeoQuest.Dificultad.NORMAL, null,
+                    null, forge.neo.ascent.AscentPool.sets(codes));
+            final List<PaperCard> seated = QuestRivalSets.tableCommanders("");
+            final List<String> firstOut = new java.util.ArrayList<>();
+            int inside = 0;
+            for (final PaperCard c : seated) {
+                if (inSets(c, allowed)) {
+                    inside++;
+                } else if (firstOut.size() < 3) {
+                    firstOut.add(c.getName());
+                }
+            }
+            // Los de dentro, todos delante.
+            boolean ordered = true;
+            for (int i = 0; i < Math.min(inside, seated.size()); i++) {
+                ordered &= inSets(seated.get(i), allowed);
+            }
+            QuestRivalSets.set(name, true);
+            final PaperCard first = seated.isEmpty() ? null : seated.get(0);
+            final Deck built = first == null ? null
+                    : NeoCommanderDuels.deckForTable(first, forge.gamemodes.quest.QuestEventDifficulty.EASY);
+            final Deck played = QuestRivalSets.limitDeck(first == null ? "" : first.getName(), built);
+            final List<String> outside = played == null ? List.of("sin mazo") : outsideSets(played, allowed);
+            ok = inside >= 10 && ordered && seated.size() >= 63 && outside.isEmpty();
+            System.out.printf(Locale.ROOT, "  [%s] %d comandantes, %d de %s delante (%s); despues: %s; mazo de %s con la marca, fuera: %s%n",
+                    ok ? "OK " : "MAL", seated.size(), inside, codes, ordered, firstOut,
+                    first == null ? "-" : first.getName(), outside.isEmpty() ? "ninguna" : outside);
+        } finally {
+            NeoQuest.delete(name);
+        }
+        return ok;
+    }
+
+    private static boolean inSets(final PaperCard pc, final java.util.Set<String> codes) {
+        if (pc.getRules().getType().isBasicLand()) {
+            return true;
+        }
+        for (final PaperCard p : FModel.getMagicDb().getCommonCards().getAllCards(pc.getName())) {
+            if (codes.contains(p.getEdition())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Las cartas (no basicas) sin ninguna impresion en esas expansiones. */
+    private static List<String> outsideSets(final Deck deck, final java.util.Set<String> codes) {
+        final List<String> out = new java.util.ArrayList<>();
+        for (final java.util.Map.Entry<PaperCard, Integer> e : deck.getMain()) {
+            if (e.getKey().getRules().getType().isBasicLand()) {
+                continue;
+            }
+            boolean in = false;
+            for (final PaperCard p : FModel.getMagicDb().getCommonCards().getAllCards(e.getKey().getName())) {
+                if (codes.contains(p.getEdition())) {
+                    in = true;
+                    break;
+                }
+            }
+            if (!in) {
+                out.add(e.getKey().getName());
+            }
+        }
+        return out;
+    }
+
+    private static boolean checkDuelAfterTravel() {
+        final String name = "neo-questcheck-viaje";
+        NeoQuest.delete(name);
+        System.out.println("  --- Jugar despues de viajar a otro mundo ---");
+        final List<Deck> starters = NeoQuest.starterDecks(NeoQuest.Modalidad.ESTANDAR);
+        NeoQuest.start(name, NeoQuest.Modalidad.ESTANDAR, NeoQuest.Dificultad.NORMAL,
+                starters.isEmpty() ? null : starters.get(0));
+        boolean ok = true;
+        try {
+            final forge.gamemodes.quest.QuestWorld bloom = NeoQuestWorlds.byName("Bloomburrow (*)");
+            final boolean went = bloom != null && NeoQuestWorlds.travelTo(bloom);
+            System.out.printf(Locale.ROOT, "  Viaje a Bloomburrow: %s (mundo: %s)%n", went ? "si" : "NO",
+                    NeoQuestWorlds.current() == null ? "-" : NeoQuestWorlds.current().getName());
+            ok &= went;
+            ok &= playOneDuel(true);
+            ok &= playOneDuel(false);
+            final int wins = NeoQuest.wins();
+            final int losses = NeoQuest.losses();
+            NeoQuest.load(name);
+            System.out.printf(Locale.ROOT, "  Tras volver a cargar la Quest: %d-%d (en memoria era %d-%d)%n",
+                    NeoQuest.wins(), NeoQuest.losses(), wins, losses);
+            ok &= NeoQuest.wins() == wins && NeoQuest.losses() == losses && wins >= 1 && losses >= 1;
+
+            // Un reparto que REVIENTA no se lleva el resultado, y lo dice.
+            final List<QuestEventDuel> duels = NeoQuest.duels();
+            if (!duels.isEmpty()) {
+                final QuestEventDuel duel = duels.get(0);
+                duel.setEventDeck(NeoQuest.tinyCopyOf(duel.getEventDeck()));
+                final int winsBefore = NeoQuest.wins();
+                System.setProperty("neo.quest.failRewards", "true");
+                final NeoQuestRewards broken;
+                try {
+                    broken = NeoQuestMatch.play(duel, null, true, forge.neo.match.NeoMatchUI.Mode.AUTO_PLAY);
+                } finally {
+                    System.clearProperty("neo.quest.failRewards");
+                }
+                final boolean recorded = NeoQuest.wins() == winsBefore + 1;
+                final boolean told = broken != null && broken.getFailure() != null
+                        && broken.getMessages().stream().anyMatch(m -> m.contains(broken.getFailure()));
+                System.out.printf(Locale.ROOT, "  [%s] con el reparto roto, la victoria se apunta (%d -> %d) y se dice: %s%n",
+                        recorded && told ? "OK " : "MAL", winsBefore, NeoQuest.wins(),
+                        broken == null ? "-" : broken.getFailure());
+                ok &= recorded && told;
+            }
+
+            // Una Quest cuyo FICHERO no se llama como ella por dentro: guardar
+            // iba a otro fichero y la de la lista no avanzaba nunca.
+            NeoQuest.save();
+            final java.io.File dir = new java.io.File(forge.localinstance.properties.ForgeConstants.QUEST_SAVE_DIR);
+            final String other = name + "-otro-fichero";
+            try {
+                java.nio.file.Files.copy(new java.io.File(dir, name + ".dat").toPath(),
+                        new java.io.File(dir, other + ".dat").toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                NeoQuest.load(other);
+                final boolean renamedOk = other.equals(NeoQuest.name());
+                final int w0 = NeoQuest.wins();
+                playOneDuel(true);
+                final int w1 = NeoQuest.wins();
+                NeoQuest.load(other);
+                System.out.printf(Locale.ROOT, "  [%s] con otro nombre de fichero, se guarda en ESE fichero (%d -> %d, al reabrir %d)%n",
+                        renamedOk && w1 == w0 + 1 && NeoQuest.wins() == w1 ? "OK " : "MAL", w0, w1, NeoQuest.wins());
+                ok &= renamedOk && w1 == w0 + 1 && NeoQuest.wins() == w1;
+            } catch (final java.io.IOException e) {
+                System.out.println("  [MAL] no se ha podido copiar la Quest: " + e);
+                ok = false;
+            } finally {
+                NeoQuest.delete(other);
+            }
+        } finally {
+            NeoQuest.delete(name);
+        }
+        System.out.println(ok ? "  OK - tras viajar, ganar y perder se apuntan y se guardan"
+                : "  FALLO - tras viajar no se apunta el resultado");
+        return ok;
+    }
+
+    /**
+     * Juega un duelo de verdad y comprueba que el motor cobra.
+     *
+     * <p>Lo que se verifica no es quien gana — da igual — sino que la partida
+     * termina, que {@code QuestWinLoseController} corre, y que el marcador se
+     * mueve. Si esto funciona, la aventura progresa.
+     */
+    private static boolean playOneDuel(final boolean rigWin) {
+        final List<QuestEventDuel> duels = NeoQuest.duels();
+        if (duels.isEmpty()) {
+            System.out.println("  FALLO: no hay duelo que jugar");
+            return false;
+        }
+        final QuestEventDuel duel = duels.get(0);
+        if (rigWin) {
+            // El piloto automatico no juega nada, asi que pierde siempre y el
+            // camino de VICTORIA — creditos, subir de nivel, el sobre de
+            // premio — se quedaria sin probar. Se le da al rival un mazo de 20
+            // montanyas: se queda sin biblioteca antes que tu y pierde.
+            duel.setEventDeck(NeoQuest.tinyCopyOf(duel.getEventDeck()));
+        }
+        final int winsBefore = NeoQuest.wins();
+        final int lossesBefore = NeoQuest.losses();
+        final long creditsBefore = NeoQuest.credits();
+        // Lo que la casilla del duelo dice que da ganarlo (NeoQuest.duelCredits).
+        final int promised = NeoQuest.duelCredits(duel);
+        final long t0 = System.currentTimeMillis();
+
+        System.out.printf(Locale.ROOT, "  Jugando un duelo contra %s (%s)...%n",
+                duel.getTitle(), rigWin ? "amanyado para ganar" : "a las malas");
+        final NeoQuestRewards rewards = NeoQuestMatch.play(duel, null, true,
+                forge.neo.match.NeoMatchUI.Mode.AUTO_PLAY);
+
+        final int winsAfter = NeoQuest.wins();
+        final int lossesAfter = NeoQuest.losses();
+        System.out.printf(Locale.ROOT,
+                "  Resultado: %d-%d -> %d-%d | creditos %d -> %d | %ds%n",
+                winsBefore, lossesBefore, winsAfter, lossesAfter,
+                creditsBefore, NeoQuest.credits(), (System.currentTimeMillis() - t0) / 1000);
+        for (final String line : rewards == null
+                    ? List.of("(NO SE HA JUGADO: el mazo no vale)") : rewards.getMessages()) {
+            System.out.println("    " + line);
+        }
+        if (rewards != null && !rewards.getCards().isEmpty()) {
+            System.out.printf(Locale.ROOT, "    y %d cartas nuevas%n", rewards.getCards().size());
+        }
+
+        final boolean moved = rigWin ? winsAfter > winsBefore : lossesAfter > lossesBefore;
+        if (!moved) {
+            System.out.println("  FALLO: el marcador no ha registrado el resultado");
+        }
+        // Ganando, el motor paga AL MENOS lo que dice la casilla: lo demas son
+        // extras por como se gana (Discord, 19-10-2026). Si paga menos, la
+        // cuenta de duelCredits ya no es la del motor.
+        if (rigWin && moved) {
+            final long gained = NeoQuest.credits() - creditsBefore;
+            final boolean fair = promised > 0 && gained >= promised;
+            System.out.printf(Locale.ROOT, "  [%s] la casilla decia ~%d cr. y ha pagado %d%n",
+                    fair ? "OK " : "MAL", promised, gained);
+            return fair & checkTrophyAfter(duel, rewards);
+        }
+        return moved;
+    }
+
+    /**
+     * El trofeo de un duelo ganado (NeoQuestTrophy, Discord 21-10-2026): si el
+     * mazo del rival tiene algo que no sea una basica, en el botin hay UNA carta
+     * de ese mazo, aparte del sobre, con su linea; y esta en tu coleccion.
+     */
+    private static boolean checkTrophyAfter(final forge.gamemodes.quest.QuestEventDuel duel,
+            final NeoQuestRewards rewards) {
+        if (!forge.neo.NeoSettings.getBool(NeoQuestTrophy.ENABLED, true)) {
+            System.out.println("  [-- ] trofeo: apagado en Ajustes, no se mira");
+            return true;
+        }
+        final java.util.Set<String> inDeck = new java.util.HashSet<>();
+        for (final forge.deck.DeckSection sec : new forge.deck.DeckSection[] {
+                forge.deck.DeckSection.Commander, forge.deck.DeckSection.Main}) {
+            if (duel.getEventDeck() != null && duel.getEventDeck().has(sec)) {
+                for (final java.util.Map.Entry<PaperCard, Integer> e : duel.getEventDeck().get(sec)) {
+                    if (!e.getKey().getRules().getType().isBasicLand()) {
+                        inDeck.add(e.getKey().getName());
+                    }
+                }
+            }
+        }
+        PaperCard trophy = null;
+        for (final PaperCard c : rewards.getCards()) {
+            if (rewards.isBonus(c) && inDeck.contains(c.getName())) {
+                trophy = c;
+            }
+        }
+        if (inDeck.isEmpty()) {
+            System.out.println("  [OK ] trofeo: el mazo del rival es solo de basicas, no hay");
+            return true;
+        }
+        final String line = trophy == null ? null : forge.neo.NeoText.get("quest.trophy",
+                forge.neo.card.CardText.nameOf(trophy), NeoQuest.titleOf(duel));
+        final boolean ok = trophy != null && rewards.getMessages().contains(line)
+                && NeoQuestCollection.ownedNames().contains(trophy.getName());
+        System.out.printf(Locale.ROOT, "  [%s] trofeo: %s%n", ok ? "OK " : "MAL",
+                trophy == null ? "no ha salido ninguna carta del mazo del rival" : line);
+        return ok;
+    }
+
+    /**
+     * Como se elige el trofeo: nunca una basica, primero lo que no tienes, y
+     * cuanto mas rara menos probable (Ana, 21-10-2026).
+     */
+    private static boolean checkTrophyPick() {
+        System.out.println("  --- El trofeo: que carta del mazo del rival te llevas ---");
+        final forge.card.CardDb db = FModel.getMagicDb().getCommonCards();
+        PaperCard common = null;
+        PaperCard mythic = null;
+        PaperCard owned = null;
+        for (final PaperCard c : db.getUniqueCards()) {
+            if (c.getRules().getType().isBasicLand() || c.getRules().getType().isLand()) {
+                continue;
+            }
+            if (common == null && c.getRarity() == forge.card.CardRarity.Common) {
+                common = c;
+            } else if (mythic == null && c.getRarity() == forge.card.CardRarity.MythicRare) {
+                mythic = c;
+            } else if (owned == null && c.getRarity() == forge.card.CardRarity.Common) {
+                owned = c;
+            }
+            if (common != null && mythic != null && owned != null) {
+                break;
+            }
+        }
+        final PaperCard forest = db.getCard("Forest");
+        final forge.deck.Deck deck = new forge.deck.Deck("trofeo");
+        deck.getMain().add(common, 1);
+        deck.getMain().add(mythic, 1);
+        deck.getMain().add(owned, 1);
+        deck.getMain().add(forest, 30);
+        final java.util.Set<String> mine = java.util.Set.of(owned.getName());
+        final java.util.Random rnd = new java.util.Random(0x7409L);
+        int nCommon = 0;
+        int nMythic = 0;
+        int bad = 0;
+        for (int i = 0; i < 9000; i++) {
+            final PaperCard c = NeoQuestTrophy.pick(deck, mine, rnd);
+            if (c == common) {
+                nCommon++;
+            } else if (c == mythic) {
+                nMythic++;
+            } else {
+                bad++;
+            }
+        }
+        // Comun 8, mitica 1: unas 8000 contra 1000.
+        final boolean weights = bad == 0 && nMythic > 600 && nMythic < 1400 && nCommon > 6 * nMythic;
+        System.out.printf(Locale.ROOT, "  [%s] 9000 sorteos: %d comunes, %d miticas, %d basicas o ya tuyas%n",
+                weights ? "OK " : "MAL", nCommon, nMythic, bad);
+        // Con todo ya tuyo, sale igual (cualquiera menos una basica).
+        final PaperCard any = NeoQuestTrophy.pick(deck,
+                java.util.Set.of(common.getName(), mythic.getName(), owned.getName()), rnd);
+        final boolean fallback = any != null && !any.getRules().getType().isBasicLand();
+        System.out.printf(Locale.ROOT, "  [%s] con todo el mazo ya tuyo sale igual: %s%n",
+                fallback ? "OK " : "MAL", any);
+        // Solo basicas: nada.
+        final forge.deck.Deck basics = new forge.deck.Deck("basicas");
+        basics.getMain().add(forest, 40);
+        final boolean none = NeoQuestTrophy.pick(basics, java.util.Set.of(), rnd) == null;
+        System.out.printf(Locale.ROOT, "  [%s] un mazo de solo basicas no da trofeo%n", none ? "OK " : "MAL");
+        // Quest solo de LEA (Discord, 04-11-2026: un Vulturous Zombie de RAV):
+        // la de RAV no sale nunca, y la Shivan Dragon de M10 sale en su LEA.
+        final java.util.function.Predicate<PaperCard> lea =
+                new forge.game.GameFormat("solo LEA", java.util.List.of("LEA"), null).getFilterPrinted();
+        final forge.deck.Deck mixed = new forge.deck.Deck("mezcla");
+        mixed.getMain().add(db.getCard("Vulturous Zombie", "RAV"), 4);
+        mixed.getMain().add(db.getCard("Shivan Dragon", "M10"), 1);
+        boolean inSets = true;
+        for (int i = 0; i < 200; i++) {
+            final PaperCard c = NeoQuestTrophy.pick(mixed, java.util.Set.of(), rnd, lea);
+            inSets &= c != null && "Shivan Dragon".equals(c.getName()) && "LEA".equals(c.getEdition());
+        }
+        final forge.deck.Deck outside = new forge.deck.Deck("fuera");
+        outside.getMain().add(db.getCard("Vulturous Zombie", "RAV"), 4);
+        inSets &= NeoQuestTrophy.pick(outside, java.util.Set.of(), rnd, lea) == null;
+        System.out.printf(Locale.ROOT, "  [%s] Quest solo de LEA: el trofeo sale de LEA o no sale%n",
+                inSets ? "OK " : "MAL");
+        return weights && fallback && none && inSets;
+    }
+
+    private static boolean checkOne(final NeoQuest.Modalidad modalidad) {
+        final String name = "neo-questcheck-" + modalidad.name().toLowerCase(Locale.ROOT);
+        NeoQuest.delete(name);
+
+        System.out.printf(Locale.ROOT, "  --- Aventura de %s ---%n", modalidad.getLabel());
+
+        // Empezar con un PRECONSTRUIDO: un mazo de verdad, jugable y flojo, que
+        // es lo que se pidio. Sin esto empiezas con cartas sueltas y sin mazo.
+        final List<forge.deck.Deck> starters = NeoQuest.starterDecks(modalidad);
+        System.out.printf(Locale.ROOT, "  Preconstruidos disponibles: %d%n", starters.size());
+        final forge.deck.Deck starter = starters.isEmpty() ? null : starters.get(0);
+        NeoQuest.start(name, modalidad, NeoQuest.Dificultad.NORMAL, starter);
+        if (starter != null) {
+            System.out.printf(Locale.ROOT, "  Empiezas con: %s%n", starter.getName());
+        }
+
+        boolean ok = NeoQuest.isActive() && name.equals(NeoQuest.name());
+        ok &= NeoQuest.modalidad() == modalidad;
+
+        final long credits = NeoQuest.credits();
+        final int collection = NeoQuest.collectionSize();
+        System.out.printf(Locale.ROOT, "  Empiezas con %d creditos y %d cartas | vidas: %d%n",
+                credits, collection, NeoQuest.life());
+        ok &= credits > 0 && collection > 0;
+
+        // En Commander la aventura entera se juega a 40 vidas. Lo pone el motor
+        // a partir de DeckConstructionRules, no nosotros.
+        if (modalidad == NeoQuest.Modalidad.COMMANDER) {
+            ok &= NeoQuest.engine().getDeckConstructionRules()
+                    == forge.gamemodes.quest.data.DeckConstructionRules.Commander;
+        }
+
+        // ---- el mazo con el que empiezas tiene que ser JUGABLE ----
+        final forge.deck.Deck mine = NeoQuest.currentDeck();
+        final String problem = NeoQuest.problemWith(mine);
+        System.out.printf(Locale.ROOT, "  Tu mazo: %s -> %s%n",
+                mine == null ? "(ninguno)" : mine.getName() + " (" + mine.getMain().countAll() + " cartas)",
+                problem == null ? "legal" : problem);
+        ok &= mine != null && problem == null;
+
+        // ---- LO IMPORTANTE: con que rival te encuentras al empezar ----
+        final List<QuestEventDuel> duels = NeoQuest.generateDuels(NeoQuest.engine());
+        System.out.printf(Locale.ROOT, "  Con 0 victorias: rivales %s, %d duelos disponibles%n",
+                NeoQuest.tierLabel(), duels == null ? 0 : duels.size());
+        for (final QuestEventDuel d : duels == null ? List.<QuestEventDuel>of() : duels) {
+            System.out.printf(Locale.ROOT, "    %-28s %s%n", d.getTitle(), d.getDifficulty());
+        }
+        ok &= NeoQuest.tier() == forge.gamemodes.quest.QuestEventDifficulty.EASY;
+        ok &= duels != null && !duels.isEmpty();
+
+        // ---- y que suben cuando ganas ----
+        final int needed = NeoQuest.winsToNextTier();
+        System.out.printf(Locale.ROOT, "  Faltan %d victorias para que suban de nivel%n", needed);
+        ok &= needed > 0;
+
+        for (int i = 0; i < needed; i++) {
+            FModel.getQuest().getAchievements().addWin();
+        }
+        System.out.printf(Locale.ROOT, "  Con %d victorias: rivales %s (nivel %d, %s)%n",
+                NeoQuest.wins(), NeoQuest.tierLabel(), NeoQuest.level(), NeoQuest.rank());
+        ok &= NeoQuest.tier() != forge.gamemodes.quest.QuestEventDifficulty.EASY;
+
+        // ---- EL BUCLE ENTERO: jugar un duelo y cobrar ----
+        //
+        // Es lo unico que de verdad cierra el modo. Se juega en modo automatico
+        // (la interfaz contesta sola) para no depender de una partida a mano.
+        if (!Boolean.getBoolean("neo.questcheck.skipDuel")) {
+            ok &= playOneDuel(false);   // perdiendo
+            ok &= playOneDuel(true);    // y ganando
+        }
+
+        // ---- guardar y volver a cargar: el progreso tiene que sobrevivir ----
+        NeoQuest.save();
+        final int winsBefore = NeoQuest.wins();
+        final long creditsBefore = NeoQuest.credits();
+        final boolean loaded = NeoQuest.load(name);
+        ok &= loaded && NeoQuest.wins() == winsBefore && NeoQuest.credits() == creditsBefore;
+        System.out.printf(Locale.ROOT, "  Guardado y recargado: %d victorias, %d creditos%n",
+                NeoQuest.wins(), NeoQuest.credits());
+
+        // ---- y se puede tirar para empezar otra ----
+        NeoQuest.delete(name);
+        ok &= !NeoQuest.saves().contains(name);
+
+        System.out.println(ok ? "  OK" : "  FALLO");
+        return ok;
+    }
+
+    /** Copias de ESA impresion en todo el mazo. */
+    private static int countExact(final Deck deck, final PaperCard card) {
+        int n = 0;
+        for (final forge.deck.DeckSection sec : new forge.deck.DeckSection[] {
+                forge.deck.DeckSection.Commander, forge.deck.DeckSection.Main, forge.deck.DeckSection.Sideboard}) {
+            if (deck.get(sec) != null) {
+                n += deck.get(sec).count(card);
+            }
+        }
+        return n;
+    }
+}

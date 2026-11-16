@@ -1,0 +1,366 @@
+package forge.neo.ui;
+
+import forge.neo.NeoText;
+import forge.neo.card.ArtDownload;
+import forge.neo.platform.NeoDownloads;
+import javafx.application.Platform;
+import javafx.geometry.Pos;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
+
+/**
+ * <b>Bajar el arte de las cartas para jugar sin internet.</b>
+ *
+ * <p>Lo pidieron dos jugadores el mismo dia (20-09-2026): quieren que las
+ * cartas salgan siempre con foto, tambien sin conexion. En el zip no caben —
+ * son 2 GB y la mayoria son cartas que ese jugador no vera nunca — asi que se
+ * bajan desde aqui, y solo si se piden. Ver {@link ArtDownload}.
+ *
+ * <p>Dos botones y no uno, porque son dos necesidades distintas: <b>todas</b>
+ * es irse al pueblo sin linea (2 GB, una hora), y <b>las de mis mazos</b> es lo
+ * que casi todo el mundo quiere de verdad — que sus partidas salgan con foto —
+ * y son unos cientos de MB y un minuto.
+ *
+ * <p>Tres cosas que la pantalla tiene que decir, y por eso se cuentan ANTES de
+ * empezar: cuantas faltan, cuanto van a ocupar y que <b>se puede parar</b>. Lo
+ * ya bajado se queda: la lista se hace mirando el disco, asi que seguir otro
+ * dia es volver a entrar aqui.
+ *
+ * <p>El descargador es el de Forge y no se toca (limitador de Scryfall,
+ * User-Agent, reintentos); esta pantalla solo le pone cara, a traves de
+ * {@link NeoDownloads#watch}. Los numeros los escribe ella porque el servicio
+ * los da en ingles y con el formato de su dialogo de Swing.
+ */
+public final class ArtDownloadPanel extends VBox {
+
+    private final Label status = new Label();
+    private final javafx.scene.control.ProgressBar bar = new javafx.scene.control.ProgressBar(0);
+    private final Button startButton;
+    private final Button stopButton;
+
+    private NeoDownloads.Control control;
+    private long startedAt;
+    private int total;
+    private final ArtDownload.Scope scope;
+    private final String target;
+    /** Que servicio es el de ahora: los avisos de uno ya cancelado se tiran. */
+    private int generation;
+    /**
+     * Lo que se dijo al acabar la tanda anterior ("Parado", "quedan por
+     * comprobar"), para que siga a la vista encima de lo que falta. null = nada.
+     */
+    private String lead;
+
+    public ArtDownloadPanel(final ArtDownload.Scope scope, final Runnable onBack) {
+        this(scope, null, onBack);
+    }
+
+    /**
+     * @param target con {@link ArtDownload.Scope#SET}, el codigo de la
+     *               expansion; con {@link ArtDownload.Scope#FORMAT}, el nombre
+     *               del formato. Con los demas, nada.
+     */
+    public ArtDownloadPanel(final ArtDownload.Scope scope, final String target, final Runnable onBack) {
+        this.scope = scope;
+        this.target = target;
+        getStyleClass().addAll("dialog", "art-download");
+        setSpacing(12);
+        setAlignment(Pos.CENTER_LEFT);
+
+        final String which = scope == ArtDownload.Scope.TOKENS ? "tokens"
+                : scope == ArtDownload.Scope.ALL ? "all"
+                : scope == ArtDownload.Scope.EVERY_PRINTING ? "every"
+                : scope == ArtDownload.Scope.SET ? "set"
+                : scope == ArtDownload.Scope.FORMAT ? "format" : "decks";
+        final String targetName = targetName(scope, target);
+        final Label title = new Label(NeoText.get("artdl.title." + which, targetName));
+        title.getStyleClass().add("dialog-title");
+
+        final Label note = new Label(NeoText.get("artdl.note." + which, targetName));
+        note.getStyleClass().add("dialog-note");
+        note.setWrapText(true);
+        note.setMaxWidth(UiScale.px(560));
+
+        status.getStyleClass().add("dialog-note");
+        status.setWrapText(true);
+        status.setMaxWidth(UiScale.px(560));
+        status.setText(NeoText.get("artdl.counting"));
+
+        // El mismo estilo que la barra de carga: una ProgressBar de JavaFX sin
+        // vestir sale BLANCA, y encima de la mesa oscura se lleva la vista de
+        // todo lo demas.
+        bar.getStyleClass().add("loading-bar");
+        bar.setMaxWidth(Double.MAX_VALUE);
+        bar.setPrefHeight(UiScale.px(14));
+        // Indeterminada mientras cuenta: recorrer 33.000 cartas mirando el
+        // disco tarda lo suyo, y una barra a cero parece que no hace nada.
+        bar.setProgress(javafx.scene.control.ProgressIndicator.INDETERMINATE_PROGRESS);
+
+        startButton = new Button(NeoText.get("artdl.start"));
+        startButton.getStyleClass().add("primary");
+        startButton.setDisable(true);
+        startButton.setOnAction(e -> start());
+
+        stopButton = new Button(NeoText.get("common.cancel"));
+        stopButton.setVisible(false);
+        stopButton.setManaged(false);
+        stopButton.setOnAction(e -> stop());
+
+        final Button back = new Button(NeoText.get("common.back"));
+        back.setOnAction(e -> {
+            if (onBack != null) {
+                onBack.run();
+            }
+        });
+
+        final Region gap = new Region();
+        HBox.setHgrow(gap, javafx.scene.layout.Priority.ALWAYS);
+        final HBox buttons = new HBox(10, startButton, stopButton, gap, back);
+        buttons.setAlignment(Pos.CENTER_LEFT);
+
+        getChildren().addAll(title, note, bar, status, buttons);
+
+        prepare();
+    }
+
+    /**
+     * Monta el servicio y su mando, sin empezar: cuenta lo que falta en el
+     * disco y avisa con {@code ready}. Se llama al abrir y otra vez al
+     * cancelar, porque un servicio de Forge cancelado no vuelve a arrancar:
+     * sin rehacerlo, "Empezar" se quedaba apagado tras "Cancelar" hasta salir
+     * del panel (Discord, 02-11-2026: <i>"it doesn't let me restart the
+     * download"</i>). Volver a contar es ademas lo que hace seguir donde se
+     * quedo.
+     */
+    private void prepare() {
+        final ArtDownload.Scope scope = this.scope;
+        final String target = this.target;
+        final int gen = ++generation;
+        // La lista se monta en un hilo de fondo (lo hace el propio servicio) y
+        // avisa por ready(). Hasta entonces, "contando".
+        // Todas las impresiones las baja el descargador de Forge tal cual; las
+        // otras dos, el nuestro (una foto por nombre). Ver ArtDownload.
+        final forge.gui.download.GuiDownloadService service;
+        if (scope == ArtDownload.Scope.TOKENS) {
+            // Las fichas, una por nombre (forge.neo.card.TokenArtDownload).
+            service = new forge.neo.card.TokenArtDownload();
+        } else if (scope == ArtDownload.Scope.EVERY_PRINTING) {
+            service = ArtDownload.everyPrinting();
+        } else if (scope == ArtDownload.Scope.SET) {
+            // Las impresiones de esa expansion: el descargador de Forge con un
+            // filtro, como su opcion por expansion.
+            service = ArtDownload.forSet(target);
+        } else {
+            final forge.game.GameFormat format = scope == ArtDownload.Scope.FORMAT
+                    ? forge.model.FModel.getFormats().get(target) : null;
+            final ArtDownload mine = format != null ? ArtDownload.forFormat(format)
+                    : new ArtDownload(scope);
+            // La primera vez de "todas" se baja antes el indice de Scryfall (75
+            // MB, un par de minutos): sin decirlo, parece que "contando" se ha
+            // colgado.
+            mine.setOnIndex(fraction -> onUi(gen, () -> status.setText(NeoText.get("artdl.index",
+                    fraction < 0 ? "" : Math.round(fraction * 100) + " %"))));
+            service = mine;
+        }
+        control = NeoDownloads.watch(service, new NeoDownloads.Watch() {
+            @Override
+            public void ready(final int pending) {
+                onUi(gen, () -> {
+                    total = pending;
+                    bar.setProgress(0);
+                    if (pending == 0) {
+                        status.setText(NeoText.get("artdl.none"));
+                        startButton.setDisable(true);
+                        return;
+                    }
+                    // Si son pocas, cuales: un numero que no baja nunca sin
+                    // decir de que cartas habla no deja hacer nada con el.
+                    final java.util.List<String> names = scope == ArtDownload.Scope.TOKENS
+                            ? java.util.List.of() : ArtDownload.missingNames(10);
+                    status.setText((lead != null ? lead + "\n" : "")
+                            + NeoText.get("artdl.missing", group(pending),
+                            group(ArtDownload.megabytes(pending)))
+                            + (names.isEmpty() ? "" : "\n" + String.join(", ", names)));
+                    startButton.setDisable(false);
+                    cycleTest();
+                });
+            }
+
+            @Override
+            public void progress(final int done, final int max) {
+                onUi(gen, () -> {
+                    total = Math.max(total, max);
+                    bar.setProgress(total == 0 ? 0 : done / (double) total);
+                    status.setText(NeoText.get("artdl.progress", group(done), group(total),
+                            group(ArtDownload.megabytes(done)), remaining(done)));
+                });
+            }
+
+            @Override
+            public void finished(final int skipped) {
+                // Las fichas: "listo" sin mas, falte la que falte (Ana,
+                // 23-10-2026: una ficha que Scryfall no tiene no es algo que
+                // haya que contar).
+                if (scope == ArtDownload.Scope.TOKENS) {
+                    forge.neo.card.TokenArtDownload.afterDownload();
+                    onUi(gen, () -> {
+                        bar.setProgress(1);
+                        status.setText(NeoText.get("artdl.done.tokens"));
+                        startButton.setDisable(true);
+                        stopButton.setVisible(false);
+                        stopButton.setManaged(false);
+                    });
+                    return;
+                }
+                // Lo primero: sin esto, lo recien bajado no se ve hasta
+                // reiniciar. Ver ArtDownload.afterDownload.
+                ArtDownload.afterDownload();
+                // Las que fallaron se comprueban con Scryfall antes de decir
+                // "Listo" (ArtUnavailable.record): decir "apuntadas" antes de
+                // apuntarlas es lo que hizo volver el informe de itch.io.
+                final java.util.concurrent.CompletableFuture<forge.neo.card.ArtUnavailable.Result> noting =
+                        skipped == 0 ? null : forge.neo.card.ArtUnavailable.last();
+                onUi(gen, () -> {
+                    bar.setProgress(1);
+                    // Mientras se comprueban las que fallaron, "Listo" a
+                    // secas: de las que no hay no se habla.
+                    status.setText(NeoText.get("artdl.done"));
+                    startButton.setDisable(true);
+                    stopButton.setVisible(false);
+                    stopButton.setManaged(false);
+                });
+                if (noting != null) {
+                    noting.thenAccept(r -> onUi(gen, () -> {
+                        // Las no disponibles ya estan apuntadas y no
+                        // vuelven a contar: no se habla de ellas (pedido
+                        // el 26-09-2026: "que ponga que lo tienes todo").
+                        // Solo se avisa si quedan por comprobar, porque
+                        // esas SI hay que volver a pedirlas...
+                        if (r.unchecked <= 0) {
+                            status.setText(NeoText.get("artdl.none"));
+                            return;
+                        }
+                        // ...y el aviso dice "pulsa Empezar otra vez":
+                        // tiene que poder pulsarse (Discord, 02-11-2026).
+                        lead = NeoText.get("artdl.doneRetry", group(r.noted), group(r.unchecked));
+                        status.setText(lead);
+                        prepare();
+                    }));
+                }
+            }
+        });
+    }
+
+    /** "Bloomburrow (BLB)" o "Modern", para el titulo. */
+    private static String targetName(final ArtDownload.Scope scope, final String target) {
+        if (target == null) {
+            return "";
+        }
+        if (scope == ArtDownload.Scope.SET) {
+            final forge.card.CardEdition ed = forge.model.FModel.getMagicDb().getEditions().get(target);
+            return ed == null ? target : ed.getName() + " (" + ed.getCode() + ")";
+        }
+        return target;
+    }
+
+    private void start() {
+        lead = null;
+        startedAt = System.currentTimeMillis();
+        startButton.setDisable(true);
+        stopButton.setVisible(true);
+        stopButton.setManaged(true);
+        status.setText(NeoText.get("artdl.progress", "0", group(total), "0",
+                NeoText.get("artdl.eta.unknown")));
+        if (control != null) {
+            control.start();
+        }
+    }
+
+    /**
+     * Parar.
+     *
+     * <p>Se dice aqui y no se espera al servicio: al cancelar, su bucle
+     * simplemente sale y <b>no avisa</b> de que ha terminado. Lo que ya esta
+     * bajado se queda en disco, que es lo que hay que decirle al jugador.
+     */
+    private void stop() {
+        if (control != null) {
+            control.cancel();
+        }
+        // Lo bajado hasta aqui tambien tiene que verse.
+        ArtDownload.afterDownload();
+        stopButton.setVisible(false);
+        stopButton.setManaged(false);
+        status.setText(NeoText.get("artdl.stopped"));
+        // Y otra vez listo para empezar, contando lo que falta ahora.
+        lead = NeoText.get("artdl.stopped");
+        startButton.setDisable(true);
+        bar.setProgress(javafx.scene.control.ProgressIndicator.INDETERMINATE_PROGRESS);
+        prepare();
+    }
+
+    /** Cuanto queda, con el ritmo que lleva. Traducido, que el del motor no lo esta. */
+    private String remaining(final int done) {
+        if (done <= 0 || startedAt == 0 || total <= 0) {
+            return NeoText.get("artdl.eta.unknown");
+        }
+        final long spent = System.currentTimeMillis() - startedAt;
+        final long left = (long) (spent / (double) done * (total - done));
+        final long minutes = Math.max(1, Math.round(left / 60000.0));
+        if (minutes < 60) {
+            return NeoText.get("artdl.eta.min", String.valueOf(minutes));
+        }
+        return NeoText.get("artdl.eta.hour", String.valueOf(minutes / 60),
+                String.valueOf(minutes % 60));
+    }
+
+    /** 35950 -> "35.950", con el separador del idioma. */
+    private static String group(final int n) {
+        return String.format(java.util.Locale.getDefault(), "%,d", n);
+    }
+
+    /**
+     * {@code -Dneo.artdl.cycle=true} (con {@code -Dneo.settings.art}): empieza,
+     * cancela a los 3 s y, cuando vuelve a estar lista, dice si "Empezar" se
+     * puede pulsar. Una vez.
+     */
+    private void cycleTest() {
+        if (!Boolean.getBoolean("neo.artdl.cycle")) {
+            return;
+        }
+        if (cycled) {
+            System.out.println("[artdl] tras cancelar: Empezar "
+                    + (startButton.isDisabled() ? "APAGADO" : "encendido") + " | " + status.getText());
+            return;
+        }
+        cycled = true;
+        System.out.println("[artdl] listo, empiezo: " + status.getText());
+        start();
+        forge.util.ThreadUtil.delay(3000, () -> onUi(() -> {
+            System.out.println("[artdl] cancelo");
+            stop();
+        }));
+    }
+
+    private boolean cycled;
+
+    /** Lo mismo, solo si ese servicio sigue siendo el de ahora. */
+    private void onUi(final int gen, final Runnable task) {
+        onUi(() -> {
+            if (gen == generation) {
+                task.run();
+            }
+        });
+    }
+
+    private static void onUi(final Runnable task) {
+        if (Platform.isFxApplicationThread()) {
+            task.run();
+        } else {
+            Platform.runLater(task);
+        }
+    }
+}

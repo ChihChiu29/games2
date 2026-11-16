@@ -1,0 +1,4682 @@
+/* =====================================================================
+   NeoForge - hoja de estilos
+   Tokens definidos en las notas de diseño seccion 6. Cambiar la estetica aqui,
+   no en el codigo Java.
+   ===================================================================== */
+
+.root {
+    -neo-table:        #12161C;
+    -neo-table-deep:   #0B0E13;
+    -neo-panel:        #1B212A;
+    -neo-panel-hi:     #232B36;
+    -neo-line:         #2C3542;
+    -neo-text:         #E6EBF2;
+    -neo-text-dim:     #8D9AAB;
+    -neo-accent:       #4A9BE0;
+    -neo-actionable:   #66CCFF;   /* lo jugable: es un ajuste, lo pisa UiScale.rootStyle */
+    -neo-valid:        #4FB477;
+    -neo-danger:       #D9534F;
+    -neo-warn:         #E0A63C;
+
+    -fx-font-family: "Segoe UI", "Inter", system-ui, sans-serif;
+    -fx-text-fill: -neo-text;
+}
+
+/* ---------- mesa ---------- */
+
+.table-root {
+    -fx-background-color:
+        radial-gradient(center 50% 42%, radius 78%, -neo-table 0%, -neo-table-deep 100%);
+}
+
+.zone-label {
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-size: 0.846em;
+    -fx-font-weight: 600;
+    -fx-padding: 0 0 6 2;
+}
+
+/* Franja de separacion entre los dos campos de batalla. */
+.combat-line {
+    -fx-stroke: -neo-line;
+    -fx-stroke-dash-array: 6 8;
+    -fx-opacity: 0.7;
+}
+
+/* Separador entre las mesas de dos rivales, cuando se ven todas a la vez.
+   Clase propia y no .combat-line: aquella SIGNIFICA algo en la partida (donde
+   se cruzan los ataques) y esto solo separa a dos jugadores.
+   El color es -neo-text-dim y no -neo-line: el token de separador (#2C3542) se
+   diseno para bordes sobre panel, y sobre el tapete oscuro con su velo no se ve
+   ni a plena opacidad. Sin separador visible, las tres mesas se leen como una
+   sola muy ancha, que es justo lo que hay que evitar. */
+.seat-divider {
+    -fx-stroke: -neo-text-dim;
+    -fx-stroke-dash-array: 3 7;
+    -fx-stroke-width: 2;
+    -fx-opacity: 0.55;
+}
+
+/* ---------- carta ---------- */
+
+.card {
+    -fx-background-color: transparent;
+}
+
+/* Borde sutil: da definicion a la carta contra la mesa oscura. */
+.card-border {
+    -fx-stroke: rgba(0,0,0,0.75);
+    -fx-stroke-width: 1;
+}
+
+.card:selectable .card-border {
+    -fx-stroke: -neo-accent;
+    -fx-stroke-width: 3;
+    -fx-effect: dropshadow(gaussian, -neo-accent, 14, 0.5, 0, 0);
+}
+
+.card:attacking .card-border {
+    -fx-stroke: -neo-danger;
+    -fx-stroke-width: 2.5;
+}
+
+.card:blocking .card-border {
+    -fx-stroke: -neo-accent;
+    -fx-stroke-width: 2.5;
+}
+
+.card:commander .card-border {
+    -fx-stroke: -neo-warn;
+    -fx-stroke-width: 2.5;
+}
+
+/* Enganchado a otra carta: aura, equipo, fortificacion.
+   Asoma por el borde de abajo de su anfitriona y por delante de ella, asi que
+   necesita un borde propio para leerse como una carta aparte y no como un
+   trozo de la de debajo. El borde va DENTRO de la silueta (es el rectangulo de
+   la carta, no un efecto): CardNode recorta con setClip y todo lo que se pinte
+   fuera de esa silueta se pierde. */
+.card:attached .card-border {
+    -fx-stroke: rgba(255,255,255,0.85);
+    -fx-stroke-width: 2.5;
+}
+
+.card:attached:selectable .card-border {
+    -fx-stroke: -neo-accent;
+    -fx-stroke-width: 3;
+}
+
+/* Invocada este turno: se ve apagada, como en Arena. */
+.card:sick {
+    -fx-opacity: 0.72;
+}
+
+/* ---------- respaldo procedural (sin imagen aun) ---------- */
+
+.card-fallback {
+    -fx-background-color: linear-gradient(to bottom, #2A323D 0%, #1A2029 100%);
+    -fx-background-radius: 5;
+    -fx-border-color: #3A4552;
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+}
+
+/* --- la pastilla de una reliquia del rival, en su barra --------------
+ *
+ * El color lo pone PlayerBar en linea, sacado de la misma paleta que la
+ * carta (RelicArt.frameOf): aqui solo va la forma.
+ */
+.relic-chip {
+    -fx-background-color: rgba(0, 0, 0, 0.35);
+    -fx-background-radius: 5;
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+    -fx-padding: 3 8 3 6;
+}
+
+.relic-chip:hover {
+    -fx-background-color: rgba(0, 0, 0, 0.55);
+}
+
+.relic-chip-name {
+    -fx-font-size: 11px;
+    -fx-font-weight: bold;
+}
+
+/* --- la cara de una reliquia de Ascenso (RelicArt) ---------------------
+ *
+ * Solo lo que NO cambia con la rareza. Los colores los pone RelicArt en
+ * linea, y a proposito: el mismo tono tine el marco (aqui) y el emblema
+ * (figuras de JavaFX, que no leen esta hoja). Ver su javadoc.
+ */
+.relic-face {
+    -fx-background-radius: 5;
+}
+
+.relic-name {
+    -fx-font-weight: bold;
+}
+
+.relic-type {
+    -fx-font-weight: bold;
+}
+
+.relic-text {
+    -fx-font-style: italic;
+}
+
+/* La carta sin imagen, del color de la carta (CardNode.colourClass; Discord,
+ * 07-11-2026). Oscuros a proposito: el texto encima es el claro de siempre. */
+.card-fallback.card-fb-w { -fx-background-color: linear-gradient(to bottom, #6F6852 0%, #35322A 100%); -fx-border-color: #A89E7E; }
+.card-fallback.card-fb-u { -fx-background-color: linear-gradient(to bottom, #2B5682 0%, #172A40 100%); -fx-border-color: #4A86C0; }
+.card-fallback.card-fb-b { -fx-background-color: linear-gradient(to bottom, #4A3E52 0%, #1C1820 100%); -fx-border-color: #7A6A86; }
+.card-fallback.card-fb-r { -fx-background-color: linear-gradient(to bottom, #86392C 0%, #3E1C17 100%); -fx-border-color: #C25A45; }
+.card-fallback.card-fb-g { -fx-background-color: linear-gradient(to bottom, #2E6A44 0%, #163222 100%); -fx-border-color: #4FA06A; }
+.card-fallback.card-fb-m { -fx-background-color: linear-gradient(to bottom, #86702E 0%, #3E3417 100%); -fx-border-color: #C9A84A; }
+.card-fallback.card-fb-c { -fx-background-color: linear-gradient(to bottom, #56606C 0%, #262C34 100%); -fx-border-color: #7C8896; }
+/* Las legendarias sin imagen: marco dorado doble con brillo (Discord, 07-11-2026). */
+.card-fallback.card-fb-legend {
+    -fx-border-color: #F2D27A, #8A6A1E;
+    -fx-border-width: 2, 1;
+    -fx-border-insets: 0, 3;
+    -fx-border-radius: 5, 3;
+    -fx-effect: innershadow(gaussian, rgba(242, 210, 122, 0.55), 10, 0.2, 0, 0);
+}
+
+.card-fb-name {
+    -fx-text-fill: -neo-text;
+    -fx-font-weight: bold;
+}
+
+.card-fb-cost {
+    -fx-text-fill: -neo-accent;
+}
+
+.card-fb-type {
+    -fx-text-fill: -neo-text-dim;
+}
+
+.card-fb-pt {
+    -fx-text-fill: -neo-text;
+    -fx-font-weight: bold;
+}
+
+/* ---------- insignias sobre la carta ---------- */
+
+/* Fuerza / resistencia: el numero que mas se mira de toda la mesa.
+   Va en la esquina donde esta impreso, mas grande que cualquier otra
+   pastilla, y cambia de color cuando NO coincide con la carta impresa. */
+.card-pt-row {
+    -fx-translate-x: -4;
+    -fx-translate-y: -4;
+}
+
+/* La pastilla de F/R de fabrica. La caja como la de las cartas de Magic la
+   dibuja forge.neo.card.PtBox, si se activa en Ajustes
+   (PtBoxStyle.CARD_STYLE; Discord, 07-11-2026). */
+.card-pt {
+    -fx-background-color: rgba(8,11,16,0.95);
+    -fx-text-fill: -neo-text;
+    -fx-font-weight: bold;
+    -fx-padding: 1 7 1 7;
+    -fx-background-radius: 5;
+    -fx-border-color: rgba(255,255,255,0.28);
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+}
+
+/* Mejorada: contadores, aura, equipo, un pump hasta el final del turno. */
+.card-pt:buffed {
+    -fx-text-fill: #7CE29A;
+    -fx-border-color: -neo-valid;
+    -fx-border-width: 2;
+}
+
+/* Empeorada. */
+.card-pt:weakened {
+    -fx-text-fill: #FF9A96;
+    -fx-border-color: -neo-danger;
+    -fx-border-width: 2;
+}
+
+/* El danyo marcado ya la mata: sin restas de cabeza. */
+.card-pt:lethal {
+    -fx-background-color: -neo-danger;
+    -fx-text-fill: white;
+    -fx-border-color: white;
+    -fx-border-width: 2;
+}
+
+/* Contadores: pastilla numerica sobre la esquina de la carta, nunca texto
+   diminuto. El COLOR de fondo lo pone el motor (CounterType.getRed/Green/Blue)
+   y se aplica en linea desde CardNode: no hay una lista fija de contadores. */
+.card-counters {
+    -fx-padding: 3 0 0 3;
+}
+
+.card-counter {
+    -fx-font-weight: bold;
+    -fx-padding: 0 4 0 4;
+    -fx-background-radius: 4;
+    -fx-border-radius: 4;
+    -fx-border-width: 1;
+    -fx-border-color: rgba(0,0,0,0.55);
+}
+
+.card-counter-loyalty {
+    -fx-padding: 0 6 0 6;
+    -fx-border-width: 2;
+    -fx-border-color: rgba(0,0,0,0.7);
+}
+
+/* El rating del draft, abajo a la izquierda: la unica esquina libre. Tres
+   tonos (bueno / normal / flojo) para leerlo sin comparar numeros. */
+.card-draft-rank {
+    -fx-background-color: rgba(8,11,16,0.95);
+    -fx-text-fill: -neo-text;
+    -fx-font-weight: bold;
+    -fx-padding: 1 6 1 6;
+    -fx-background-radius: 5;
+    -fx-border-color: rgba(255,255,255,0.28);
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+    -fx-translate-x: 4;
+    -fx-translate-y: -4;
+}
+
+.card-draft-rank:rank-good {
+    -fx-text-fill: #0B0E13;
+    -fx-background-color: -neo-valid;
+    -fx-border-color: rgba(0,0,0,0.35);
+}
+
+.card-draft-rank:rank-poor {
+    -fx-text-fill: -neo-text-dim;
+    -fx-border-color: rgba(255,255,255,0.12);
+}
+
+/* ---------- aventura (quest) ---------- */
+
+/* Los numeros que dicen como vas. Grandes, porque son la respuesta a la
+   primera pregunta que se hace uno al volver de un duelo. */
+.stat-tile {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 8;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 8;
+    -fx-border-width: 1;
+}
+
+.stat-value {
+    -fx-font-size: 1.9em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+.stat-credits {
+    -fx-text-fill: -neo-warn;
+}
+
+/* El nivel de los rivales: por color, no solo por texto. */
+.tier-label {
+    -fx-font-size: 1.15em;
+    -fx-font-weight: bold;
+}
+
+.tier-label.tier-easy    { -fx-text-fill: -neo-valid; }
+.tier-label.tier-medium  { -fx-text-fill: -neo-warn; }
+.tier-label.tier-hard    { -fx-text-fill: -neo-danger; }
+.tier-label.tier-expert  { -fx-text-fill: #C08BFF; }
+
+.tier-bar {
+    -fx-pref-height: 8;
+}
+
+.tier-bar > .track {
+    -fx-background-color: rgba(255,255,255,0.10);
+    -fx-background-radius: 4;
+}
+
+.tier-bar > .bar {
+    -fx-background-insets: 0;
+    -fx-background-radius: 4;
+}
+
+.tier-bar.tier-easy   > .bar { -fx-background-color: -neo-valid; }
+.tier-bar.tier-medium > .bar { -fx-background-color: -neo-warn; }
+.tier-bar.tier-hard   > .bar { -fx-background-color: -neo-danger; }
+.tier-bar.tier-expert > .bar { -fx-background-color: #C08BFF; }
+
+.quest-deck-name {
+    -fx-font-size: 1.25em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+.quest-ok {
+    -fx-text-fill: -neo-valid;
+}
+
+/* Un mazo ilegal no es un detalle: es que no puedes jugar. */
+/* El cuadro del torneo de draft de la Quest (QuestTournamentScreen). */
+.tour-seat { -fx-text-fill: -neo-text; -fx-font-size: 1.05em; }
+.tour-seat-won { -fx-text-fill: -neo-valid; -fx-font-weight: bold; }
+.tour-seat-lost { -fx-text-fill: -neo-text-dim; }
+.tour-seat-me { -fx-font-weight: bold; -fx-underline: true; }
+
+.quest-problem {
+    -fx-text-fill: -neo-danger;
+    -fx-font-weight: bold;
+}
+
+/* Cada duelo, con el borde del color de su dificultad. */
+.duel-tile {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 8;
+    -fx-border-radius: 8;
+    -fx-border-width: 2;
+    -fx-border-color: -neo-line;
+}
+
+.duel-tile.tier-easy   { -fx-border-color: rgba(79,180,119,0.55); }
+.duel-tile.tier-medium { -fx-border-color: rgba(224,166,60,0.55); }
+.duel-tile.tier-hard   { -fx-border-color: rgba(217,83,79,0.55); }
+.duel-tile.tier-expert { -fx-border-color: rgba(192,139,255,0.55); }
+
+.duel-tile:hover {
+    -fx-background-color: -neo-panel-hi;
+}
+
+.duel-badge {
+    -fx-font-size: 0.78em;
+    -fx-font-weight: bold;
+    -fx-padding: 2 10 2 10;
+    -fx-background-radius: 10;
+    -fx-text-fill: #0B0E13;
+}
+
+.duel-badge.tier-easy   { -fx-background-color: -neo-valid; }
+.duel-badge.tier-medium { -fx-background-color: -neo-warn; }
+.duel-badge.tier-hard   { -fx-background-color: -neo-danger; -fx-text-fill: white; }
+.duel-badge.tier-expert { -fx-background-color: #C08BFF; }
+
+.duel-unknown {
+    -fx-font-size: 3.2em;
+    -fx-font-weight: bold;
+    -fx-text-fill: rgba(255,255,255,0.22);
+    -fx-background-color: rgba(255,255,255,0.04);
+    -fx-background-radius: 6;
+}
+
+.duel-name {
+    -fx-font-size: 1.02em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+/* Lo elegido se ve elegido: borde de acento, no un tono mas claro. */
+.mode-tile:picked,
+.deck-tile:picked {
+    -fx-border-color: -neo-accent;
+    -fx-border-width: 2;
+}
+
+/* ---------- tienda de sobres ---------- */
+
+.set-tile {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 6;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 6;
+    -fx-border-width: 1;
+}
+
+.set-tile:hover {
+    -fx-background-color: -neo-panel-hi;
+}
+
+/* Cada cuanto sale la carta buscada en ese sobre (09-10-2026): la razon por la
+   que la casilla esta en la lista, en el acento. */
+.set-odds {
+    -fx-font-size: 0.95em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-accent;
+}
+.set-odds-cost { -fx-font-size: 0.85em; -fx-text-fill: -neo-text-dim; }
+
+/* "En que sobre sale": la carta buscada y donde sale, encima de la rejilla. */
+.find-banner { -fx-border-color: -neo-accent; }
+.find-line { -fx-text-fill: -neo-text-dim; -fx-font-size: 1.05em; }
+.find-single { -fx-text-fill: -neo-valid; -fx-font-weight: bold; }
+.find-suggestion { -fx-font-size: 1.05em; -fx-padding: 3 8 3 8; }
+/* Las sugerencias son una ventana aparte: colores escritos, sin variables. */
+.find-popup { -fx-background-color: #232B36; -fx-border-color: #4A9BE0; -fx-border-radius: 6; -fx-background-radius: 6; -fx-padding: 4; }
+.find-popup .menu-item { -fx-background-color: transparent; -fx-padding: 2 4 2 4; }
+.find-popup .menu-item:focused, .find-popup .menu-item:hover { -fx-background-color: #4A9BE0; -fx-background-radius: 4; }
+.find-popup .find-suggestion { -fx-text-fill: #E6EBF2; }
+.find-popup .menu-item:focused .find-suggestion, .find-popup .menu-item:hover .find-suggestion { -fx-text-fill: #0B0E13; }
+
+/* Que puede salir en un sobre: lo de dentro, con el aspecto de abrirlo
+   (.pack-opening). Las rarezas con un rotulo dorado y su linea, y cada carta
+   con cada cuanto sale y si ya la tienes. */
+.pack-preview .preview-group {
+    -fx-padding: 14 2 4 2;
+    -fx-border-color: transparent transparent #a0804880 transparent;
+    -fx-border-width: 0 0 1 0;
+}
+.pack-preview .preview-group-name { -fx-font-size: 1.2em; -fx-font-weight: bold; -fx-text-fill: #f4d596; }
+.pack-preview .preview-group-odds { -fx-font-size: 1.05em; -fx-text-fill: #c6c5bc; }
+.pack-preview .preview-odds { -fx-font-size: 0.95em; -fx-text-fill: #c6c5bc; }
+.pack-preview .preview-owned { -fx-font-size: 0.95em; -fx-font-weight: bold; -fx-text-fill: -neo-valid; }
+.pack-preview .segment:selected { -fx-background-color: #d4aa5e; -fx-border-color: #d4aa5e; }
+.pack-preview .dialog-scroll, .pack-preview .dialog-scroll > .viewport { -fx-background-color: transparent; }
+
+.set-tile:picked {
+    -fx-border-color: -neo-accent;
+    -fx-border-width: 2;
+}
+
+.set-code {
+    -fx-font-size: 0.78em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-accent;
+}
+
+.set-name {
+    -fx-font-size: 0.95em;
+    -fx-text-fill: -neo-text;
+}
+
+/* La linea suelta de una casilla: las hojas de arte de un sobre de colector,
+   el tipo de una caja. Informa, pero no compite con el nombre. */
+.set-note {
+    -fx-font-size: 0.78em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+/* Verde lo que puedes pagar, apagado lo que no. Se lee sin contar. */
+/* "Nueva" en las sueltas de la tienda de la Quest: no tienes ninguna con ese nombre. */
+/* Lo que aun no tienes en un mazo de la Quest (lista de deseos, 15-10-2026).
+   Con DOS clases: ".deck-builder .catalogue-count", mas abajo, gana a una sola.
+   HUECA: la normal ya es dorada (#d4a466) y un ambar macizo no se distinguia. */
+.catalogue-count.catalogue-count-missing,
+.deck-builder .catalogue-count.catalogue-count-missing {
+    -fx-text-fill: #E0A63C;
+    -fx-background-color: #12161C;
+    -fx-border-color: #E0A63C;
+    -fx-border-width: 2;
+    -fx-border-radius: 12;
+    -fx-background-radius: 12;
+}
+.deck-row-missing {
+    -fx-font-size: 0.78em;
+    -fx-font-weight: bold;
+    -fx-text-fill: #12161C;
+    -fx-background-color: #E0A63C;
+    -fx-background-radius: 999;
+    -fx-padding: 0.05em 0.55em 0.1em 0.55em;
+}
+
+/* Las copias de mas de una suelta de la tienda: "x5" abajo a la derecha (Discord, 15-10-2026). */
+.shop-count {
+    -fx-font-size: 0.95em;
+    -fx-font-weight: bold;
+    -fx-text-fill: #E6EBF2;
+    -fx-background-color: rgba(18, 22, 28, 0.88);
+    -fx-border-color: -neo-accent;
+    -fx-border-width: 1;
+    -fx-border-radius: 999;
+    -fx-background-radius: 999;
+    -fx-padding: 0.05em 0.6em 0.1em 0.6em;
+}
+
+/* Cuantas tienes ya de una suelta de la tienda: abajo a la izquierda, en verde
+   (Discord, 15-10-2026). Fondo oscuro para leerse encima de cualquier arte. */
+.shop-wanted {
+    -fx-background-color: rgba(18, 22, 28, 0.88);
+    -fx-border-color: #E0A63C;
+    -fx-border-width: 1.5;
+    -fx-border-radius: 6;
+    -fx-background-radius: 6;
+    -fx-text-fill: #E0A63C;
+    -fx-font-weight: bold;
+    -fx-padding: 1 6 1 6;
+}
+
+/* El boton de la tienda en el cuartel cuando hay cartas que te faltan. */
+.button.quest-shop-wanted {
+    -fx-border-color: #E0A63C;
+    -fx-text-fill: #E0A63C;
+}
+
+.shop-owned {
+    -fx-font-size: 0.72em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-valid;
+    -fx-background-color: rgba(18, 22, 28, 0.88);
+    -fx-border-color: -neo-valid;
+    -fx-border-width: 1;
+    -fx-border-radius: 999;
+    -fx-background-radius: 999;
+    -fx-padding: 0.05em 0.55em 0.1em 0.55em;
+}
+
+.shop-new {
+    -fx-font-size: 0.72em;
+    -fx-font-weight: bold;
+    -fx-text-fill: #12161C;
+    -fx-background-color: -neo-accent;
+    -fx-background-radius: 999;
+    -fx-padding: 0 0.55em 0.05em 0.55em;
+}
+
+.set-price-ok {
+    -fx-font-size: 0.8em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-valid;
+}
+
+.set-price-no {
+    -fx-font-size: 0.8em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+/* "Comprado x2" en una casilla de la tienda de la Quest (QuestPurchases). */
+.set-bought {
+    -fx-font-size: 0.75em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-accent;
+    -fx-border-color: -neo-accent;
+    -fx-border-radius: 999;
+    -fx-background-radius: 999;
+    -fx-padding: 0 0.55em 0.05em 0.55em;
+}
+
+.shop-filter {
+    -fx-text-fill: -neo-text;
+}
+
+.shop-filter .box {
+    -fx-background-color: -neo-panel;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 3;
+}
+
+.shop-price {
+    -fx-font-size: 1.05em;
+    -fx-text-fill: -neo-warn;
+    -fx-font-weight: bold;
+}
+
+/* Lo primero que se mira al abrir un sobre es que NO tenias. */
+.new-badge {
+    -fx-font-size: 0.72em;
+    -fx-font-weight: bold;
+    -fx-text-fill: #0B0E13;
+    -fx-background-color: -neo-valid;
+    -fx-background-radius: 8;
+    -fx-padding: 1 8 1 8;
+}
+
+/* Lo que da el motor APARTE del sobre en el botin de la Quest (la rara al
+   azar...): ambar, para que no se lea como una carta mas del sobre. */
+.bonus-badge {
+    -fx-font-size: 0.72em;
+    -fx-font-weight: bold;
+    -fx-text-fill: #0B0E13;
+    -fx-background-color: -neo-warn;
+    -fx-background-radius: 8;
+    -fx-padding: 1 8 1 8;
+}
+
+/* ---------- draft ---------- */
+
+/* El marcador del evento: un punto por rival, dos huecos de derrota.
+   Se lee de un vistazo y no hace falta traducir un "2/7". */
+.draft-pip {
+    -fx-stroke: rgba(255,255,255,0.30);
+    -fx-stroke-width: 1;
+}
+
+.pip-win {
+    -fx-fill: -neo-valid;
+}
+
+.pip-loss {
+    -fx-fill: -neo-danger;
+}
+
+.pip-empty {
+    -fx-fill: rgba(255,255,255,0.10);
+}
+
+.home-title.draft-won {
+    -fx-text-fill: -neo-valid;
+}
+
+.home-title.draft-lost {
+    -fx-text-fill: -neo-danger;
+}
+
+/* ---------- cuadro del torneo (la auditoría del motor, apartado C6) ---------- */
+
+.bracket-round-label {
+    -fx-font-size: 0.8em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.bracket-match {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 8;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 8;
+    -fx-border-width: 1.5;
+}
+
+/* Tu propia partida, mientras no se sabe el resultado: se distingue del
+   resto del cuadro (ya resuelto) con el acento, no con un tono cualquiera. */
+.bracket-match.bracket-yours {
+    -fx-border-color: -neo-accent;
+    -fx-border-width: 2;
+}
+
+.bracket-name {
+    -fx-font-size: 0.9em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.bracket-name.bracket-winner {
+    -fx-text-fill: -neo-valid;
+    -fx-font-weight: bold;
+}
+
+.bracket-name.bracket-you {
+    -fx-text-fill: -neo-accent;
+}
+
+/* Cuando ganas TU: las dos reglas de arriba empatan en especificidad (dos
+   clases cada una), y JavaFX no garantiza cual gana por orden del fichero
+   (ver las trampas conocidas) -- en la practica salia "tu" (azul) tapando "ganador"
+   (verde), justo la mitad equivocada: ganar es la senyal mas importante,
+   seas tu o no. Una regla de las TRES clases juntas desempata sola. */
+.bracket-name.bracket-you.bracket-winner {
+    -fx-text-fill: -neo-valid;
+    -fx-font-weight: bold;
+}
+
+.bracket-champion {
+    -fx-text-fill: -neo-valid;
+    -fx-font-weight: bold;
+    -fx-font-size: 1.1em;
+}
+
+.detail-counters {
+    -fx-text-fill: -neo-warn;
+    -fx-font-weight: bold;
+}
+
+/* "Le afecta": lo que otras cartas le hacen (Collector Ouphe, Arrest, provocar). */
+.detail-affected {
+    -fx-text-fill: -neo-warn;
+    -fx-background-color: rgba(224, 166, 60, 0.12);
+    -fx-background-radius: 5;
+    -fx-padding: 5 7 5 7;
+}
+
+.affected-line {
+    -fx-text-fill: -neo-warn;
+}
+
+.card-damage {
+    -fx-background-color: -neo-danger;
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-padding: 1 5 1 5;
+    -fx-background-radius: 5;
+}
+
+/* ---------- panel de detalle ---------- */
+
+.detail-panel {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 8;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 8;
+    -fx-border-width: 1;
+    -fx-padding: 14;
+}
+
+.detail-name {
+    -fx-font-size: 1.231em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+.detail-type {
+    -fx-font-size: 0.923em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.detail-text {
+    -fx-font-size: 0.923em;
+    -fx-text-fill: -neo-text;
+}
+
+/* ---------- barra de estado / cabecera ---------- */
+
+.hud {
+    -fx-background-color: rgba(11,14,19,0.72);
+    -fx-background-radius: 10;
+    -fx-padding: 10 16 10 16;
+}
+
+.hud-title {
+    -fx-font-size: 1.0em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+.hud-sub {
+    -fx-font-size: 0.846em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.life {
+    -fx-font-size: 2.0em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+/* Verde si sube, rojo si baja. Vuelve solo al color normal en ~1 s. */
+.life.life-up {
+    -fx-text-fill: -neo-valid;
+}
+
+.life.life-down {
+    -fx-text-fill: -neo-danger;
+}
+
+/* =====================================================================
+   Mesa de juego
+   ===================================================================== */
+
+.caption {
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-size: 0.731em;
+    -fx-font-weight: bold;
+}
+
+/* ---------- barra de jugador ---------- */
+
+.player-bar {
+    -fx-background-color: rgba(11,14,19,0.55);
+    -fx-border-color: transparent transparent -neo-line transparent;
+    -fx-border-width: 0 0 1 0;
+}
+
+.player-bar-self {
+    -fx-border-color: -neo-line transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+}
+
+/* El jugador al que le toca se marca con una linea de acento. */
+.player-bar:active {
+    -fx-background-color: linear-gradient(to right, rgba(74,155,224,0.16) 0%, rgba(11,14,19,0.55) 45%);
+}
+
+/* Y SI ERES TU, mucho mas. Es la pregunta que mas se hace en la mesa y la que
+   peor se contestaba: un renglon en la esquina, en ingles. Tu barra se enciende
+   entera mientras te toca. Encadenadas (.player-bar-self:active) para que gane
+   sin depender del orden del fichero. */
+.player-bar-self:active {
+    -fx-background-color: linear-gradient(to right, rgba(74,155,224,0.30) 0%, rgba(74,155,224,0.10) 60%, rgba(11,14,19,0.55) 100%);
+    -fx-border-color: -neo-accent transparent transparent transparent;
+    -fx-border-width: 2 0 0 0;
+}
+
+/* Una pila con cartas dentro se ilumina al pasar por encima: es la senyal de
+   que se puede abrir. La vacia no responde y no se marca. */
+.zone-pile:clickable:hover .zone-pile-face {
+    -fx-stroke: -neo-accent;
+    -fx-stroke-width: 2;
+    -fx-effect: dropshadow(gaussian, rgba(74,155,224,0.55), 14, 0.4, 0, 0);
+}
+
+/* ---------- la moneda (CoinFlip) ----------
+   Cara en oro y cruz en plata: el resultado se ve sin leer la palabra. */
+
+.coin {
+    -fx-background-color: radial-gradient(center 38% 32%, radius 75%, #C9D2DD 0%, #8D9AAB 70%, #5E6B7C 100%);
+    -fx-background-radius: 999;
+    -fx-border-color: #DDE4EC;
+    -fx-border-radius: 999;
+    -fx-border-width: 3;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.7), 24, 0.3, 0, 8);
+}
+
+.coin:heads {
+    -fx-background-color: radial-gradient(center 38% 32%, radius 75%, #FFE3A3 0%, #E0A63C 65%, #9A6B1C 100%);
+    -fx-border-color: #FFE9B8;
+}
+
+.coin-face {
+    -fx-font-size: 0.85em;
+    -fx-font-weight: bold;
+    -fx-text-fill: rgba(30,24,12,0.8);
+}
+
+.coin-caption {
+    -fx-background-color: rgba(15,20,28,0.92);
+    -fx-background-radius: 8;
+    -fx-padding: 8 18 8 18;
+    -fx-font-size: 1.2em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+    -fx-text-alignment: center;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.65), 20, 0.3, 0, 4);
+}
+
+/* ---------- los dados (DiceRoll) ----------
+   Hueso claro con el numero oscuro; el maximo en oro y el 1 en rojo. */
+
+.die {
+    -fx-background-color: linear-gradient(to bottom right, #F4EFE4 0%, #D8D0BF 100%);
+    -fx-background-radius: 14;
+    -fx-border-color: #FFFFFF;
+    -fx-border-radius: 14;
+    -fx-border-width: 2;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.7), 24, 0.3, 0, 8);
+}
+
+.die:max {
+    -fx-background-color: linear-gradient(to bottom right, #FFE3A3 0%, #E0A63C 100%);
+    -fx-border-color: #FFE9B8;
+}
+
+.die:min {
+    -fx-background-color: linear-gradient(to bottom right, #F2B4B1 0%, #D9534F 100%);
+    -fx-border-color: #F8D2D0;
+}
+
+.die-face {
+    -fx-font-weight: bold;
+    -fx-text-fill: #1B212A;
+}
+
+.die-kind {
+    -fx-font-size: 0.7em;
+    -fx-font-weight: bold;
+    -fx-text-fill: rgba(27,33,42,0.55);
+}
+
+/* ---------- el cartel de "te toca" ---------- */
+
+.turn-banner {
+    -fx-background-color: rgba(15,20,28,0.92);
+    -fx-background-radius: 8;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 8;
+    -fx-border-width: 1;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.65), 26, 0.3, 0, 6);
+}
+
+.turn-banner-title {
+    -fx-font-size: 1.5em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.turn-banner-detail {
+    -fx-font-size: 0.8em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+/* El tuyo NO se parece al del rival: si fueran iguales habria que leerlos, que
+   es justo lo que se venia a evitar. */
+.turn-banner:yours {
+    -fx-background-color: rgba(20,42,64,0.95);
+    -fx-border-color: -neo-accent;
+    -fx-border-width: 2;
+    -fx-effect: dropshadow(gaussian, rgba(74,155,224,0.55), 34, 0.35, 0, 6);
+}
+
+.turn-banner:yours .turn-banner-title {
+    -fx-font-size: 1.9em;
+    -fx-text-fill: -neo-accent;
+}
+
+/* La cabecera del rail dice de quien es el turno, y se queda (el cartel dura un
+   segundo; esto no). */
+.caption:yours {
+    -fx-text-fill: -neo-accent;
+    -fx-font-weight: bold;
+}
+
+.avatar {
+    -fx-fill: #2A323D;
+    -fx-stroke: -neo-line;
+    -fx-stroke-width: 2;
+}
+
+/* Barra compacta (ajuste): menos alto, los mismos datos. */
+.player-bar:slim .life {
+    -fx-font-size: 1.4em;
+}
+
+.player-bar:slim .player-name {
+    -fx-font-size: 0.95em;
+}
+
+.player-bar:slim .zone-count {
+    -fx-font-size: 0.95em;
+}
+
+.player-bar:slim .caption {
+    -fx-font-size: 0.62em;
+}
+
+.player-name {
+    -fx-font-size: 1.077em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+/* El comandante, junto al nombre del jugador: dato secundario (PlayerBar.commanderName). */
+.bar-commander-name {
+    -fx-font-size: 0.85em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.turn-mark {
+    -fx-font-size: 0.692em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-table-deep;
+    -fx-background-color: -neo-accent;
+    -fx-background-radius: 3;
+    -fx-padding: 1 6 1 6;
+}
+
+.zone-count {
+    -fx-font-size: 1.154em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+/* ---------- pips de mana ---------- */
+
+.mana-pip {
+    -fx-min-width: 20px;
+    -fx-min-height: 20px;
+    -fx-max-width: 20px;
+    -fx-max-height: 20px;
+    -fx-background-radius: 10px;
+    -fx-font-size: 0.846em;
+    -fx-font-weight: bold;
+    -fx-text-fill: #10141A;
+    -fx-border-radius: 10px;
+    -fx-border-width: 1;
+    -fx-border-color: rgba(0,0,0,0.5);
+}
+
+.mana-w { -fx-background-color: #F5F0DC; }
+.mana-u { -fx-background-color: #7FB4DC; }
+.mana-b { -fx-background-color: #A79EA0; }
+.mana-r { -fx-background-color: #E28B75; }
+.mana-g { -fx-background-color: #7FBE94; }
+.mana-c { -fx-background-color: #BDC5CC; }
+
+/* El negro, OSCURO de verdad. Con el gris de arriba (#A79EA0) el pip negro y
+   el incoloro (#BDC5CC) eran casi el mismo circulo, y cuatro de negro se leian
+   como cuatro incoloros (reportado en Discord el 23-09-2026). Borde claro para
+   que no se pierda contra la barra, y el numero en blanco. Solo en el pip: el
+   filtro de color del constructor tambien usa .mana-b y alli se lee bien. */
+.mana-pip.mana-b {
+    -fx-background-color: #231E26;
+    -fx-border-color: #A79EA0;
+    -fx-text-fill: #E6EBF2;
+}
+
+/* ---------- rail de fases ---------- */
+
+.phase-rail {
+    -fx-background-color: rgba(11,14,19,0.55);
+    -fx-background-radius: 8;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 8;
+    -fx-border-width: 1;
+}
+
+.phase-stop {
+    -fx-font-size: 0.885em;
+    -fx-text-fill: -neo-text-dim;
+    -fx-padding: 3 8 3 10;
+    -fx-background-radius: 4;
+}
+
+.phase-stop:current {
+    -fx-text-fill: -neo-table-deep;
+    -fx-background-color: -neo-accent;
+    -fx-font-weight: bold;
+}
+
+/* ---------- stack ---------- */
+
+.stack-box {
+    -fx-background-color: rgba(11,14,19,0.55);
+    -fx-background-radius: 8;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 8;
+    -fx-border-width: 1;
+    -fx-min-height: 70px;
+}
+
+/* ---------- prompt ---------- */
+
+.prompt {
+    -fx-background-color: -neo-panel-hi;
+    -fx-background-radius: 8;
+    -fx-border-color: -neo-accent;
+    -fx-border-radius: 8;
+    -fx-border-width: 0 0 0 3;
+    -fx-padding: 10 12 10 12;
+    -fx-font-size: 0.962em;
+    -fx-text-fill: -neo-text;
+}
+
+/* ---------- pila de fichas identicas ---------- */
+
+.stack-count {
+    -fx-background-color: rgba(10,14,20,0.94);
+    -fx-text-fill: -neo-text;
+    -fx-font-weight: bold;
+    -fx-background-radius: 4;
+    -fx-border-color: -neo-accent;
+    -fx-border-radius: 4;
+    -fx-border-width: 1.5;
+}
+
+/* El contador de lo ENGANCHADO (equipos y auras apilados detras de la carta).
+   Se distingue de la pila de fichas a proposito: son dos cosas distintas, y
+   ademas esta SE CLICA — de ahi el acento de fondo, que es el color con el que
+   toda la interfaz dice "esto se puede tocar". */
+.attach-count {
+    -fx-background-color: -neo-accent;
+    -fx-text-fill: #0B0F14;
+    -fx-border-color: rgba(10,14,20,0.8);
+}
+
+.attach-count:hover {
+    -fx-background-color: derive(-neo-accent, 25%);
+}
+
+/* ---------- zona de la mano ---------- */
+
+.hand-area {
+    -fx-background-color: linear-gradient(to top, rgba(11,14,19,0.85) 0%, rgba(11,14,19,0.0) 100%);
+}
+
+/* ---------- pilas de zona en la mesa (cementerio / exilio) ---------- */
+
+.zone-pile-face {
+    -fx-fill: linear-gradient(to bottom, #232B36 0%, #161C24 100%);
+    -fx-stroke: #3A4552;
+    -fx-stroke-width: 1;
+}
+
+.zone-pile-count {
+    -fx-text-fill: -neo-text;
+    -fx-font-weight: bold;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.9), 4, 0.6, 0, 1);
+}
+
+/* Aqui dentro hay algo que PUEDES LANZAR ahora: una aventura exiliada, un
+   flashback del cementerio. El mismo azul claro que las cartas accionables de
+   la mesa, porque es lo mismo que dice: "esto se puede usar". Sin esto la pila
+   solo cuenta cartas, y nadie la abre para descubrir que tenia una jugada. */
+.zone-pile:playable .zone-pile-face {
+    -fx-stroke: -neo-actionable;
+    -fx-stroke-width: 2;
+    -fx-effect: dropshadow(gaussian, rgba(102,204,255,0.45), 12, 0.35, 0, 0);
+}
+
+.zone-pile:playable .zone-pile-count {
+    -fx-text-fill: #BEE7FF;
+}
+
+/* Con la primera carta DESTAPADA (Bolas's Citadel y familia), el contador se
+   va a la esquina: en el centro tapa justo el arte y el nombre, que es lo que
+   se ha destapado para poder leer. Mismo tamano y forma que el "xN" de las
+   pilas de fichas, para que se lea igual en los dos sitios. */
+.zone-pile-count-corner {
+    -fx-background-color: rgba(10,14,20,0.94);
+    -fx-background-radius: 4;
+    -fx-border-color: -neo-accent;
+    -fx-border-radius: 4;
+    -fx-border-width: 1.2;
+    -fx-padding: 0 4;
+}
+
+/* ---------- entradas del stack ---------- */
+
+/* Cada entrada lleva la CARTA al lado. Un disparo del comandante en el paso
+   final tiene que reconocerse de un vistazo, no leyendo un parrafo. */
+.stack-row {
+    -fx-background-color: rgba(27,33,42,0.7);
+    -fx-background-radius: 5;
+    -fx-padding: 5;
+    -fx-border-color: transparent;
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+}
+
+/* Lo de arriba se resuelve primero. */
+.stack-row:top {
+    -fx-background-color: -neo-panel-hi;
+    -fx-border-color: -neo-accent;
+}
+
+.stack-spell, .stack-trigger {
+    -fx-font-size: 0.8em;
+    -fx-padding: 1 2 1 2;
+}
+
+.stack-spell {
+    -fx-text-fill: -neo-text;
+}
+
+/* Los disparos en ambar: son lo que mas se pasa por alto. */
+.stack-trigger {
+    -fx-text-fill: -neo-warn;
+}
+
+/* El que se resuelve AHORA se lleva el peso visual entero: con cinco entradas
+   iguales la columna era una pared gris y no se sabia por donde empezar. */
+.stack-top {
+    -fx-background-color: -neo-panel-hi;
+    -fx-background-radius: 5;
+    -fx-border-color: -neo-accent;
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+    -fx-padding: 6 8 7 8;
+}
+
+.stack-top:hover {
+    -fx-border-color: -neo-text;
+}
+
+/* El nombre de lo que se esta resolviendo: es lo primero que se lee. */
+.stack-top-name {
+    -fx-font-size: 0.92em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+.stack-now {
+    -fx-font-size: 0.68em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text-dim;
+}
+
+/* Lo tuyo en el color de lo interactivo; lo del rival, apagado. Saber de quien
+   es lo que esta esperando es la primera pregunta con tres rivales. */
+.stack-now:mine {
+    -fx-text-fill: -neo-accent;
+}
+
+/* Los que esperan debajo: solo la franja del titulo. */
+.stack-strip {
+    -fx-background-color: rgba(27,33,42,0.7);
+    -fx-background-radius: 4;
+    -fx-padding: 3 6 3 6;
+}
+
+.stack-strip:hover {
+    -fx-background-color: -neo-panel-hi;
+}
+
+/* El "×6" de los disparos iguales juntos (StackGroups, Discord 08-10-2026).
+   NO se llama .stack-count: esa es la del "x3" de las pilas de la mesa, y al
+   compartir nombre esta regla (que va despues) le ganaba el relleno y el fondo.
+   Aquella mide su ancho para el numero justo: con 12 px de relleno salia "..."
+   hasta en un x2 (Discord, 09-10-2026). */
+.stack-group-count {
+    -fx-font-size: 0.72em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+    -fx-background-color: derive(-neo-accent, -40%);
+    -fx-background-radius: 8;
+    -fx-padding: 0 6 0 6;
+}
+
+.stack-order {
+    -fx-font-size: 0.7em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.stack-who {
+    -fx-font-size: 0.7em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.stack-who:mine {
+    -fx-text-fill: -neo-accent;
+}
+
+/* El galon. Es lo unico que dice que una entrada del stack se abre: sin el,
+   el gesto existe y no lo descubre nadie. Apagado para que no compita con el
+   nombre, que es lo que se lee primero. */
+.stack-chevron {
+    -fx-font-size: 0.72em;
+    -fx-text-fill: -neo-text-dim;
+    -fx-padding: 0 1 0 0;
+}
+
+.stack-strip:hover .stack-chevron,
+.stack-top:hover .stack-chevron,
+.stack-header:hover .stack-chevron {
+    -fx-text-fill: -neo-accent;
+}
+
+/* El titulo tambien se clica: abre o cierra todas de una vez. */
+.stack-header {
+    -fx-padding: 0 0 1 0;
+}
+
+/* Lo que se ve al abrir una entrada, sangrado para que se lea como que
+   pertenece a la fila de encima y no como una entrada mas. */
+.stack-detail {
+    -fx-padding: 2 0 1 14;
+}
+
+/* A quien apunta. En el color de lo interactivo porque es el dato por el que
+   se decide responder, y solo sale cuando el motor no lo ha dicho ya. */
+.stack-targets {
+    -fx-font-size: 0.76em;
+    -fx-text-fill: -neo-accent;
+}
+
+/* El visor rueda si hay mas de los que caben: cortar en cinco sin decirlo era
+   mentir sobre lo que hay esperando. */
+.stack-scroll,
+.stack-scroll > .viewport {
+    -fx-background-color: transparent;
+}
+
+.stack-scroll {
+    -fx-padding: 0;
+}
+
+/* ---------- zona de mando ---------- */
+
+/* Lo que da ganar un duelo de la Quest (QuestScreen.duelTile). */
+.duel-reward { -fx-text-fill: -neo-warn; -fx-font-weight: bold; -fx-font-size: 0.95em; }
+
+/* El panel «Turno» (TurnStatsView): lo que lleva cada jugador este turno. */
+.turn-stats-player { -fx-text-fill: -neo-text; -fx-font-weight: bold; -fx-padding: 0 0 4 0; }
+.turn-stats-active { -fx-text-fill: -neo-accent; }
+.turn-stats-label { -fx-text-fill: -neo-text-dim; }
+.turn-stats-value { -fx-text-fill: -neo-text; -fx-font-weight: bold; -fx-font-size: 1.05em; }
+.turn-stats-zero { -fx-text-fill: derive(-neo-text-dim, -35%); -fx-font-weight: normal; }
+.turn-stats-gain { -fx-text-fill: -neo-valid; }
+.turn-stats-loss { -fx-text-fill: -neo-danger; }
+.turn-stats-hint { -fx-text-fill: -neo-text-dim; -fx-font-size: 0.85em; }
+
+/* El impuesto de comandante, sobre la carta de la zona de mando (CardNode).
+   El tamano de letra lo pone CardNode segun el ancho de la carta. */
+/* Lo que se puede lanzar desde el cementerio o el exilio, ensenyado en la mano:
+   desvaido, con su zona debajo. Al pasar el raton se ve entero. */
+.card:outside {
+    -fx-opacity: 0.62;
+}
+
+.card:outside:hover {
+    -fx-opacity: 1;
+}
+
+.card-origin-tag {
+    -fx-background-color: rgba(8,11,16,0.92);
+    -fx-text-fill: -neo-actionable;
+    -fx-font-weight: bold;
+    -fx-padding: 1 7 1 7;
+    -fx-background-radius: 5;
+    -fx-border-color: -neo-actionable;
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+}
+
+/* Provocada: solo el icono, abajo a la izquierda, pequeno y en el color de
+   "atencion", como un aviso y no como un control. Quien, al ampliarla. */
+.card-goad-tag {
+    -fx-background-color: rgba(8,11,16,0.88);
+    -fx-text-fill: -neo-warn;
+    -fx-font-weight: bold;
+    -fx-padding: 0 3 0 3;
+    -fx-background-radius: 4;
+    -fx-border-color: rgba(224,166,60,0.7);
+    -fx-border-radius: 4;
+    -fx-border-width: 1;
+}
+
+/* Cuantos de un color flotan, en la esquina del simbolo de mana de Forge
+   (itch.io, 06-11-2026): encima del dibujo no se leeria. */
+.mana-pip-count {
+    -fx-text-fill: #E6EBF2;
+    -fx-font-size: 0.75em;
+    -fx-font-weight: bold;
+    -fx-background-color: rgba(18,22,28,0.92);
+    -fx-background-radius: 3;
+    -fx-border-color: #2C3542;
+    -fx-border-radius: 3;
+    -fx-border-width: 0.5;
+    -fx-padding: 0 2 0 2;
+}
+.mana-pip-icon:hover {
+    -fx-effect: dropshadow(gaussian, rgba(74,155,224,0.9), 6, 0.4, 0, 0);
+}
+
+/* Jugador protegido (proteccion, antimaleficio, velo): atacarle o apuntarle
+   no sirve. Discord, 06-11-2026. */
+.player-counter.player-counter-shield {
+    -fx-text-fill: #E6EBF2;
+    -fx-background-color: rgba(74,155,224,0.35);
+    -fx-border-color: #4A9BE0;
+    -fx-font-weight: bold;
+}
+
+/* Que le pasa a la carta elegible bajo el raton: sacrificar, descartar...
+   (Discord, 06-11-2026). El color de fondo lo pone CardNode segun la accion. */
+.card-action-tint {
+    -fx-background-radius: 4;
+    -fx-border-radius: 4;
+    -fx-border-width: 2;
+}
+.card-action-label {
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-font-size: 14px;
+    -fx-background-color: rgba(8,11,16,0.78);
+    -fx-background-radius: 4;
+    -fx-padding: 2 6 2 6;
+}
+
+/* "El coste depende de lo que elijas": en la carta levantada de la mano. */
+.card-cost-hint {
+    -fx-background-color: rgba(8,11,16,0.9);
+    -fx-text-fill: -neo-warn;
+    -fx-font-weight: bold;
+    -fx-padding: 1 6 1 6;
+    -fx-background-radius: 5;
+    -fx-border-color: rgba(224,166,60,0.7);
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+}
+
+.card-commander-tax {
+    -fx-background-color: -neo-warn;
+    -fx-text-fill: #10141A;
+    -fx-font-weight: bold;
+    -fx-padding: 1 6 1 6;
+    -fx-background-radius: 5;
+    -fx-border-color: rgba(0,0,0,0.55);
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.6), 4, 0.2, 0, 1);
+}
+
+/* ---------- pestanyas de rival (partidas a 3 o 4) ---------- */
+
+.opponent-tabs {
+    -fx-background-color: rgba(11,14,19,0.75);
+}
+
+.opponent-tab {
+    -fx-font-size: 0.82em;
+    -fx-text-fill: -neo-text-dim;
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 4 4 0 0;
+    -fx-padding: 3 12 3 12;
+    -fx-border-color: transparent transparent -neo-line transparent;
+    -fx-border-width: 0 0 2 0;
+    -fx-cursor: hand;
+}
+
+.opponent-tab:hover {
+    -fx-text-fill: -neo-text;
+}
+
+.opponent-tab:selected {
+    -fx-text-fill: -neo-text;
+    -fx-background-color: -neo-panel-hi;
+    -fx-border-color: transparent transparent -neo-accent transparent;
+}
+
+/* Punto ambar en el que tiene el turno. */
+.opponent-tab:active {
+    -fx-text-fill: -neo-warn;
+}
+
+/* Partida por equipos (NeoTeams): el de tu lado, en verde "permitido".
+   Va despues de :active a proposito: que sea su turno ya lo dice la barra,
+   y lo que la pestanya tiene que decir antes de clicarla es de que lado es. */
+.opponent-tab:ally {
+    -fx-text-fill: -neo-valid;
+}
+.opponent-tab:ally:selected {
+    -fx-border-color: transparent transparent -neo-valid transparent;
+}
+
+/* "ALIADO" junto al nombre, como la pastilla de TURNO pero en verde. */
+.ally-mark {
+    -fx-font-size: 0.692em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-table-deep;
+    -fx-background-color: -neo-valid;
+    -fx-background-radius: 3;
+    -fx-padding: 1 6 1 6;
+}
+
+/* El desplegable "Equipo" de cada asiento en la pantalla de inicio, como el
+   de Forge. Con la piel de .segment: el ComboBox de fabrica de JavaFX es gris
+   claro y en la mesa oscura parece otra aplicacion. */
+.team-combo {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 5;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+    -fx-font-size: 0.88em;
+    -fx-cursor: hand;
+}
+.team-combo:hover {
+    -fx-border-color: -neo-text-dim;
+}
+.team-combo > .list-cell {
+    -fx-text-fill: -neo-text;
+    -fx-padding: 4 4 4 10;
+}
+.team-combo > .arrow-button {
+    -fx-background-color: transparent;
+}
+.team-combo > .arrow-button > .arrow {
+    -fx-background-color: -neo-text-dim;
+}
+.team-combo .list-view {
+    -fx-background-color: -neo-panel;
+    -fx-border-color: -neo-line;
+}
+.team-combo .list-view .list-cell {
+    -fx-background-color: -neo-panel;
+    -fx-text-fill: -neo-text;
+}
+.team-combo .list-view .list-cell:hover,
+.team-combo .list-view .list-cell:selected {
+    -fx-background-color: -neo-accent;
+    -fx-text-fill: #0B0E13;
+}
+
+/* Escribir para filtrar un desplegable largo (ComboSearch): lo escrito, arriba. */
+.combo-search {
+    -fx-padding: 6;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,.55), 14, .2, 0, 3);
+}
+.combo-search-query {
+    -fx-text-fill: -neo-text;
+    -fx-background-color: -neo-table-deep;
+    -fx-border-color: -neo-accent;
+    -fx-border-radius: 4;
+    -fx-background-radius: 4;
+    -fx-padding: 4 8 4 8;
+    -fx-min-height: 2em;
+}
+
+/* =====================================================================
+   Interaccion (fase 4)
+   ===================================================================== */
+
+.action-bar {
+    -fx-background-color: -neo-panel-hi;
+    -fx-background-radius: 8;
+    -fx-border-color: -neo-accent;
+    -fx-border-radius: 8;
+    -fx-border-width: 0 0 0 3;
+}
+
+.prompt-text {
+    -fx-font-size: 0.95em;
+    -fx-text-fill: -neo-text;
+}
+
+.btn-primary {
+    -fx-background-color: -neo-accent;
+    -fx-text-fill: #0B0E13;
+    -fx-font-weight: bold;
+    -fx-font-size: 0.95em;
+    -fx-padding: 7 18 7 18;
+    -fx-background-radius: 5;
+    -fx-cursor: hand;
+}
+
+.btn-primary:hover { -fx-background-color: derive(-neo-accent, 18%); }
+
+.btn-primary:disabled {
+    -fx-background-color: -neo-line;
+    -fx-text-fill: -neo-text-dim;
+    -fx-opacity: 1;
+    -fx-cursor: default;
+}
+
+.btn-secondary {
+    -fx-background-color: transparent;
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-size: 0.95em;
+    -fx-padding: 7 14 7 14;
+    -fx-background-radius: 5;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+    -fx-cursor: hand;
+}
+
+.btn-secondary:hover { -fx-text-fill: -neo-text; -fx-border-color: -neo-text-dim; }
+
+/* Un MenuButton con estilo de boton secundario ("Al azar de una coleccion"):
+   su texto va en una .label interna y la flecha en .arrow, que no heredan el
+   -fx-text-fill del boton. Sin esto salia casi invisible. */
+.menu-button.btn-secondary > .label { -fx-text-fill: -neo-text-dim; }
+.menu-button.btn-secondary:hover > .label { -fx-text-fill: -neo-text; }
+.menu-button.btn-secondary > .arrow-button > .arrow { -fx-background-color: -neo-text-dim; }
+
+/* Un boton secundario que ademas ENCIENDE UN MODO (el "Elegir comandante" del
+   deck builder). Sin esto se veia exactamente igual pulsado que sin pulsar: el
+   unico indicio de que el catalogo habia cambiado era su texto.
+   Va DESPUES de :hover a proposito -- misma especificidad, gana el ultimo, y
+   pasar el raton por encima no puede borrar el estado. */
+.btn-secondary:selected,
+.btn-secondary:selected:hover {
+    -fx-background-color: -neo-accent;
+    -fx-text-fill: #0B0E13;
+    -fx-font-weight: bold;
+    -fx-border-color: -neo-accent;
+}
+
+.btn-secondary:disabled {
+    -fx-opacity: 0.35;
+    -fx-cursor: default;
+}
+
+/* ---------- capa modal ---------- */
+
+.overlay {
+    -fx-background-color: rgba(5,7,10,0.78);
+}
+
+.dialog {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 10;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 10;
+    -fx-border-width: 1;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.7), 30, 0.3, 0, 8);
+}
+
+.dialog-title {
+    -fx-font-size: 1.15em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+.dialog-text { -fx-font-size: 0.95em; -fx-text-fill: -neo-text; }
+
+/* Explicacion bajo el titulo (descarga de arte). Sin esta regla la Label sale
+   con el gris oscuro de JavaFX, que sobre -neo-panel casi no se ve. */
+.dialog-note { -fx-font-size: 0.95em; -fx-text-fill: derive(-neo-text, -12%); }
+
+/* "Vas a dejar tu fase principal": mas grande que un dialogo normal y con el
+   borde en el color de aviso. Es una pregunta que aparece JUSTO donde no la
+   esperas -- la disparas dando OK por inercia -- y tiene que cortar el gesto,
+   no colarse entre lo que ya estabas mirando. */
+.phase-ask {
+    -fx-border-color: -neo-warn;
+    -fx-border-width: 2;
+    -fx-padding: 26 30 22 30;
+}
+
+.phase-ask .dialog-title {
+    -fx-font-size: 1.7em;
+    -fx-text-fill: -neo-warn;
+}
+
+.phase-ask .dialog-text { -fx-font-size: 1.05em; }
+.dialog-counter { -fx-font-size: 0.9em; -fx-text-fill: -neo-text-dim; }
+
+/* "Puedes lanzar N desde aqui": el gesto no es obvio y hay que decirlo. */
+.zone-viewer-hint { -fx-font-size: 0.9em; -fx-text-fill: #66CCFF; }
+
+.dialog-scroll, .dialog-scroll .viewport {
+    -fx-background-color: transparent;
+}
+
+/* "Que puede salir" junto a una expansion del sobre de premio (22-10-2026): secundario, que no compita con la opcion. */
+.choice-peek {
+    -fx-background-color: transparent;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 6;
+    -fx-background-radius: 6;
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-size: 0.8em;
+    -fx-padding: 6 10;
+    -fx-cursor: hand;
+}
+.choice-peek:hover { -fx-text-fill: -neo-text; -fx-border-color: -neo-accent; }
+
+.choice-item {
+    -fx-background-color: -neo-panel-hi;
+    -fx-text-fill: -neo-text;
+    -fx-font-size: 0.9em;
+    -fx-padding: 8 14 8 14;
+    -fx-background-radius: 5;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+    -fx-cursor: hand;
+}
+
+.choice-item:hover { -fx-border-color: -neo-accent; }
+
+.chosen {
+    -fx-border-color: -neo-accent;
+    -fx-border-width: 2;
+    -fx-effect: dropshadow(gaussian, -neo-accent, 12, 0.5, 0, 0);
+}
+
+/* El numero de orden de una opcion marcada (ordenar disparos, cartas al fondo
+   de la biblioteca). Circulo lleno de acento: se lee de un vistazo encima de una
+   carta o de un parrafo, que es donde va. */
+.choice-order {
+    -fx-background-color: -neo-accent;
+    -fx-background-radius: 999;
+    -fx-border-color: -neo-table;
+    -fx-border-radius: 999;
+    -fx-border-width: 2;
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-font-size: 1.05em;
+    -fx-alignment: center;
+    -fx-min-width: 1.9em;
+    -fx-min-height: 1.9em;
+    -fx-padding: 0 4 0 4;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.6), 6, 0.3, 0, 1);
+}
+
+/* Retrato resaltado cuando hay que elegir jugador. */
+.player-bar:selectable {
+    -fx-border-color: -neo-accent;
+    -fx-border-width: 2;
+}
+
+/* Barra de scroll discreta en el panel de detalle. */
+.dialog-scroll > .scroll-bar:vertical {
+    -fx-background-color: transparent;
+    -fx-pref-width: 8;
+}
+
+.dialog-scroll > .scroll-bar:vertical > .thumb {
+    -fx-background-color: -neo-line;
+    -fx-background-radius: 4;
+}
+
+.dialog-scroll > .scroll-bar:vertical > .thumb:hover {
+    -fx-background-color: -neo-text-dim;
+}
+
+.dialog-scroll > .scroll-bar > .increment-button,
+.dialog-scroll > .scroll-bar > .decrement-button {
+    -fx-pref-height: 0;
+    -fx-opacity: 0;
+}
+
+/* =====================================================================
+   Combate: flechas, avance del atacante y arrastre  (fase 4)
+   ===================================================================== */
+
+/* La capa de flechas no intercepta nada: es informacion, no controles. */
+.combat-overlay {
+    -fx-background-color: transparent;
+}
+
+/* Sobre que estas trabajando ahora mismo: el defensor mientras declaras
+   atacantes, el atacante mientras declaras bloqueadores. */
+.player-bar:highlighted {
+    -fx-background-color: linear-gradient(to right, rgba(224,166,60,0.28) 0%, rgba(11,14,19,0.6) 60%);
+    -fx-border-color: -neo-warn;
+    -fx-border-width: 2;
+}
+
+/* Una entrada del stack que es objetivo de lo de arriba (un contrahechizo). */
+.stack-top:stack-target,
+.stack-strip:stack-target {
+    -fx-border-color: -neo-danger;
+    -fx-border-width: 2;
+    -fx-border-radius: 4;
+    -fx-background-color: rgba(217,83,79,0.18);
+    -fx-background-radius: 4;
+}
+
+/* Un jugador objetivo de lo de arriba del stack (ver .card:stack-target). */
+.player-bar:stack-target {
+    -fx-background-color: linear-gradient(to right, rgba(217,83,79,0.32) 0%, rgba(11,14,19,0.6) 60%);
+    -fx-border-color: -neo-danger;
+    -fx-border-width: 2;
+}
+
+/* Atacar se ve mejor con la carta un poco encendida, no solo con el borde. */
+.card:attacking .card-border {
+    -fx-stroke: -neo-danger;
+    -fx-stroke-width: 3;
+    -fx-effect: dropshadow(gaussian, rgba(217,83,79,0.75), 16, 0.4, 0, 0);
+}
+
+.card:blocking .card-border {
+    -fx-stroke: -neo-accent;
+    -fx-stroke-width: 3;
+    -fx-effect: dropshadow(gaussian, rgba(74,155,224,0.7), 14, 0.4, 0, 0);
+}
+
+/* La carta que se esta arrastrando: se aparta del camino para que se vea la
+   flecha y lo que hay debajo. */
+.card:dragging {
+    -fx-opacity: 0.55;
+}
+
+/* Donde va a caer. Verde = "aqui vale", como el resaltado de zona de Arena. */
+.card:drop-target .card-border {
+    -fx-stroke: -neo-valid;
+    -fx-stroke-width: 4;
+    -fx-effect: dropshadow(gaussian, -neo-valid, 20, 0.6, 0, 0);
+}
+
+/* ---------- paradas del rail de fases ---------- */
+
+/* Punto a la izquierda en las fases donde el juego te va a parar. Es el
+   equivalente de los stops de Arena y se conmuta clicando. */
+.phase-stop:stop {
+    -fx-text-fill: -neo-text;
+    -fx-border-color: transparent transparent transparent -neo-accent;
+    -fx-border-width: 0 0 0 3;
+}
+
+.phase-stop:hover {
+    -fx-background-color: -neo-panel-hi;
+    -fx-text-fill: -neo-text;
+}
+
+/* De quien son las paradas que se ven: "Tu" / "Rivales", encima del rail. */
+.phase-owner {
+    -fx-font-size: 0.75em;
+    -fx-text-fill: -neo-text-dim;
+    -fx-padding: 1 7;
+    -fx-background-radius: 3;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 3;
+    -fx-border-width: 1;
+}
+
+.phase-owner:hover {
+    -fx-text-fill: -neo-text;
+}
+
+.phase-owner:selected {
+    -fx-text-fill: -neo-text;
+    -fx-border-color: -neo-accent;
+    -fx-background-color: rgba(74,155,224,0.18);
+}
+
+/* El reloj de la partida, junto a "TU TURNO": secundario y en cifras de ancho fijo. */
+.game-clock {
+    -fx-font-size: 0.75em;
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-family: "Consolas", "Menlo", monospace;
+    -fx-padding: 0 0 0 6;
+}
+
+/* El orden de turnos, debajo de "TURNO DE ...": el que juega, encendido. */
+.turn-order-caption,
+.turn-order-arrow,
+.turn-order-player {
+    -fx-font-size: 0.75em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.turn-order-caption {
+    -fx-padding: 0 3 0 0;
+}
+
+.turn-order-player:yours {
+    -fx-text-fill: -neo-text;
+}
+
+/* Quien tiene la prioridad: un punto ambar delante, el color de "decision
+   pendiente" de los tokens. */
+.turn-order-priority {
+    -fx-text-fill: -neo-warn;
+    -fx-font-size: 0.85em;
+}
+
+.turn-order-player:priority {
+    -fx-text-fill: -neo-text;
+}
+
+.turn-order-player:current {
+    -fx-text-fill: -neo-text;
+    -fx-font-weight: bold;
+    -fx-padding: 0 5;
+    -fx-background-color: rgba(74,155,224,0.18);
+    -fx-background-radius: 3;
+}
+
+/* ---------- pips de mana clicables ---------- */
+
+/* La reserva de mana solo se destaca mientras hay un pago en curso. */
+.mana-pool {
+    -fx-background-radius: 14;
+    -fx-border-radius: 14;
+    -fx-border-width: 1;
+    -fx-border-color: transparent;
+}
+
+.mana-pool:pool-active {
+    -fx-background-color: rgba(74,155,224,0.18);
+    -fx-border-color: -neo-accent;
+}
+
+.mana-pip:hover {
+    -fx-effect: dropshadow(gaussian, white, 10, 0.5, 0, 0);
+}
+
+/* ---------- reparto de dano de combate ---------- */
+
+.damage-total {
+    -fx-font-size: 1.0em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-danger;
+}
+
+.damage-value {
+    -fx-font-size: 1.0em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text-dim;
+    -fx-background-color: -neo-panel-hi;
+    -fx-background-radius: 4;
+    -fx-padding: 3 10 3 10;
+}
+
+.damage-value:lethal {
+    -fx-text-fill: #0B0E13;
+    -fx-background-color: -neo-danger;
+}
+
+/* − y + a los lados del dano asignado */
+.damage-step {
+    -fx-font-size: 1.15em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+    -fx-background-color: -neo-panel-hi;
+    -fx-background-radius: 4;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 4;
+    -fx-padding: 0 0 1 0;
+    -fx-min-width: 1.8em;
+    -fx-pref-width: 1.8em;
+    -fx-cursor: hand;
+}
+
+.damage-step:hover {
+    -fx-border-color: -neo-accent;
+    -fx-text-fill: -neo-accent;
+}
+
+.damage-step:disabled {
+    -fx-opacity: 0.35;
+}
+
+.damage-defender {
+    -fx-background-color: linear-gradient(to bottom, #2A323D 0%, #1A2029 100%);
+    -fx-background-radius: 5;
+    -fx-border-color: -neo-warn;
+    -fx-border-radius: 5;
+    -fx-border-width: 2;
+    -fx-text-fill: -neo-text;
+    -fx-font-weight: bold;
+    -fx-alignment: center;
+    -fx-text-alignment: center;
+    -fx-wrap-text: true;
+}
+
+/* =====================================================================
+   Pantalla de inicio y fin de partida  (fase 5)
+   ===================================================================== */
+
+.home-title {
+    -fx-font-size: 1.9em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+.home-subtitle {
+    -fx-font-size: 0.95em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.home-summary {
+    -fx-font-size: 1.0em;
+    -fx-text-fill: -neo-text;
+}
+
+/* Franja inferior: separa los ajustes de la rejilla de mazos. */
+/* El boton de Discord de la esquina del menu: el logo sobre su azul de marca. */
+.discord-button {
+    -fx-background-color: #5865F2;
+    -fx-background-radius: 8;
+    -fx-padding: 7 10;
+    -fx-cursor: hand;
+}
+.discord-button:hover { -fx-background-color: #6d78f5; }
+.discord-button:pressed { -fx-background-color: #4752c4; }
+.discord-button .discord-logo { -fx-fill: white; }
+
+/* itch.io, al lado de Discord (28-09-2026), con su rojo. El puntito ambar sale
+   cuando hay una version nueva (NeoUpdate): el color de "decision pendiente". */
+.itch-button {
+    -fx-background-color: #FA5C5C;
+    -fx-background-radius: 8;
+    -fx-padding: 7 10;
+    -fx-cursor: hand;
+}
+.itch-button:hover { -fx-background-color: #fb7676; }
+.itch-button:pressed { -fx-background-color: #d94a4a; }
+.itch-button .itch-logo { -fx-fill: white; }
+/* Ko-fi, el ultimo de la fila (10-10-2026): el azul de sus botones y no su
+   rojo, que al lado del de itch.io no se distinguiria. */
+.kofi-button {
+    -fx-background-color: #29ABE0;
+    -fx-background-radius: 8;
+    -fx-padding: 7 10;
+    -fx-cursor: hand;
+}
+.kofi-button:hover { -fx-background-color: #4dbbe6; }
+.kofi-button:pressed { -fx-background-color: #1f8fbd; }
+.kofi-button .kofi-logo { -fx-fill: white; }
+/* El corazon en el rojo de Ko-fi: es lo que hace que se reconozca. */
+.kofi-button .kofi-heart { -fx-fill: #FF5E5B; }
+.itch-dot {
+    -fx-fill: -neo-warn;
+    -fx-stroke: -neo-table;
+    -fx-stroke-width: 2;
+}
+
+/* El aviso de version nueva, en el pie del menu, al lado del numero. */
+.update-banner {
+    -fx-background-color: rgba(224,166,60,0.12);
+    -fx-background-radius: 6;
+    -fx-border-color: -neo-warn;
+    -fx-border-radius: 6;
+    -fx-border-width: 1;
+    -fx-padding: 3 4 3 12;
+    -fx-spacing: 10;
+}
+.update-banner-text {
+    -fx-text-fill: -neo-text;
+    -fx-font-weight: bold;
+    -fx-font-size: 0.9em;
+}
+.update-open {
+    -fx-background-color: #FA5C5C;
+    -fx-background-radius: 4;
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-font-size: 0.9em;
+    -fx-padding: 4 12;
+    -fx-cursor: hand;
+}
+.update-open:hover { -fx-background-color: #fb7676; }
+.update-open:pressed { -fx-background-color: #d94a4a; }
+.update-later {
+    -fx-background-color: transparent;
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-size: 0.9em;
+    -fx-padding: 4 8;
+    -fx-cursor: hand;
+}
+.update-later:hover { -fx-text-fill: -neo-text; }
+/* Actualizar desde dentro (SelfUpdate): el boton, en el acento, y la barra. */
+.update-install {
+    -fx-background-color: -neo-accent;
+    -fx-background-radius: 4;
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-font-size: 0.9em;
+    -fx-padding: 4 12;
+    -fx-cursor: hand;
+}
+.update-install:hover { -fx-background-color: derive(-neo-accent, 15%); }
+.update-progress { -fx-pref-width: 9em; -fx-accent: -neo-accent; }
+.update-banner.update-done {
+    -fx-background-color: rgba(79,180,119,0.12);
+    -fx-border-color: -neo-valid;
+}
+
+.home-footer {
+    -fx-background-color: rgba(11,14,19,0.75);
+    -fx-border-color: -neo-line transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+}
+
+/* ---------- mazo, presentado por su comandante ---------- */
+
+.deck-tile {
+    -fx-background-color: transparent;
+    -fx-background-radius: 10;
+    -fx-border-color: transparent;
+    -fx-border-radius: 10;
+    -fx-border-width: 2;
+    -fx-cursor: hand;
+}
+
+.deck-tile:hover {
+    -fx-background-color: rgba(74,155,224,0.10);
+    -fx-border-color: rgba(74,155,224,0.45);
+}
+
+.deck-tile:selected {
+    -fx-background-color: rgba(74,155,224,0.18);
+    -fx-border-color: -neo-accent;
+}
+
+/* La papelera del mazo. Va ENCIMA del arte de la carta, o sea encima de un
+   dibujo a todo color: sin fondo propio no se lee, y el btn-danger de siempre
+   (transparente, texto apagado) desaparecia del todo. Fondo oscuro y opaco,
+   y el rojo solo al pasar por encima: borrar no se ofrece, se permite. */
+.deck-tile-bin {
+    -fx-background-color: rgba(18,22,28,0.88);
+    -fx-background-radius: 5;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+    -fx-text-fill: -neo-text;
+    -fx-font-size: 0.78em;
+    -fx-padding: 3 8 3 8;
+    -fx-cursor: hand;
+}
+
+.deck-tile-bin:hover {
+    -fx-background-color: rgba(217,83,79,0.92);
+    -fx-border-color: -neo-danger;
+    -fx-text-fill: white;
+}
+
+/* "Mover" a otra coleccion: mismo boton que la papelera, pero no se pone rojo
+   al pasar por encima — mover no destruye nada. */
+.deck-tile-bin.deck-tile-move:hover {
+    -fx-background-color: rgba(74,155,224,0.92);
+    -fx-border-color: -neo-accent;
+    -fx-text-fill: white;
+}
+
+.deck-tile-name {
+    -fx-font-size: 1.0em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+.deck-tile-sub {
+    -fx-font-size: 0.82em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+/* ---------- fila de opciones excluyentes ---------- */
+
+.segment {
+    -fx-background-color: -neo-panel;
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-size: 0.88em;
+    -fx-padding: 5 14 5 14;
+    -fx-background-radius: 5;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+    -fx-cursor: hand;
+}
+
+.segment:hover {
+    -fx-text-fill: -neo-text;
+    -fx-border-color: -neo-text-dim;
+}
+
+.segment:selected {
+    -fx-background-color: -neo-accent;
+    -fx-text-fill: #0B0E13;
+    -fx-font-weight: bold;
+    -fx-border-color: -neo-accent;
+}
+
+/* El boton de jugar es el unico grande de la pantalla: no hay que buscarlo. */
+.btn-play {
+    -fx-font-size: 1.15em;
+    -fx-padding: 12 44 12 44;
+    -fx-background-radius: 6;
+}
+
+/* ---------- fin de partida ---------- */
+
+.game-over-title {
+    -fx-font-size: 2.2em;
+    -fx-font-weight: bold;
+}
+
+.game-over-title.victory { -fx-text-fill: -neo-valid; }
+.game-over-title.defeat  { -fx-text-fill: -neo-danger; }
+.game-over-title.draw    { -fx-text-fill: -neo-text; }
+
+
+/* =====================================================================
+   Menu de pausa, ajustes, carta ampliada y menu de habilidades
+   ===================================================================== */
+
+.pause-menu {
+    -fx-min-width: 300px;
+}
+
+/* Los botones del menu ocupan todo el ancho: es una lista, no una fila. */
+.pause-item {
+    -fx-font-size: 1.0em;
+    -fx-padding: 10 20 10 20;
+    -fx-alignment: center;
+}
+
+/* ---------- ajustes ---------- */
+
+.settings-section {
+    -fx-font-size: 0.75em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-accent;
+    -fx-padding: 14 0 2 0;
+}
+
+/* Las pestanyas de Ajustes (itch.io, 05-10-2026): un carril a la izquierda,
+   una por fila y del mismo ancho. La elegida con el acento, como un .segment. */
+.settings-tabs {
+    -fx-padding: 6 14 0 0;
+    -fx-border-color: transparent -neo-line transparent transparent;
+    -fx-border-width: 0 1 0 0;
+}
+
+.settings-tab {
+    -fx-background-color: transparent;
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-size: 0.95em;
+    -fx-alignment: center-left;
+    -fx-padding: 8 18 8 12;
+    -fx-background-radius: 5;
+    -fx-cursor: hand;
+}
+
+.settings-tab:hover {
+    -fx-background-color: -neo-panel;
+    -fx-text-fill: -neo-text;
+}
+
+.settings-tab:selected {
+    -fx-background-color: -neo-accent;
+    -fx-text-fill: #0B0E13;
+    -fx-font-weight: bold;
+}
+
+/* La pestanya de apoyar el proyecto, con el rojo del corazon de Ko-fi para
+   que se vea que no es un ajuste mas (17-10-2026). */
+.settings-tab-support { -fx-text-fill: #FF7A77; }
+.settings-tab-support:selected { -fx-background-color: #FF5E5B; -fx-text-fill: #0B0E13; }
+
+.support-card {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 8;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 8;
+    -fx-padding: 22 26 22 26;
+}
+.support-title {
+    -fx-font-size: 1.35em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+.support-text {
+    -fx-font-size: 0.98em;
+    -fx-text-fill: -neo-text;
+    -fx-line-spacing: 3;
+}
+.support-thanks {
+    -fx-font-size: 0.95em;
+    -fx-font-style: italic;
+    -fx-text-fill: -neo-text-dim;
+}
+/* Valorar en itch.io: secundario, en el ambar de "decision pendiente". */
+.support-rate {
+    -fx-background-color: transparent;
+    -fx-border-color: -neo-warn;
+    -fx-border-radius: 8;
+    -fx-background-radius: 8;
+    -fx-text-fill: -neo-warn;
+    -fx-font-weight: bold;
+    -fx-font-size: 0.95em;
+    -fx-padding: 8 16 8 16;
+    -fx-cursor: hand;
+}
+.support-rate:hover { -fx-background-color: rgba(224, 166, 60, 0.12); }
+/* Los botones de la cabecera, con su nombre al lado del logo. */
+.support-link {
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-font-size: 0.95em;
+    -fx-graphic-text-gap: 10;
+    -fx-padding: 9 16 9 12;
+}
+
+.settings-label {
+    -fx-font-size: 0.95em;
+    -fx-text-fill: -neo-text;
+}
+
+.settings-value {
+    -fx-font-size: 0.9em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.settings-slider .track {
+    -fx-background-color: -neo-line;
+    -fx-background-radius: 3;
+    -fx-pref-height: 6px;
+}
+
+.settings-slider .thumb {
+    -fx-background-color: -neo-accent;
+    -fx-background-radius: 8;
+    -fx-pref-width: 16px;
+    -fx-pref-height: 16px;
+}
+
+/* ---------- carta ampliada (click derecho) ---------- */
+
+/* Mas oscuro que un dialogo normal: aqui solo importa la carta. */
+.overlay .card {
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.9), 40, 0.4, 0, 12);
+}
+
+/* ---------- menu de habilidades ---------- */
+
+/* Recuadros grandes al lado de la carta, no botones de una fila: el texto de
+   una habilidad ("Equipar {3}", "{1}: los permanentes...") no cabe apretado. */
+.ability-item {
+    -fx-background-color: -neo-panel-hi;
+    -fx-text-fill: -neo-text;
+    -fx-font-size: 0.95em;
+    -fx-alignment: center-left;
+    -fx-text-alignment: left;
+    -fx-padding: 14 18 14 18;
+    -fx-background-radius: 6;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 6;
+    -fx-border-width: 2;
+    -fx-cursor: hand;
+}
+
+.ability-item:hover {
+    -fx-border-color: -neo-accent;
+    -fx-background-color: derive(-neo-panel-hi, 12%);
+}
+
+/* Lo que no se puede pagar ahora se ve, pero apagado. */
+.ability-item:disabled {
+    -fx-opacity: 0.42;
+    -fx-cursor: default;
+    -fx-border-color: -neo-line;
+}
+
+
+/* =====================================================================
+   Menu inicial de modos y lista de puzzles
+   ===================================================================== */
+
+/* Cada formato es una tarjeta: nombre, que es en una linea, y cuantos mazos
+   tienes de el. Con eso se decide sin tener que abrir nada. */
+.mode-tile {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 10;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 10;
+    -fx-border-width: 2;
+    -fx-cursor: hand;
+}
+
+.mode-tile:hover {
+    -fx-background-color: -neo-panel-hi;
+    -fx-border-color: -neo-accent;
+}
+
+/* La tarjeta de un modo en el menu, como la de Android (Discord, 09-10-2026:
+   "the PC one feels like an old version of the same program"). Los halos, el
+   dibujo, la luz y el BORDE (del color del modo) los pinta MainMenu.paintCard
+   encima de este fondo: un borde de CSS quedaba debajo del lienzo. El velo del
+   texto lee este mismo color, asi que sigue al token. */
+.mode-card {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 12;
+    -fx-cursor: hand;
+}
+
+.mode-card:disabled {
+    -fx-opacity: 0.6;
+    -fx-cursor: default;
+}
+
+.mode-card-name {
+    -fx-font-size: 1.55em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+.mode-card-desc {
+    -fx-font-size: 1.0em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.mode-card-note {
+    -fx-font-size: 0.9em;
+    -fx-font-weight: bold;
+}
+
+/* Ordenar el menu (Discord, 24-10-2026): una capa encima de cada casilla, con
+   el borde discontinuo de "esto se mueve", y abajo las flechas y Ocultar. */
+.menu-edit-layer {
+    -fx-background-color: rgba(11, 14, 19, 0.35);
+    -fx-background-radius: 12;
+    -fx-border-color: -neo-accent;
+    -fx-border-style: segments(8, 6);
+    -fx-border-width: 2;
+    -fx-border-radius: 12;
+}
+
+/* Donde caeria la que se esta arrastrando. */
+.menu-edit-layer.menu-edit-drop {
+    -fx-background-color: rgba(74, 155, 224, 0.25);
+    -fx-border-style: solid;
+    -fx-border-width: 3;
+}
+
+.menu-edit-button {
+    -fx-background-color: -neo-panel-hi;
+    -fx-background-radius: 6;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 6;
+    -fx-text-fill: -neo-text;
+    -fx-font-weight: bold;
+    -fx-padding: 4 12 4 12;
+    -fx-cursor: hand;
+}
+
+.menu-edit-button:hover {
+    -fx-border-color: -neo-accent;
+}
+
+.menu-edit-button:disabled {
+    -fx-opacity: 0.35;
+}
+
+.menu-edit-hidden {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 6;
+    -fx-text-fill: -neo-warn;
+    -fx-font-weight: bold;
+    -fx-padding: 4 10 4 10;
+}
+
+.menu-edit-hint {
+    -fx-font-size: 1.05em;
+    -fx-text-fill: -neo-accent;
+}
+
+/* Un formato del que no tienes mazos se ve, pero no se entra. */
+.mode-tile:disabled {
+    -fx-opacity: 0.4;
+    -fx-cursor: default;
+}
+
+/* Letra de las casillas subida el 24-09-2026 (itch.io, 1080p al 125%): la
+   descripcion iba a 0.85em -- unos 10 px -- con media casilla vacia debajo.
+   Con el idioma ya en desplegable sobra alto de sobra para las cuatro filas. */
+.mode-tile-name {
+    -fx-font-size: 1.45em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+.mode-tile-desc {
+    -fx-font-size: 1.02em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.mode-tile-note {
+    -fx-font-size: 0.92em;
+    -fx-text-fill: -neo-accent;
+}
+
+/* La mala noticia de la sala: tu operador no te deja hospedar (CGNAT). Va en
+   ambar y NO en rojo: no es un fallo ni algo que hayas roto, es una condicion
+   de tu linea. En acento se leeria como una direccion mas, que es justo lo que
+   no es. */
+.lobby-warn {
+    -fx-font-size: 0.82em;
+    -fx-text-fill: -neo-warn;
+    -fx-font-weight: bold;
+}
+
+.lobby-warn-why {
+    -fx-font-size: 0.78em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+/* LA direccion que hay que pasar. En verde ("esto vale") y no en acento: en
+   acento van las otras direcciones, y entonces la buena seria una mas. */
+.lobby-best {
+    -fx-font-size: 0.85em;
+    -fx-text-fill: -neo-valid;
+    -fx-font-weight: bold;
+}
+
+/* ---------- lista de puzzles ---------- */
+
+.puzzle-row {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 6;
+    -fx-border-color: transparent;
+    -fx-border-radius: 6;
+    -fx-border-width: 2;
+    -fx-cursor: hand;
+}
+
+.puzzle-row:hover {
+    -fx-border-color: rgba(74,155,224,0.5);
+}
+
+.puzzle-row:selected {
+    -fx-background-color: -neo-panel-hi;
+    -fx-border-color: -neo-accent;
+}
+
+
+/* ---------- pregunta con la carta delante (disparos) ---------- */
+
+.card-prompt-question {
+    -fx-font-size: 1.1em;
+    -fx-text-fill: -neo-text;
+}
+
+/* Botones grandes: es una decision de partida, no un aceptar de tramite. */
+.card-prompt-option {
+    -fx-font-size: 1.05em;
+    -fx-padding: 12 22 12 22;
+    -fx-alignment: center;
+}
+
+/* "Disparado por": de que carta habla el disparo cuyo modo eliges (ver
+   TriggerSubjectRow). El rival va en el color de "a quien apunta" del stack
+   pero del tamanyo del nombre: con dos fichas iguales atacando es lo UNICO que
+   las distingue, y en letra de pie de pagina no se lee. */
+.trigger-subject-name {
+    -fx-font-size: 1.05em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+.trigger-subject-attacking {
+    -fx-font-size: 1.05em;
+    -fx-text-fill: -neo-accent;
+}
+
+
+/* ---------- visor de zonas (cementerio, exilio, mando, biblioteca) ---------- */
+
+/* Lo que no puedes ver se cuenta, no se ensenya: ocultarlo del todo mentiria
+   sobre el tamano de la zona. */
+.zone-hidden {
+    -fx-background-color: linear-gradient(to bottom, #232B36 0%, #161C24 100%);
+    -fx-background-radius: 5;
+    -fx-border-color: #3A4552;
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-size: 0.82em;
+    -fx-alignment: center;
+    -fx-text-alignment: center;
+}
+
+/* ---------- deck builder ---------- */
+
+.text-input {
+    -fx-background-color: -neo-table-deep;
+    -fx-text-fill: -neo-text;
+    -fx-prompt-text-fill: -neo-text-dim;
+    -fx-border-color: -neo-line;
+    -fx-border-width: 1;
+    -fx-border-radius: 4;
+    -fx-background-radius: 4;
+    -fx-padding: 6 10 6 10;
+    -fx-font-size: 0.95em;
+    -fx-highlight-fill: -neo-accent;
+}
+
+.text-input:focused { -fx-border-color: -neo-accent; }
+
+/* TextArea pinta su propio fondo en .content, aparte del control */
+.text-input .content {
+    -fx-background-color: -neo-table-deep;
+}
+
+.deck-panel {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 6;
+    -fx-border-color: -neo-line;
+    -fx-border-width: 1;
+    -fx-border-radius: 6;
+}
+
+.deck-group {
+    -fx-font-size: 0.85em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text-dim;
+    -fx-padding: 10 0 3 0;
+}
+
+.deck-row {
+    -fx-background-radius: 4;
+}
+
+.deck-row:hover {
+    -fx-background-color: -neo-panel-hi;
+    -fx-cursor: hand;
+}
+
+.deck-row-qty  { -fx-text-fill: -neo-text-dim; -fx-font-size: 0.9em; }
+.deck-row-name { -fx-text-fill: -neo-text;     -fx-font-size: 0.92em; }
+.deck-row-cost { -fx-text-fill: -neo-text-dim; -fx-font-size: 0.85em; }
+
+/* El aviso de mazo no legal: ambar, es una tarea pendiente, no un error */
+.home-summary:invalid { -fx-text-fill: -neo-warn; }
+
+.catalogue-tile { -fx-cursor: hand; }
+
+.catalogue-count {
+    -fx-background-color: -neo-accent;
+    -fx-text-fill: white;
+    -fx-font-size: 0.8em;
+    -fx-font-weight: bold;
+    -fx-background-radius: 9;
+    -fx-padding: 1 6 1 6;
+}
+
+/* Los filtros de color.
+   Van DESPUES de .segment y con dos clases a proposito: .segment define su
+   propio fondo mas abajo en esta hoja y, a igualdad de especificidad, ganaria.
+   Apagados se ven como un pip con el borde de su color; encendidos, el color
+   pleno. Es como los pinta Scryfall y se lee de un vistazo cual esta puesto. */
+.colour-filter {
+    -fx-min-width: 30;
+    -fx-font-weight: bold;
+    -fx-padding: 5 8 5 8;
+}
+
+.colour-filter.mana-w { -fx-text-fill: #F5F0DC; -fx-border-color: #F5F0DC; }
+.colour-filter.mana-u { -fx-text-fill: #7FB4DC; -fx-border-color: #7FB4DC; }
+.colour-filter.mana-b { -fx-text-fill: #A79EA0; -fx-border-color: #A79EA0; }
+.colour-filter.mana-r { -fx-text-fill: #E28B75; -fx-border-color: #E28B75; }
+.colour-filter.mana-g { -fx-text-fill: #7FBE94; -fx-border-color: #7FBE94; }
+.colour-filter.mana-c { -fx-background-color: transparent; -fx-text-fill: #BDC5CC; -fx-border-color: #BDC5CC; }
+.colour-filter.mana-m { -fx-text-fill: #E0C46C; -fx-border-color: #E0C46C; }
+
+/* Marcado por clase y no por :selected, porque la pantalla de Ascenso
+   reconstruye los botones en cada pulsacion y el pseudo-estado se perderia. */
+.colour-filter.mana-w.colour-filter-on { -fx-background-color: #F5F0DC; -fx-text-fill: #12161C; }
+.colour-filter.mana-u.colour-filter-on { -fx-background-color: #7FB4DC; -fx-text-fill: #12161C; }
+.colour-filter.mana-b.colour-filter-on { -fx-background-color: #A79EA0; -fx-text-fill: #12161C; }
+.colour-filter.mana-r.colour-filter-on { -fx-background-color: #E28B75; -fx-text-fill: #12161C; }
+.colour-filter.mana-g.colour-filter-on { -fx-background-color: #7FBE94; -fx-text-fill: #12161C; }
+
+.colour-filter.mana-w:selected { -fx-background-color: #F5F0DC; -fx-text-fill: #12161C; }
+.colour-filter.mana-u:selected { -fx-background-color: #7FB4DC; -fx-text-fill: #12161C; }
+.colour-filter.mana-b:selected { -fx-background-color: #A79EA0; -fx-text-fill: #12161C; }
+.colour-filter.mana-r:selected { -fx-background-color: #E28B75; -fx-text-fill: #12161C; }
+.colour-filter.mana-g:selected { -fx-background-color: #7FBE94; -fx-text-fill: #12161C; }
+.colour-filter.mana-c:selected { -fx-background-color: #BDC5CC; -fx-text-fill: #12161C; }
+.colour-filter.mana-m:selected { -fx-background-color: #E0C46C; -fx-text-fill: #12161C; }
+
+.mana-curve {
+    -fx-background-color: -neo-table-deep;
+    -fx-background-radius: 5;
+}
+
+.curve-bar {
+    -fx-background-color: -neo-accent;
+    -fx-background-radius: 2 2 0 0;
+}
+
+.curve-bar:empty { -fx-background-color: -neo-line; }
+
+.curve-value { -fx-font-size: 0.72em; -fx-text-fill: -neo-text-dim; }
+.curve-label { -fx-font-size: 0.72em; -fx-text-fill: -neo-text-dim; }
+
+/* ---------- el mazo en numeros ---------- */
+
+.deck-stats {
+    -fx-background-color: -neo-table-deep;
+    -fx-background-radius: 5;
+}
+
+/* Una pastilla por color con cuantos simbolos pide el mazo. Los colores son los
+   canonicos de Magic, los mismos que los pips de la mesa: un mazo se reconoce
+   por su franja de color antes de leer ningun numero.
+   Van encadenadas (.colour-pip.mana-x) y DESPUES de .mana-x para que ganen sin
+   depender del orden del fichero. */
+.colour-pip {
+    -fx-background-radius: 4;
+    -fx-border-radius: 4;
+    -fx-border-width: 1;
+    -fx-border-color: rgba(0,0,0,0.35);
+}
+
+.colour-pip .pip-count {
+    -fx-font-size: 0.86em;
+    -fx-font-weight: bold;
+    -fx-text-fill: #14171C;
+}
+
+.colour-pip .pip-share {
+    -fx-font-size: 0.62em;
+    -fx-text-fill: rgba(20,23,28,0.75);
+}
+
+.colour-pip.mana-w { -fx-background-color: #F5F0DC; }
+.colour-pip.mana-u { -fx-background-color: #9FD4F0; }
+.colour-pip.mana-b { -fx-background-color: #B3AAA6; }
+.colour-pip.mana-r { -fx-background-color: #F0A08C; }
+.colour-pip.mana-g { -fx-background-color: #9FD1A5; }
+
+/* ---------- filtros finos del catalogo ---------- */
+
+/* Mas estrechos que un segmento normal: son cuatro rarezas y ocho costes en la
+   misma fila, y con el relleno de serie no cabrian. */
+.rarity-filter, .cmc-filter {
+    -fx-padding: 4 9 4 9;
+    -fx-font-size: 0.82em;
+}
+
+/* La rareza se reconoce por su color de siempre, no por la letra. */
+.rarity-filter.rarity-c { -fx-text-fill: #C9D2DE; }
+.rarity-filter.rarity-i { -fx-text-fill: #A9B7C6; }
+.rarity-filter.rarity-r { -fx-text-fill: #D9B45A; }
+.rarity-filter.rarity-m { -fx-text-fill: #D96A3C; }
+
+/* Encendidas ganan al color de la letra: el estado manda sobre el adorno. */
+.rarity-filter:selected { -fx-text-fill: #0B0E13; }
+
+/* Los +/- de una fila del mazo: solo aparecen al pasar el raton */
+.stepper {
+    -fx-background-color: -neo-panel-hi;
+    -fx-text-fill: -neo-text;
+    -fx-font-size: 0.8em;
+    -fx-font-weight: bold;
+    -fx-min-width: 20;
+    -fx-pref-width: 20;
+    -fx-padding: 0 0 1 0;
+    -fx-background-radius: 3;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 3;
+    -fx-border-width: 1;
+    -fx-cursor: hand;
+}
+
+.stepper:hover {
+    -fx-background-color: -neo-accent;
+    -fx-text-fill: #0B0E13;
+    -fx-border-color: -neo-accent;
+}
+
+/* Una carta del mazo que ya no cabe: se marca, no se quita sola */
+.deck-row:invalid {
+    -fx-background-color: rgba(217, 83, 79, 0.18);
+    -fx-border-color: rgba(217, 83, 79, 0.55);
+    -fx-border-width: 0 0 0 3;
+}
+
+.deck-row:invalid .deck-row-name { -fx-text-fill: -neo-danger; }
+
+/* El menu de click derecho sobre una carta del mazo */
+.card-menu {
+    -fx-background-color: -neo-panel;
+    -fx-border-color: -neo-line;
+    -fx-border-width: 1;
+    -fx-background-radius: 5;
+    -fx-border-radius: 5;
+}
+
+.card-menu .menu-item .label { -fx-text-fill: -neo-text; -fx-font-size: 0.9em; }
+.card-menu .menu-item:focused { -fx-background-color: -neo-accent; }
+.card-menu .menu-item:focused .label { -fx-text-fill: #0B0E13; }
+.card-menu .menu-item:disabled .label { -fx-text-fill: -neo-text-dim; }
+
+.printing-label {
+    -fx-font-size: 0.75em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+/* Texto de las opciones del menu de carta */
+.ability-item-name {
+    -fx-text-fill: -neo-text;
+    -fx-font-size: 0.95em;
+    -fx-font-weight: bold;
+}
+
+.ability-item-note {
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-size: 0.8em;
+}
+
+.ability-item:disabled .ability-item-name { -fx-text-fill: -neo-text-dim; }
+
+.deck-group-cont { -fx-opacity: 0.7; }
+
+/* El aviso grande del centro de la mesa (lo que Arena pone en mitad) */
+.prompt-banner {
+    -fx-background-color: rgba(27, 33, 42, 0.96);
+    -fx-background-radius: 10;
+    -fx-border-color: -neo-accent;
+    -fx-border-width: 2;
+    -fx-border-radius: 10;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.75), 22, 0.2, 0, 6);
+}
+
+.prompt-banner-text {
+    -fx-font-size: 1.25em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+/* La esquina para agrandarla (itch.io, 04-10-2026) */
+.prompt-banner-grip {
+    -fx-background-color: linear-gradient(to bottom right, transparent 55%, -neo-accent 55%);
+    -fx-background-radius: 0 0 8 0;
+    -fx-opacity: 0.55;
+}
+
+.prompt-banner-grip:hover {
+    -fx-opacity: 1;
+}
+
+.prompt-banner-btn {
+    -fx-font-size: 1.05em;
+    -fx-padding: 9 26 9 26;
+}
+
+/* Lo que te pasa en el turno del rival, arriba a la derecha y sin parar */
+.notice-card {
+    -fx-background-color: rgba(27, 33, 42, 0.94);
+    -fx-background-radius: 6;
+    -fx-border-color: transparent transparent transparent -neo-warn;
+    -fx-border-width: 0 0 0 3;
+    -fx-padding: 8 10 8 12;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.6), 14, 0.15, 0, 3);
+}
+
+.notice-card:hover {
+    -fx-background-color: rgba(36, 44, 56, 0.97);
+}
+
+.notice-text {
+    -fx-font-size: 0.95em;
+    -fx-text-fill: -neo-text;
+}
+
+.notice-close {
+    -fx-font-size: 1.1em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+/* "● REC" en la mesa mientras se graba una macro */
+.macro-badge {
+    -fx-font-size: 0.9em;
+    -fx-font-weight: bold;
+    -fx-text-fill: #FFFFFF;
+    -fx-background-color: rgba(217, 83, 79, 0.92);
+    -fx-background-radius: 10;
+    -fx-padding: 3 10;
+}
+
+/* "ELIGIENDO COMANDANTE", al lado del titulo del catalogo mientras dura el modo */
+.picking-commander-badge {
+    -fx-font-size: 0.8em;
+    -fx-font-weight: bold;
+    -fx-text-fill: #171b20;
+    -fx-background-color: -neo-warn;
+    -fx-background-radius: 4;
+    -fx-padding: 2 9;
+}
+
+/* "3 / 60 · rueda para pasar de carta", debajo de la carta ampliada */
+/* "Equipar {1}" bajo un equipo ampliado: es una ACCION, asi que se ve como el
+   boton grande de la barra y no como la letra pequenya de al lado. */
+.zoom-equip {
+    -fx-font-size: 1.15em;
+    -fx-padding: 9 28 9 28;
+    -fx-min-width: 180px;
+}
+
+.zoom-browse-hint {
+    -fx-font-size: 0.9em;
+    -fx-text-fill: -neo-text-dim;
+    -fx-background-color: rgba(18, 22, 28, 0.8);
+    -fx-background-radius: 10;
+    -fx-padding: 3 12;
+}
+
+/* El registro de partida: que ha pasado */
+.log-line {
+    -fx-font-size: 0.78em;
+    -fx-text-fill: -neo-text-dim;
+    -fx-padding: 1 0 1 0;
+}
+
+.log-turn {
+    -fx-text-fill: -neo-accent;
+    -fx-font-weight: bold;
+    -fx-padding: 6 0 2 0;
+}
+
+.log-damage { -fx-text-fill: -neo-danger; }
+.log-spell  { -fx-text-fill: -neo-text; }
+.log-zone   { -fx-text-fill: -neo-warn; }
+
+/* El boton que abre el registro: discreto, en una esquina */
+.log-button {
+    -fx-background-color: rgba(27, 33, 42, 0.85);
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-size: 0.78em;
+    -fx-padding: 4 12 4 12;
+    -fx-background-radius: 4;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 4;
+    -fx-border-width: 1;
+    -fx-cursor: hand;
+    -fx-opacity: 0.65;
+}
+
+.log-button:hover { -fx-opacity: 1; -fx-text-fill: -neo-text; }
+
+/* Con novedades sin leer llama la atencion, pero sin gritar */
+.log-button:unread {
+    -fx-opacity: 1;
+    -fx-text-fill: -neo-warn;
+    -fx-border-color: -neo-warn;
+}
+
+/* Grabar / repetir macro, encima del registro. Grabando, en rojo: como el
+   "● REC", tiene que verse que todo lo que haces se esta apuntando. */
+.macro-button:recording {
+    -fx-opacity: 1;
+    -fx-text-fill: #FFFFFF;
+    -fx-background-color: rgba(217, 83, 79, 0.92);
+    -fx-border-color: transparent;
+}
+
+/* El registro completo */
+.game-log .log-line {
+    -fx-font-size: 0.82em;
+    -fx-text-fill: -neo-text-dim;
+    -fx-padding: 1 0 1 0;
+}
+
+/* Lo tuyo, en negrita: en una partida a cuatro es lo unico que buscas */
+.game-log .log-mine {
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+/* Las lineas con cartas (Discord, 17-10-2026): la miniatura delante y los
+   nombres subrayados. Un TextFlow no tiene -fx-text-fill: sus Text llevan
+   -fx-fill, asi que aqui se repiten los colores de .log-line uno a uno. */
+.game-log .log-row {
+    -fx-padding: 1 0 1 0;
+}
+.game-log .log-flow > .log-text {
+    -fx-font-size: 0.78em;
+    -fx-fill: -neo-text-dim;
+}
+.game-log .log-flow.log-damage > .log-text { -fx-fill: -neo-danger; }
+.game-log .log-flow.log-spell > .log-text  { -fx-fill: -neo-text; }
+.game-log .log-flow.log-zone > .log-text   { -fx-fill: -neo-warn; }
+.game-log .log-flow.log-mine > .log-text {
+    -fx-font-weight: bold;
+    -fx-fill: -neo-text;
+}
+.game-log .log-flow > .log-text.log-card {
+    -fx-underline: true;
+    -fx-fill: -neo-accent;
+}
+.game-log .log-flow > .log-text.log-card:hover {
+    -fx-fill: -neo-text;
+}
+/* La carta al pasar el raton: solo la imagen, sin la caja del tooltip. */
+.log-card-tip {
+    -fx-background-color: transparent;
+    -fx-padding: 0;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.6), 18, 0.2, 0, 4);
+}
+
+.game-log .log-turn {
+    -fx-text-fill: -neo-accent;
+    -fx-font-weight: bold;
+    -fx-font-size: 0.92em;
+    -fx-padding: 10 0 3 0;
+}
+
+.game-log .log-damage { -fx-text-fill: -neo-danger; }
+.game-log .log-zone   { -fx-text-fill: -neo-warn; }
+
+/* Paginador: si algo se recorta, tiene que haber forma de llegar al resto */
+.pager .segment {
+    -fx-padding: 3 10 3 10;
+    -fx-font-size: 1em;
+}
+
+.pager .segment:disabled { -fx-opacity: 0.35; }
+
+
+/* ---------- personalizacion ---------- */
+
+/* Una casilla de la rejilla: avatar, tapete o funda. */
+.look-tile {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 6;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 6;
+    -fx-border-width: 1;
+    -fx-padding: 3;
+}
+
+.look-tile:hover {
+    -fx-border-color: -neo-text;
+}
+
+/* La elegida. Borde grueso y en acento: con ciento veintiseis casillas hay que
+   poder encontrar la tuya sin buscarla. */
+.look-tile:picked {
+    -fx-border-color: -neo-accent;
+    -fx-border-width: 2.5;
+    -fx-background-color: -neo-panel-hi;
+}
+
+/* El retrato con foto: sin el gris de debajo asomando por las esquinas. */
+.avatar-image {
+    -fx-stroke: -neo-line;
+    -fx-stroke-width: 1.5;
+}
+
+
+/* ---------- por que no se puede ---------- */
+
+/* La explicacion del motor, justo debajo del boton que acabas de pulsar.
+   En ambar, que es el color de "atencion, decision pendiente" (seccion 6). */
+.action-warning {
+    -fx-background-color: rgba(224,166,60,0.14);
+    -fx-background-radius: 5;
+    -fx-border-color: -neo-warn;
+    -fx-border-radius: 5;
+    -fx-border-width: 0 0 0 3;
+    -fx-padding: 7 9 7 9;
+    -fx-text-fill: -neo-warn;
+    -fx-font-size: 0.82em;
+}
+
+
+/* ---------- elegir aventura ---------- */
+
+.quest-save-row {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 8;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 8;
+    -fx-border-width: 1;
+    -fx-padding: 12 16 12 16;
+}
+
+.quest-save-row:hover {
+    -fx-border-color: -neo-accent;
+    -fx-background-color: -neo-panel-hi;
+}
+
+/* Borrar no tiene vuelta atras: el boton lo dice antes de pulsarlo, pero
+   discreto — no puede competir con el de jugar, que es lo que se viene a
+   hacer aqui. */
+.btn-danger {
+    -fx-background-color: transparent;
+    -fx-background-radius: 5;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+    -fx-text-fill: -neo-text-dim;
+    -fx-padding: 6 12 6 12;
+    -fx-cursor: hand;
+}
+
+.btn-danger:hover {
+    -fx-border-color: -neo-danger;
+    -fx-text-fill: -neo-danger;
+}
+
+
+/* ---------- dano de comandante y detalle del jugador ---------- */
+
+/* A 21 de un mismo comandante se pierde. El numero va SIEMPRE a la vista
+   porque es lo que decide si puedes quedarte quieto un turno mas. */
+.commander-damage {
+    -fx-background-color: rgba(141,154,171,0.18);
+    -fx-background-radius: 4;
+    -fx-padding: 1 7 1 7;
+    -fx-font-size: 0.66em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.commander-damage:warn {
+    -fx-background-color: rgba(224,166,60,0.20);
+    -fx-text-fill: -neo-warn;
+}
+
+/* Rojo desde 15: a un golpe de comandante de morirte. */
+.commander-damage:danger {
+    -fx-background-color: rgba(217,83,79,0.24);
+    -fx-text-fill: -neo-danger;
+}
+
+/* El estado completo, al pasar el raton por la barra. Lo escribe el motor. */
+.player-details {
+    -fx-background-color: -neo-panel-hi;
+    -fx-background-radius: 6;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 6;
+    -fx-border-width: 1;
+    -fx-text-fill: -neo-text;
+    -fx-font-size: 0.82em;
+    -fx-padding: 10 14 10 14;
+    /* El ancho maximo lo pone TableScreen (UiScale.px): una regla de ancho
+       aqui ganaria al de Java y en 2K no creceria con la letra. */
+}
+
+/* =====================================================================
+   Logros  (seccion 8a)
+   Lo conseguido tiene color; lo que falta se apaga. El estado se VE.
+   ===================================================================== */
+
+.achv-tile {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 8;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 8;
+    -fx-border-width: 1;
+    -fx-opacity: 0.62;
+}
+
+/* Conseguido: sale del gris y se le da un borde con luz. */
+.achv-tile:earned {
+    -fx-background-color: -neo-panel-hi;
+    -fx-border-color: rgba(74,155,224,0.45);
+    -fx-opacity: 1.0;
+}
+
+.achv-name {
+    -fx-font-size: 1.0em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+.achv-desc {
+    -fx-font-size: 0.84em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.achv-progress {
+    -fx-font-size: 0.78em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+/* La pastilla del grado, con los colores de rareza de Magic. */
+.achv-tier {
+    -fx-background-radius: 4;
+    -fx-padding: 1 8 1 8;
+    -fx-font-size: 0.72em;
+    -fx-font-weight: bold;
+    -fx-text-fill: #0B0E13;
+}
+
+.achv-tier.achv-tier-common   { -fx-background-color: #B9C2CE; }
+.achv-tier.achv-tier-uncommon { -fx-background-color: #9FB3C8; }
+.achv-tier.achv-tier-rare     { -fx-background-color: #D9B44A; }
+.achv-tier.achv-tier-mythic   { -fx-background-color: #E06A2C; }
+.achv-tier.achv-tier-special  { -fx-background-color: -neo-accent; }
+
+/* Letra mas grande en toda la pantalla (pedido en GitHub el 25-09-2026: "a
+   lot of space actually overall, the default font size is quite small").
+   Con dos clases para ganar a las compartidas SOLO aqui: .segment, .caption y
+   .home-subtitle salen en muchas pantallas mas — y las fichas .achv-* las
+   reutiliza tambien NetDecksScreen. */
+.achievements .achv-name     { -fx-font-size: 1.3em; }
+.achievements .achv-desc     { -fx-font-size: 1.1em; }
+.achievements .achv-progress { -fx-font-size: 1.0em; }
+.achievements .achv-tier     { -fx-font-size: 0.9em; }
+.achievements .achv-tabs .segment { -fx-font-size: 1.0em; -fx-padding: 7 16 7 16; }
+.achievements .caption      { -fx-font-size: 0.9em; }
+.achievements .home-subtitle { -fx-font-size: 1.02em; }
+.achievements .neo-check    { -fx-font-size: 1.0em; }
+.achievements .text-input   { -fx-font-size: 1.0em; }
+
+/* Casilla de filtro generica (la del panel de la tienda es la misma idea). */
+.neo-check {
+    -fx-text-fill: -neo-text;
+}
+
+.neo-check .box {
+    -fx-background-color: -neo-panel;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 3;
+}
+
+.neo-check:selected .mark {
+    -fx-background-color: -neo-accent;
+}
+
+/* La placa de un trofeo en la vitrina de la Quest (QuestTrophyCase): negra
+   y con letra clara, como la placa de la vitrina de logros de Forge. */
+.trophy-plate {
+    -fx-background-color: #0B0E12;
+    -fx-background-radius: 4;
+    -fx-border-color: #6B5A35;
+    -fx-border-radius: 4;
+    -fx-padding: 3 6 3 6;
+    -fx-text-fill: -neo-text;
+    -fx-font-size: 0.85em;
+}
+
+/* Una casilla de numero que ademas es un boton (la coleccion de la aventura). */
+.stat-tile-link {
+    -fx-cursor: hand;
+}
+
+.stat-tile-link:hover {
+    -fx-background-color: -neo-panel-hi;
+    -fx-border-color: -neo-accent;
+}
+
+/* ---------------------------------------------------------------
+   La ficha de estado de la carta ampliada.
+
+   La imagen de una carta ensenya lo IMPRESO. Todo lo que la partida le haya
+   hecho encima -- contadores, danyo, un aura que le cambia la P/T -- no esta
+   ahi, y es justo lo que hace falta para decidir. Esto lo pone al lado.
+   --------------------------------------------------------------- */
+
+.zoom-state {
+    -fx-background-color: rgba(16,20,27,0.94);
+    -fx-background-radius: 8;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 8;
+    -fx-border-width: 1;
+    -fx-padding: 14 16 16 16;
+}
+
+.zoom-pt {
+    -fx-font-size: 30px;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+.zoom-pt:buffed {
+    -fx-text-fill: #7CE29A;
+}
+
+.zoom-pt:weakened {
+    -fx-text-fill: #FF9A96;
+}
+
+.zoom-head {
+    -fx-font-size: 12px;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.zoom-line {
+    -fx-font-size: 13px;
+    -fx-text-fill: -neo-text;
+}
+
+/* La expansion de la impresion, arriba a la derecha de la ficha (CardZoom.editionBlock). */
+.zoom-edition {
+    -fx-font-size: 12px;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.zoom-edition-code {
+    -fx-font-weight: bold;
+}
+
+.zoom-dim {
+    -fx-text-fill: -neo-text-dim;
+}
+
+.zoom-damage {
+    -fx-text-fill: -neo-danger;
+    -fx-font-weight: bold;
+}
+
+/* "Preparada: clica la criatura para lanzarlo". Es una instruccion que se
+   puede seguir ahora mismo, asi que va en acento como todo lo accionable. */
+.zoom-ready {
+    -fx-text-fill: -neo-accent;
+    -fx-font-weight: bold;
+}
+
+.zoom-counter {
+    -fx-font-size: 13px;
+    -fx-font-weight: bold;
+    -fx-padding: 2 8 2 8;
+    -fx-background-radius: 5;
+    -fx-border-radius: 5;
+    -fx-border-width: 1;
+    -fx-border-color: rgba(0,0,0,0.55);
+}
+
+/* La mesa acercada: el aviso de que no estas viendola entera, y por donde se
+   vuelve. Sin esto, acercarse sin querer no tiene marcha atras. */
+.zoom-badge {
+    -fx-background-color: rgba(16,20,27,0.9);
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-size: 12px;
+    -fx-padding: 4 10 4 10;
+    -fx-background-radius: 12;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 12;
+    -fx-border-width: 1;
+    -fx-cursor: hand;
+}
+
+.zoom-badge:hover {
+    -fx-text-fill: -neo-text;
+    -fx-border-color: -neo-accent;
+}
+
+/* "Ver la mesa" encima de un dialogo de la partida, y "Volver a la eleccion"
+   mientras se mira. Mirando tiene que destacar: es lo unico que dice que hay
+   una pregunta pendiente. */
+.peek-pill {
+    -fx-background-color: rgba(16,20,27,0.92);
+    -fx-text-fill: -neo-text;
+    -fx-font-size: 13px;
+    -fx-padding: 5 14 5 14;
+    -fx-background-radius: 14;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 14;
+    -fx-border-width: 1;
+    -fx-cursor: hand;
+}
+
+.peek-pill:hover {
+    -fx-border-color: -neo-accent;
+}
+
+.peek-pill:peeking {
+    -fx-background-color: -neo-accent;
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-border-color: transparent;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.8), 14, 0.3, 0, 3);
+}
+
+/* ---------- palabras clave, con su explicacion ---------- */
+
+/* Tienen que PARECER un boton: es lo unico que invita a clicarlas, y quien las
+   necesita es justo quien no sabe todavia que se pueden clicar. */
+/* La nota de "esto se aplica en la siguiente partida". En ambar, que en esta
+   interfaz significa "atencion, decision pendiente", y no en rojo: no ha ido
+   nada mal, solo hace falta saberlo. */
+.settings-note {
+    -fx-font-size: 0.82em;
+    -fx-text-fill: -neo-warn;
+    -fx-padding: 0 0 4 0;
+}
+
+.keyword-chip {
+    -fx-background-color: rgba(74,155,224,0.14);
+    -fx-border-color: rgba(74,155,224,0.55);
+    -fx-border-radius: 4;
+    -fx-background-radius: 4;
+    -fx-border-width: 1;
+    -fx-padding: 2 7 3 7;
+    -fx-font-size: 0.82em;
+    -fx-text-fill: -neo-text;
+}
+
+.keyword-chip:hover {
+    -fx-background-color: rgba(74,155,224,0.28);
+    -fx-border-color: -neo-accent;
+}
+
+/* La que se esta leyendo ahora. */
+.keyword-chip:on {
+    -fx-background-color: -neo-accent;
+    -fx-border-color: -neo-accent;
+    -fx-text-fill: #0F141A;
+    -fx-font-weight: bold;
+}
+
+/* La explicacion oficial del motor. Sobre fondo propio para que se lea como
+   una nota al pie y no como parte de la ficha de estado. */
+.keyword-text {
+    -fx-font-size: 0.84em;
+    -fx-text-fill: -neo-text;
+    -fx-background-color: rgba(11,14,19,0.55);
+    -fx-background-radius: 5;
+    -fx-padding: 6 8 7 8;
+}
+
+/* "Scryfall nos ha limitado, vuelve en Ns" — puramente informativo, no se
+   clica, asi que sin cursor de mano ni estado :hover. */
+.cooldown-badge {
+    -fx-background-color: rgba(16,20,27,0.9);
+    -fx-text-fill: -neo-warn;
+    -fx-font-size: 12px;
+    -fx-padding: 4 10 4 10;
+    -fx-background-radius: 12;
+    -fx-border-color: -neo-warn;
+    -fx-border-radius: 12;
+    -fx-border-width: 1;
+}
+
+/* =====================================================================
+   Tutorial: la banda de arriba y el cerco de "mira aqui"
+   ===================================================================== */
+
+/* La banda ocupa sitio de verdad en el reparto de alto de la mesa: no
+   flota encima. Casi todo lo que el tutorial pide se contesta clicando
+   cartas, y un panel por delante haria imposible el propio paso. */
+.coach {
+    -fx-background-color: -neo-panel-hi;
+    -fx-background-radius: 0 0 10 10;
+    -fx-border-color: -neo-accent;
+    -fx-border-width: 0 0 2 0;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.55), 18, 0.2, 0, 4);
+}
+
+.coach-counter {
+    -fx-font-size: 0.78em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-accent;
+}
+
+.coach-title {
+    -fx-font-size: 1.15em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+.coach-body {
+    -fx-font-size: 0.95em;
+    -fx-text-fill: -neo-text;
+}
+
+/* La linea de "estoy esperando a que lo hagas". En un paso de accion es
+   lo unico que hay donde estaria el boton, y por eso se lee ahi. */
+.coach-hint {
+    -fx-font-size: 0.85em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+/* Encadenada a proposito: entre dos reglas de la misma especificidad
+   JavaFX no garantiza que gane la ultima del fichero. */
+.coach-hint.coach-done {
+    -fx-text-fill: -neo-valid;
+    -fx-font-weight: bold;
+}
+
+.coach-small {
+    -fx-font-size: 0.82em;
+    -fx-padding: 4 10 4 10;
+}
+
+/* El cerco que rodea la parte de la que se esta hablando. Solo borde: lo
+   que hay dentro casi siempre hay que clicarlo, asi que ni se tinta ni se
+   oscurece nada. */
+.coach-spot {
+    -fx-stroke: -neo-warn;
+    -fx-stroke-width: 2.5;
+    -fx-stroke-dash-array: 9 6;
+    -fx-effect: dropshadow(gaussian, rgba(224,166,60,0.55), 14, 0.4, 0, 0);
+}
+
+/* ---------- reparto generico (mana de una tierra de filtro, escudos) ---------- */
+
+.amount-value {
+    -fx-font-size: 1.15em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+    -fx-background-color: -neo-panel-hi;
+    -fx-background-radius: 4;
+    -fx-padding: 3 12 3 12;
+    -fx-min-width: 34px;
+    -fx-alignment: center;
+}
+
+/* El numero del reparto, que se escribe (AmountDialog): un TextField con el
+   aspecto de la pastilla de siempre, y el borde de foco para que se vea que
+   se puede escribir en el. */
+.amount-value-field {
+    -fx-pref-width: 4.2em;
+    -fx-max-width: 4.2em;
+    -fx-padding: 3 6 3 6;
+    -fx-background-insets: 0;
+    -fx-highlight-fill: -neo-accent;
+    -fx-highlight-text-fill: #10141A;
+    -fx-cursor: text;
+}
+.amount-value-field:focused {
+    -fx-border-color: -neo-accent;
+    -fx-border-radius: 4;
+}
+
+.amount-step {
+    -fx-background-color: -neo-panel-hi;
+    -fx-background-radius: 4;
+    -fx-text-fill: -neo-text;
+    -fx-font-weight: bold;
+    -fx-font-size: 1.0em;
+    -fx-padding: 1 9 1 9;
+    -fx-cursor: hand;
+}
+
+.amount-step:hover { -fx-background-color: -neo-accent; -fx-text-fill: #10141A; }
+.amount-step:disabled { -fx-opacity: 0.35; }
+
+.amount-pip {
+    -fx-min-width: 54px;
+    -fx-min-height: 54px;
+    -fx-max-width: 54px;
+    -fx-max-height: 54px;
+    -fx-background-radius: 27px;
+    -fx-font-size: 1.5em;
+    -fx-font-weight: bold;
+    -fx-text-fill: #10141A;
+    -fx-alignment: center;
+}
+
+/* "Para pagar {3}{G}{U}: ya viene repartido" (mana en cualquier combinacion). */
+.amount-note {
+    -fx-font-size: 0.95em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-valid;
+}
+
+.amount-entity {
+    -fx-background-color: linear-gradient(to bottom, #2A323D 0%, #1A2029 100%);
+    -fx-background-radius: 5;
+    -fx-border-color: -neo-accent;
+    -fx-border-radius: 5;
+    -fx-border-width: 2;
+    -fx-text-fill: -neo-text;
+    -fx-font-weight: bold;
+    -fx-alignment: center;
+    -fx-text-alignment: center;
+    -fx-wrap-text: true;
+}
+
+/* ---------- marcadores del motor sobre la carta ---------- */
+/* velocidad, nivel de Clase, nivel del Anillo, habitacion actual */
+
+.card-markers {
+    -fx-padding: 0 0 4 4;
+}
+
+.card-marker {
+    -fx-background-color: rgba(14, 18, 24, 0.88);
+    -fx-background-radius: 3;
+    -fx-border-color: -neo-warn;
+    -fx-border-radius: 3;
+    -fx-border-width: 1;
+    -fx-text-fill: -neo-text;
+    -fx-font-weight: bold;
+    -fx-padding: 1 5 1 5;
+}
+
+/* "Preparada": no es un dato mas, es "aqui hay algo que puedes hacer AHORA".
+   Por eso va en acento y no en el ambar de los marcadores informativos: es el
+   mismo color con el que se marca todo lo accionable, y la carta ademas lleva
+   el resaltado debil. Va DESPUES de .card-marker para ganarle el borde. */
+.card-marker-ready {
+    -fx-border-color: -neo-accent;
+    -fx-text-fill: -neo-accent;
+}
+
+/* ---------- resaltado DEBIL: "esto lo puedes usar" ---------- */
+/* Lo dice el motor (setWeaklySelectable).  El fuerte (:selectable) es una
+   obligacion y va en acento con halo; este es una sugerencia, asi que va mas
+   fino y sin halo — y pierde siempre contra el fuerte, que se define despues. */
+
+.card:actionable .card-border {
+    -fx-stroke: -neo-actionable;
+    -fx-stroke-width: 2.5;
+}
+
+/* Y las que el boton "Auto" iba a tapar: el plan del motor, antes de pulsarlo */
+.card:auto-tap .card-border {
+    -fx-stroke: -neo-warn;
+    -fx-stroke-width: 2.5;
+    -fx-effect: dropshadow(gaussian, -neo-warn, 10, 0.4, 0, 0);
+}
+
+/* Desplazada de fase: esta en la mesa pero es como si no estuviera */
+.card:phased {
+    -fx-opacity: 0.42;
+}
+
+.card:phased .card-border {
+    -fx-stroke: #8D9AAB;
+    -fx-stroke-width: 2;
+    -fx-stroke-dash-array: 4 4;
+}
+
+/* ---------- OBJETIVO de lo de arriba del stack ----------
+   Discord, 20-10-2026: "highlight its targets with a red outline". Rojo
+   discontinuo y con halo, para no confundirse con el rojo liso del atacante.
+   Va ANTES del selectable fuerte y del ya-elegido: si el motor te pide elegir,
+   eso manda (TableScreen.applyStackTargets). */
+.card:stack-target .card-border {
+    -fx-stroke: -neo-danger;
+    -fx-stroke-width: 4;
+    -fx-stroke-dash-array: 10 5;
+    -fx-effect: dropshadow(gaussian, rgba(217,83,79,0.9), 18, 0.55, 0, 0);
+}
+
+/* El fuerte manda: va DESPUES para ganar a igual especificidad */
+.card:selectable .card-border {
+    -fx-stroke: -neo-accent;
+    -fx-stroke-width: 3;
+    -fx-effect: dropshadow(gaussian, -neo-accent, 14, 0.5, 0, 0);
+}
+
+/* ---------- YA LA HAS ELEGIDO ----------
+   Y esto va DESPUES del selectable fuerte, que es justamente lo que faltaba.
+   Estaba definido mucho mas arriba y por tanto PERDIA contra el selectable de
+   aqui abajo: durante una eleccion todas las cartas validas son :selectable, y
+   al clicar una se le anyade :highlighted... que no se veia. O sea que clicar
+   una criatura para sacrificarla no cambiaba NADA en pantalla, y con tres que
+   sacrificar parecia que el juego se habia colgado. Reportado jugando.
+
+   Si algun dia hay que anyadir otro estado de borde, va DEBAJO de este o no se
+   vera. El orden de este fichero es la unica prioridad que hay a igual
+   especificidad. */
+.card:highlighted .card-border {
+    -fx-stroke: -neo-warn;
+    -fx-stroke-width: 4;
+    -fx-effect: dropshadow(gaussian, -neo-warn, 20, 0.75, 0, 0);
+}
+
+/* Y ademas se levanta un poco: el borde solo se puede confundir con los otros
+   resaltados, y lo que hace falta aqui es que se distinga de un vistazo cual
+   llevas elegidas. */
+.card:highlighted {
+    -fx-scale-x: 1.05;
+    -fx-scale-y: 1.05;
+}
+
+/* ---------- contadores del JUGADOR (veneno, energia, radiacion...) ---------- */
+
+.player-counter {
+    -fx-background-color: -neo-panel-hi;
+    -fx-background-radius: 3;
+    -fx-border-radius: 3;
+    -fx-border-width: 1;
+    -fx-border-color: -neo-line;
+    -fx-text-fill: -neo-text;
+    -fx-font-size: 0.78em;
+    -fx-font-weight: bold;
+    -fx-padding: 1 6 1 6;
+}
+
+.player-counter-poison {
+    -fx-border-color: #7FBE94;
+    -fx-text-fill: #9FD8B2;
+}
+
+/* Ya te mata: esto se mira igual que las vidas a cero */
+.player-counter-poison:lethal {
+    -fx-background-color: -neo-danger;
+    -fx-border-color: -neo-danger;
+    -fx-text-fill: #10141A;
+}
+
+/* La velocidad (Start your engines!). Maxima se marca aparte: no es "uno mas
+   que tres", es el escalon en el que se encienden las habilidades que la
+   miran, o sea que cambia lo que hacen las cartas. */
+.player-counter-speed {
+    -fx-border-color: #C9762F;
+    -fx-text-fill: #E8A263;
+}
+
+.player-counter-speed:max {
+    -fx-background-color: #C9762F;
+    -fx-border-color: #C9762F;
+    -fx-text-fill: #10141A;
+}
+
+/* ---------- de dia o de noche (Innistrad) ---------- */
+
+.day-night {
+    -fx-background-color: #E0A63C;
+    -fx-background-radius: 3;
+    -fx-text-fill: #10141A;
+    -fx-font-size: 0.74em;
+    -fx-font-weight: bold;
+    -fx-padding: 2 7 2 7;
+    -fx-alignment: center;
+}
+
+.day-night:night {
+    -fx-background-color: #3B4A73;
+    -fx-text-fill: #DCE4F5;
+}
+
+/* Lo que el motor CUENTA (moneda, dado, votacion) no es un aviso de error:
+   mismo sitio, otro color.  Va aqui abajo para ganar por orden. */
+.action-warning:info {
+    -fx-background-color: rgba(74,155,224,0.14);
+    -fx-border-color: -neo-accent;
+    -fx-text-fill: #A9CDEE;
+}
+
+/* Monarca, iniciativa: lo que un jugador "tiene" de la mesa. Dorado, que es
+   lo que se busca con la vista cuando se pregunta "quien es el monarca". */
+/* Lo que esta en la mesa de otro pero va con este jugador: una maldicion que
+   le encanta (morado de aura) o una batalla que protege (rojo de batalla). */
+.player-counter-curse {
+    -fx-border-color: #A77BD6;
+    -fx-text-fill: #C9A6F0;
+    -fx-cursor: hand;
+}
+
+.player-counter-battle {
+    -fx-border-color: #D06A5A;
+    -fx-text-fill: #F09A8C;
+    -fx-cursor: hand;
+}
+
+.player-counter-title {
+    -fx-background-color: #D9B44A;
+    -fx-border-color: #D9B44A;
+    -fx-text-fill: #10141A;
+}
+
+.player-counter-control {
+    -fx-background-color: -neo-warn;
+    -fx-border-color: -neo-warn;
+    -fx-text-fill: #10141A;
+}
+
+/* ---------- elegir una de las dos pilas (Fortune's Favor y compania) ---------- */
+
+.pile-panel {
+    -fx-background-color: -neo-panel;
+    -fx-background-radius: 7;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 7;
+    -fx-border-width: 2;
+}
+
+.pile-panel:hover {
+    -fx-border-color: -neo-text-dim;
+}
+
+.pile-panel:picked {
+    -fx-border-color: -neo-accent;
+    -fx-effect: dropshadow(gaussian, -neo-accent, 12, 0.4, 0, 0);
+}
+
+.pile-name {
+    -fx-font-size: 1.05em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+/* La pila que no ves: es toda la gracia de la carta, no un hueco vacio */
+.pile-hidden {
+    -fx-background-color: linear-gradient(to bottom, #2A323D 0%, #12161C 100%);
+    -fx-background-radius: 5;
+    -fx-border-color: -neo-text-dim;
+    -fx-border-radius: 5;
+    -fx-border-width: 2;
+    -fx-border-style: segments(6, 5);
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-size: 0.86em;
+    -fx-font-weight: bold;
+    -fx-alignment: center;
+    -fx-text-alignment: center;
+    -fx-wrap-text: true;
+}
+
+/* ---------- "ver el texto actual" en la carta ampliada ---------- */
+
+.zoom-live-toggle {
+    -fx-background-color: -neo-panel-hi;
+    -fx-background-radius: 4;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 4;
+    -fx-border-width: 1;
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-size: 0.8em;
+    -fx-padding: 4 8 4 8;
+    -fx-cursor: hand;
+}
+
+.zoom-live-toggle:hover {
+    -fx-text-fill: -neo-text;
+    -fx-border-color: -neo-accent;
+}
+
+.zoom-live-scroll {
+    -fx-background-color: transparent;
+    -fx-background: transparent;
+    -fx-padding: 0;
+}
+
+.zoom-live-scroll .viewport { -fx-background-color: transparent; }
+
+/* Lo que la carta hace AHORA, cuando ya no es lo que tiene impreso: texto
+   robado (Deadpool, Trading Card) o el de un aura que se lo cambia entero.
+   Mas grande que el resto de la ficha a proposito — es lo que hay que leer
+   con mas cuidado, precisamente porque no esta impreso en ningun sitio. */
+.zoom-live-text {
+    -fx-text-fill: -neo-text;
+    -fx-font-size: 1.05em;
+    -fx-line-spacing: 2px;
+}
+
+
+/* ---------- pantalla de carga (lo primero que se ve) ---------- */
+
+.loading-root {
+    -fx-background-color:
+        radial-gradient(center 50% 42%, radius 78%, -neo-table 0%, -neo-table-deep 100%);
+}
+
+.loading-stack {
+    -fx-spacing: 1.8em;
+}
+
+.loading-box {
+    -fx-spacing: 0.95em;
+}
+
+.loading-title {
+    -fx-font-size: 2.4em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text;
+}
+
+.loading-status {
+    -fx-font-size: 1.15em;
+    -fx-text-fill: -neo-text-dim;
+}
+
+.loading-bar {
+    -fx-pref-height: 8;
+    /* El ancho (360 en 1080p) lo pone LoadingScreen con UiScale.px. */
+    -fx-indeterminate-bar-animation-time: 1.4;
+}
+
+.loading-bar > .track {
+    -fx-background-color: rgba(255,255,255,0.10);
+    -fx-background-radius: 4;
+    -fx-background-insets: 0;
+}
+
+.loading-bar > .bar {
+    -fx-background-color: -neo-accent;
+    -fx-background-insets: 0;
+    -fx-background-radius: 4;
+}
+
+/* Sale sola a los seis segundos: en un arranque normal no llega a verse. */
+.loading-hint {
+    -fx-font-size: 0.98em;
+    -fx-text-fill: -neo-text-dim;
+    -fx-opacity: 0.85;
+}
+
+/* =====================================================================
+   ASCENSO - el mapa
+   Aqui se INVIERTE la regla de la mesa (fondo oscuro, cartas luminosas)
+   a proposito: en el mapa no hay cartas, hay iconos, y un icono sobre
+   negro no se ve. Ver el javadoc de AscentMapScreen.
+   ===================================================================== */
+
+.ascent-map-root {
+    -fx-background-color: linear-gradient(to bottom, #2A2118 0%, #17120C 100%);
+}
+
+/* Las barras no llevan fondo propio: van sobre el papel. Una franja opaca
+   encima del pergamino lo partiria en tres y se perderia el efecto de hoja. */
+.ascent-bar {
+    -fx-background-color: transparent;
+}
+
+.ascent-act {
+    -fx-text-fill: #3B2E1C;
+    -fx-font-size: 2.2em;
+    -fx-font-weight: 900;
+    -fx-padding: 0 16 0 0;
+}
+
+.ascent-hint {
+    -fx-text-fill: #6B5A3E;
+    -fx-font-size: 1.15em;
+    -fx-font-style: italic;
+}
+
+/* Cuantas de cada tipo en el mazo de una run (09-10-2026): un dato para
+   decidir que sobra, en la tinta del pergamino y sin cursiva. */
+.ascent-types {
+    -fx-text-fill: #3B2E1C;
+    -fx-font-size: 1.15em;
+    -fx-font-weight: 700;
+}
+
+/* El rotulo de un grupo cuando el mazo va por tipo: una fila entera con una
+   linea debajo, para que el grupo se lea de un vistazo. */
+.ascent-group-head {
+    -fx-text-fill: #3B2E1C;
+    -fx-font-size: 1.15em;
+    -fx-font-weight: 800;
+    -fx-padding: 10 0 3 4;
+    -fx-border-color: transparent transparent rgba(59,46,28,0.35) transparent;
+    -fx-border-width: 0 0 1 0;
+}
+
+.ascent-pill-base {
+    -fx-padding: 6 16 6 16;
+    -fx-background-radius: 14;
+    -fx-font-weight: 800;
+    -fx-font-size: 1.25em;
+}
+
+.ascent-pill {
+    -fx-background-color: rgba(59,46,28,0.14);
+    -fx-text-fill: #3B2E1C;
+}
+
+.ascent-pill-life {
+    -fx-background-color: rgba(160,40,36,0.16);
+    -fx-text-fill: #7A211D;
+}
+
+.ascent-pill-relic {
+    -fx-background-color: rgba(74,155,224,0.20);
+    -fx-text-fill: #23496B;
+}
+
+/*
+ * El trofeo de una run ganada: la chapa que se ensenya en una captura.
+ *
+ * Dorado y con borde, no una pastilla mas: el resumen ya tiene cinco pastillas
+ * (vida, creditos, nodos, reliquias, Ascension) y una sexta del mismo color se
+ * leeria como un dato mas. Esto tiene que verse como lo que es, un premio.
+ */
+.ascent-trophy {
+    -fx-background-color: rgba(198,160,74,0.22);
+    -fx-border-color: rgba(140,104,30,0.55);
+    -fx-border-width: 2;
+    -fx-background-radius: 12;
+    -fx-border-radius: 12;
+    -fx-padding: 12 30 12 30;
+}
+
+.ascent-trophy-level {
+    -fx-text-fill: #6B4E12;
+    -fx-font-size: 2.0em;
+    -fx-font-weight: 900;
+}
+
+.ascent-trophy-line {
+    -fx-text-fill: #6B5A3E;
+    -fx-font-size: 1.05em;
+    -fx-font-weight: 700;
+}
+
+.ascent-button {
+    -fx-background-color: rgba(59,46,28,0.14);
+    -fx-text-fill: #3B2E1C;
+    -fx-font-weight: 800;
+    -fx-font-size: 1.1em;
+    -fx-background-radius: 8;
+    -fx-padding: 9 22 9 22;
+    -fx-cursor: hand;
+}
+
+.ascent-button:hover {
+    -fx-background-color: rgba(59,46,28,0.22);
+}
+
+/* El elegido. Hace falta clase propia: .btn-primary la pisa .ascent-button
+   por orden de hoja, y sin marca visible no hay pregunta que valga
+   (principio 3: el estado se ve, no se lee). */
+.ascent-button-on {
+    -fx-background-color: #3B2E1C;
+    -fx-text-fill: #F3E7C8;
+}
+
+.ascent-button-on:hover {
+    -fx-background-color: #4C3B24;
+}
+
+/* La accion principal de una pantalla de Ascenso (Empezar, Continuar, la
+   respuesta segura de un aviso). Llevaban btn-primary desde el principio, y
+   .ascent-button se lo pisaba igual que al elegido: salian identicos a Volver,
+   y en una pantalla ancha "Empezar la ascension" no se encontraba (Ana,
+   06-10-2026). Dos clases ganan a una sea cual sea el orden de la hoja. La
+   sombra es lo que la separa de un boton elegido, que es plano. */
+.ascent-button.btn-primary {
+    -fx-background-color: #3B2E1C;
+    -fx-text-fill: #F3E7C8;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.35), 8, 0.2, 0, 2);
+}
+
+.ascent-button.btn-primary:hover {
+    -fx-background-color: #4C3B24;
+}
+
+/* Una regla del modo que hay que leer (los retos no suben la Ascension): la
+   tinta del pergamino, en negrita. Ni rojo de error ni gris de pie de pagina. */
+/* La racha de retos superados, junto a su llama: el naranja de la llama. */
+/* La estrella de favorito de un comandante (Ascenso, AscentFavorites). */
+.ascent-fav-star {
+    -fx-font-size: 1.5em;
+    -fx-text-fill: #F2E6C9;
+    -fx-background-color: rgba(18, 22, 28, 0.78);
+    -fx-background-radius: 999;
+    -fx-padding: 0 0.3em 0.05em 0.3em;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.6), 4, 0, 0, 1);
+}
+.ascent-fav-star:hover {
+    -fx-text-fill: #FFD36B;
+}
+.ascent-fav-star.on {
+    -fx-text-fill: #F5B82E;
+}
+
+.ascent-streak {
+    -fx-text-fill: #B4501E;
+    -fx-font-weight: 900;
+    -fx-font-size: 1.2em;
+}
+
+.ascent-notice {
+    -fx-text-fill: #3B2E1C;
+    -fx-font-weight: 800;
+    -fx-font-size: 1.0em;
+}
+
+/* Una expansion elegida a mano en el pozo de la run (bloque a medida). Va
+   sobre el papel: tinta oscura sobre pastilla clara, y clicarla la quita. */
+.ascent-set-chip {
+    -fx-background-color: rgba(250,244,228,0.9);
+    -fx-border-color: rgba(59,46,28,0.45);
+    -fx-border-width: 1;
+    -fx-background-radius: 6;
+    -fx-border-radius: 6;
+    -fx-text-fill: #3B2E1C;
+    -fx-font-weight: 700;
+    -fx-padding: 4 10 4 10;
+    -fx-cursor: hand;
+}
+
+.ascent-set-chip:hover {
+    -fx-background-color: rgba(140,47,43,0.14);
+    -fx-border-color: #8C2F2B;
+    -fx-text-fill: #8C2F2B;
+}
+
+.ascent-button-danger {
+    -fx-text-fill: #8C2F2B;
+}
+
+/* La ficha de "que hay en este nodo". Va sobre el papel, asi que es una
+   nota clavada encima, no un panel oscuro de la mesa. */
+.ascent-info {
+    -fx-background-color: rgba(250,244,228,0.94);
+    -fx-background-radius: 8;
+    -fx-border-color: rgba(59,46,28,0.35);
+    -fx-border-radius: 8;
+    -fx-border-width: 1.5;
+    -fx-padding: 12 16 12 16;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.45), 16, 0.3, 0, 4);
+}
+
+.ascent-info-title {
+    -fx-text-fill: #3B2E1C;
+    -fx-font-size: 1.15em;
+    -fx-font-weight: 900;
+}
+
+.ascent-info-text {
+    -fx-text-fill: #5A4A32;
+    -fx-font-size: 0.95em;
+}
+
+/* El mazo de la run dentro del descanso. Un ScrollPane pinta fondo propio
+   (blanco) y ahi parte el pergamino en dos: hay que vaciar el control Y su
+   viewport, que son dos reglas distintas y hacen falta las dos. */
+.ascent-scroll,
+.ascent-scroll > .viewport {
+    -fx-background-color: transparent;
+    -fx-background: transparent;
+}
+
+/* El nombre del plano, sobre su franja de arte. Lleva sombra porque va
+   encima de una imagen que no controlamos: sin ella, un plano de fondo
+   claro deja el texto ilegible. */
+.ascent-plane-name {
+    -fx-text-fill: #FBF3DF;
+    -fx-font-size: 1.05em;
+    -fx-font-weight: 800;
+    -fx-effect: dropshadow(gaussian, rgba(20,14,6,0.95), 8, 0.6, 0, 1);
+}
+
+/* El texto de un evento. Mas grande que una pista y con interlineado: es
+   lo unico que hay que leer en esa pantalla, y se lee de una vez. */
+.ascent-event-text {
+    -fx-text-fill: #4A3B26;
+    -fx-font-size: 1.35em;
+    -fx-line-spacing: 4;
+    -fx-text-alignment: center;
+    /* Y ademas -fx-alignment: text-alignment solo centra las LINEAS entre si.
+       Con una linea corta dentro de un Label ancho, el texto se queda pegado a
+       la izquierda: se vio en la captura del resultado del tahur. */
+    -fx-alignment: center;
+}
+
+/* Las opciones, todas del mismo ancho: una lista de botones de anchos
+   distintos se lee como cosas distintas, y aqui son alternativas de lo
+   mismo. */
+.ascent-event-option {
+    /* El ancho minimo (520 en 1080p) lo pone AscentEventScreen con UiScale.px:
+       aqui, en px fijos, ganaria al de Java y en 2K no creceria con la letra. */
+    -fx-font-size: 1.15em;
+    -fx-padding: 12 24 12 24;
+}
+
+/* La tienda. Cada articulo es una ficha sobre el papel: sin marco, dos
+   cartas pegadas se leen como una sola fila de cartas y no como cosas que
+   se compran por separado. */
+.ascent-shop-item {
+    -fx-background-color: rgba(250,244,228,0.55);
+    -fx-background-radius: 10;
+    -fx-border-color: rgba(59,46,28,0.25);
+    -fx-border-radius: 10;
+    -fx-border-width: 1.5;
+    -fx-padding: 10 12 10 12;
+}
+
+/* El elegido, que es lo que dice sobre que va a cobrar el boton de abajo.
+   Aqui no basta con un borde fino: comprar no se deshace, asi que lo que
+   esta seleccionado tiene que verse desde el otro lado de la pantalla
+   (principio 3). */
+.ascent-shop-item-picked {
+    -fx-background-color: rgba(74,155,224,0.22);
+    -fx-border-color: #2F6FA8;
+    -fx-border-width: 3;
+    -fx-effect: dropshadow(gaussian, rgba(47,111,168,0.45), 14, 0.3, 0, 2);
+}
+
+/* El servicio de quitar carta no tiene carta que ensenyar, asi que ocupa
+   el mismo hueco con su aspa. Si midiera distinto, la fila se descuadraria
+   y pareceria que falta algo. */
+.ascent-shop-icon {
+    -fx-background-color: rgba(59,46,28,0.10);
+    -fx-background-radius: 8;
+    -fx-text-fill: #8C2F2B;
+    -fx-font-size: 3.4em;
+    -fx-font-weight: 900;
+}
+
+/* Un precio que no llega. Rojo y apagado: que no se pueda pagar se VE,
+   en vez de dejarte clicarlo y contestarte que no. */
+.ascent-pill-danger {
+    -fx-background-color: rgba(160,40,36,0.20);
+    -fx-text-fill: #8C2F2B;
+}
+
+.ascent-info-duel {
+    -fx-text-fill: #8C2F2B;
+    -fx-font-size: 0.95em;
+    -fx-font-weight: 700;
+    -fx-padding: 4 0 0 0;
+}
+
+/* Arena desktop: presentation layer, original engraved stone and bronze. */
+.table-root {
+    -neo-text: #f0e9dc;
+    -neo-text-dim: #b0b3b8;
+    -neo-line: #4c4439;
+    -neo-accent: #66bde8;
+    -fx-background-color: #0c1015;
+}
+.arena-backdrop {
+    -fx-background-color: radial-gradient(center 50% 44%, radius 73%, #34383a 0%, #20292e 43%, #111820 78%, #0b1017 100%);
+}
+.table-root .arena-sidebar {
+    -fx-background-color: linear-gradient(to right, rgba(8,12,17,.72), rgba(8,12,17,.97));
+    -fx-border-color: transparent transparent transparent #66513b;
+    -fx-border-width: 0 0 0 1;
+}
+.table-root .player-bar {
+    -fx-background-color: linear-gradient(to right, rgba(7,12,18,.94), rgba(17,25,32,.72), rgba(10,16,22,.4));
+    -fx-border-color: transparent transparent rgba(181,150,97,.32) transparent;
+    -fx-border-width: 0 0 1 0;
+}
+.table-root .player-bar-self {
+    -fx-border-color: rgba(181,150,97,.4) transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+}
+.table-root .player-bar-self:active {
+    -fx-background-color: linear-gradient(to right, rgba(30,63,79,.92), rgba(15,29,39,.82), rgba(9,16,23,.7));
+    -fx-border-color: #66bde8 transparent transparent transparent;
+    -fx-border-width: 2 0 0 0;
+}
+/* LA BARRA DEL JUGADOR AL QUE LE TOCA, ENTERA (NeoSettings.TURN_BAR_GLOW,
+   apagado): para verla de reojo en una pantalla grande. Va antes de .avatar y
+   encadenada (:active:turn-glow) para ganar a las dos reglas de arriba. */
+.table-root .player-bar:active:turn-glow {
+    -fx-background-color: linear-gradient(to right, rgba(74,155,224,.62), rgba(74,155,224,.40), rgba(74,155,224,.26));
+    -fx-border-color: #66bde8;
+    -fx-border-width: 2;
+}
+.table-root .player-bar:active .avatar {
+    -fx-stroke: #ebc482;
+    -fx-effect: dropshadow(gaussian, rgba(236,187,107,.4), 15, .2, 0, 0);
+}
+.table-root .avatar { -fx-stroke: #a48558; -fx-stroke-width: 2; }
+.table-root .life { -fx-font-size: 2.4em; }
+.table-root .phase-rail {
+    -fx-background-color: linear-gradient(to bottom, #111820, #182129);
+    -fx-border-color: transparent transparent #66513b transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-background-radius: 0; -fx-border-radius: 0;
+}
+.table-root .phase-stop { -fx-padding: 3 5; -fx-font-size: .84em; -fx-background-radius: 2; }
+.table-root .phase-stop:current {
+    -fx-background-color: linear-gradient(to bottom, #e9c68a, #a67c46);
+    -fx-text-fill: #171b20;
+}
+.table-root .phase-stop:stop { -fx-border-color: #8acbe9; }
+.table-root .phase-owner:selected { -fx-border-color: #8acbe9; -fx-background-color: rgba(138,203,233,.16); }
+.table-root .combat-line {
+    -fx-stroke: #b3976a; -fx-stroke-dash-array: 10000 1; -fx-opacity: .3;
+}
+.table-root .arena-lands {
+    -fx-background-color: linear-gradient(to top, rgba(80,92,78,.18), transparent);
+    -fx-border-color: transparent transparent rgba(176,167,115,.28) transparent;
+}
+.table-root .arena-permanents {
+    -fx-background-color: linear-gradient(to top, rgba(96,76,104,.18), transparent);
+    -fx-border-color: transparent transparent rgba(173,143,179,.32) transparent;
+}
+.table-root .stack-box {
+    -fx-background-color: rgba(16,23,30,.86); -fx-border-color: #68533c;
+    -fx-background-radius: 3; -fx-border-radius: 3;
+}
+.table-root .action-bar {
+    -fx-background-color: linear-gradient(to bottom, #222c34, #121a22);
+    -fx-border-color: #9c7a48; -fx-border-width: 1;
+    -fx-background-radius: 4; -fx-border-radius: 4;
+}
+.table-root .action-bar .btn-primary {
+    -fx-background-color: linear-gradient(to bottom, #e4ac5c, #a96129);
+    -fx-text-fill: #171615; -fx-border-color: #f0c67a;
+    -fx-border-width: 1; -fx-font-weight: bold;
+    -fx-effect: dropshadow(gaussian, rgba(220,137,57,.25), 14, .15, 0, 0);
+}
+.table-root .action-bar .btn-primary:hover { -fx-background-color: #f2c77c; }
+.table-root .action-bar .btn-primary:disabled { -fx-opacity: .4; -fx-effect: null; }
+/* Te toca a ti (ActionBar.AWAITING, Discord 12-11-2026): el motor espera algo
+   tuyo. Rojo porque lo pidio el jugador y porque el ambar ya es el borde de
+   siempre de esta barra: no se distinguiria. */
+.action-bar:awaiting, .table-root .action-bar:awaiting, .action-bar:inline:awaiting {
+    -fx-border-color: #D9534F; -fx-border-width: 2;
+    -fx-effect: dropshadow(gaussian, rgba(217,83,79,.55), 16, .25, 0, 0);
+}
+.table-root .hand-area {
+    -fx-background-color: linear-gradient(to top, rgba(5,9,14,.98), rgba(12,22,30,.55), transparent);
+}
+.table-root .zone-pile-face {
+    -fx-fill: linear-gradient(to bottom, #39404b, #181f2b); -fx-stroke: #ac8a56;
+}
+.table-root .card-border { -fx-stroke: rgba(228,207,160,.4); }
+.table-root .arena-scroll {
+    -fx-background-color: rgba(12,20,29,.95); -fx-text-fill: #f0d5a4;
+    -fx-border-color: #a98751; -fx-border-radius: 3; -fx-background-radius: 3;
+    -fx-padding: 0; -fx-font-size: 18px; -fx-cursor: hand;
+}
+.table-root .arena-scroll:disabled { -fx-opacity: .3; }
+
+/* Interaction states override every decorative HUD treatment. */
+.table-root .player-bar:selectable {
+    -fx-border-color: -neo-accent; -fx-border-width: 2;
+}
+.table-root .player-bar:highlighted {
+    -fx-background-color: linear-gradient(to right, rgba(224,166,60,.32), rgba(11,14,19,.8));
+    -fx-border-color: -neo-warn; -fx-border-width: 2;
+}
+
+/* Editor de mazos: catálogo amplio y lista ilustrada, acento bronce. */
+.deck-builder {
+    -neo-accent: #d4a466;
+    /* La base del editor. DeckBuilderScreen la crece en 2K (UiScale.fixedFont):
+       todo lo de abajo va en em sobre ella, asi que en 1080p son los mismos px
+       de siempre y en 2K crece con el resto del texto. */
+    -fx-font-size: 13px;
+    -fx-background-color: radial-gradient(center 35% 0%, radius 100%, #242b35 0%, #10151c 55%, #090e14 100%);
+}
+.deck-builder .builder-header { -fx-border-color: transparent transparent #4a3c2c transparent; -fx-border-width: 0 0 1 0; }
+.deck-builder .builder-title { -fx-font-size: 1.9231em; -fx-font-weight: bold; -fx-text-fill: #f2eadb; }
+.deck-builder .builder-format { -fx-font-size: 0.8462em; -fx-font-weight: bold; -fx-text-fill: #d4a466; }
+.deck-builder .home-summary { -fx-font-size: 0.9231em; -fx-text-fill: #b7c2cf; }
+.deck-builder .home-summary:invalid { -fx-text-fill: #e2b775; }
+.deck-builder .builder-columns { -fx-padding: 16 24 0 24; }
+.deck-builder .builder-catalogue { -fx-background-color: rgba(10,15,22,.48); -fx-background-radius: 8; -fx-border-color: #343943; -fx-border-radius: 8; }
+.deck-builder .caption { -fx-font-size: 0.7692em; -fx-font-weight: bold; -fx-text-fill: #cbb992; }
+.deck-builder .text-input { -fx-font-size: 1em; -fx-padding: 9 12; -fx-background-color: #090f17; -fx-border-color: #55606e; -fx-border-radius: 4; }
+.deck-builder .text-input:focused { -fx-border-color: #d4a466; }
+.deck-builder .segment { -fx-font-size: 0.8462em; -fx-padding: 7 9; -fx-background-color: #202832; -fx-text-fill: #c3cbd6; -fx-border-color: #404a56; -fx-border-radius: 4; }
+.deck-builder .segment:selected { -fx-background-color: #705532; -fx-text-fill: #fff2da; -fx-border-color: #d4a466; }
+.deck-builder .colour-filter { -fx-min-width: 2.5455em; -fx-min-height: 2.7273em; -fx-padding: 5 6; -fx-background-radius: 20; -fx-border-radius: 20; }
+.deck-builder .colour-filter:selected { -fx-border-width: 2; }
+.deck-builder .builder-advanced { -fx-padding: 12; -fx-background-color: #141e2a; -fx-background-radius: 6; -fx-border-color: #394653; -fx-border-radius: 6; }
+/* Los mismos filtros fuera del constructor (CardFilterBar: vender en la tienda). */
+.card-filter .colour-filter { -fx-min-width: 2.5455em; -fx-min-height: 2.7273em; -fx-padding: 5 6; -fx-background-radius: 20; -fx-border-radius: 20; }
+.card-filter .colour-filter:selected { -fx-border-width: 2; }
+.card-filter.builder-advanced { -fx-padding: 12; -fx-background-color: #141e2a; -fx-background-radius: 6; -fx-border-color: #394653; -fx-border-radius: 6; }
+.deck-builder .builder-pagebar { -fx-padding: 7 0 2 0; -fx-border-color: #303a46 transparent transparent transparent; }
+.deck-builder .dialog-counter { -fx-font-size: 0.7692em; -fx-text-fill: #b4bfca; }
+.deck-builder .catalogue-tile { -fx-background-color: transparent; -fx-background-radius: 8; -fx-padding: 3; }
+.deck-builder .catalogue-tile:hover { -fx-background-color: #d2a262; -fx-effect: dropshadow(gaussian, rgba(218,166,93,.45), 16, .14, 0, 2); }
+.deck-builder .catalogue-count { -fx-font-size: 1.0769em; -fx-font-weight: bold; -fx-padding: 4 9; -fx-background-color: #d4a466; -fx-text-fill: #10151c; -fx-background-radius: 12; }
+.deck-builder .deck-panel { -fx-background-color: linear-gradient(to bottom, #202b38, #101721); -fx-border-color: #746044; -fx-border-radius: 8; -fx-background-radius: 8; }
+.deck-builder .builder-deck-count { -fx-text-fill: #f3d5a4; -fx-font-size: 1.0769em; -fx-font-weight: bold; }
+.deck-builder .deck-group { -fx-font-size: 0.8462em; -fx-font-weight: bold; -fx-padding: 12 4 5 4; -fx-text-fill: #cab792; }
+.deck-builder .deck-row { -fx-background-color: #202a35; -fx-background-radius: 4; -fx-border-color: transparent; -fx-border-radius: 4; -fx-border-width: 1; }
+.deck-builder .deck-row:hover { -fx-border-color: #d4a466; }
+.deck-builder .deck-row:invalid { -fx-border-color: #db695b; }
+.deck-builder .deck-row-name { -fx-font-size: 0.9231em; -fx-font-weight: bold; -fx-text-fill: #f5f0e6; }
+.deck-builder .deck-row-qty { -fx-font-size: 1.0769em; -fx-font-weight: bold; -fx-text-fill: #f0ca8f; }
+.deck-builder .deck-row-cost { -fx-font-size: 0.7692em; -fx-text-fill: #eee5d6; }
+.deck-builder .stepper { -fx-font-size: 1.0769em; -fx-padding: 2 0; -fx-min-width: 1.7143em; -fx-pref-width: 1.7143em; -fx-max-width: 1.7143em; -fx-background-color: rgba(8,12,18,.82); -fx-border-color: #6b6355; -fx-text-fill: #f4e6cc; }
+.deck-builder .stepper:hover { -fx-background-color: #9c773f; }
+.deck-art-strip { -fx-background-color: #263746; }
+.deck-art-shade { -fx-background-color: linear-gradient(to right, rgba(8,14,21,.92) 0%, rgba(8,14,21,.72) 55%, rgba(8,14,21,.28) 100%); }
+.deck-builder .builder-commander { -fx-border-color: #aa844f; -fx-border-radius: 4; -fx-padding: 1; }
+.deck-builder .builder-commander-name { -fx-text-fill: #f1d6a6; -fx-font-size: 1em; -fx-font-weight: bold; -fx-padding: 8 12; }
+.deck-builder .builder-commander:invalid { -fx-border-color: #db695b; }
+.deck-builder .builder-commander:invalid .builder-commander-name { -fx-text-fill: -neo-danger; }
+.deck-builder .builder-statistics > .title { -fx-background-color: #202c39; -fx-padding: 8; }
+.deck-builder .builder-statistics > .title > .text { -fx-fill: #d6c7ad; -fx-font-size: 0.7692em; }
+.deck-builder .builder-statistics > .content { -fx-background-color: #101721; -fx-border-color: #384555; }
+.deck-builder .deck-stats { -fx-background-color: transparent; }
+.deck-builder .deck-stats .home-subtitle { -fx-font-size: 0.8462em; }
+.deck-builder .mana-curve { -fx-background-color: #0c131d; -fx-background-radius: 5; }
+.deck-builder .curve-bar { -fx-background-color: linear-gradient(to top, #886238, #e3bb77); }
+.deck-builder .home-footer { -fx-background-color: #0b1119; -fx-border-color: #4a3c2c transparent transparent transparent; }
+.deck-builder .btn-secondary { -fx-font-size: 0.8462em; -fx-padding: 8 12; -fx-border-color: #716149; -fx-text-fill: #e0d6c4; }
+.deck-builder .btn-primary { -fx-background-color: linear-gradient(to bottom, #edc68a, #be8a45); -fx-text-fill: #16140f; -fx-font-size: 1em; -fx-font-weight: bold; -fx-padding: 10 24; -fx-border-color: #f5d69f; -fx-border-width: 1; }
+.deck-builder .btn-primary:hover { -fx-background-color: #f1ce93; }
+
+.deck-builder .home-subtitle { -fx-font-size: 0.9231em; -fx-text-fill: #abb8c8; }
+.deck-builder .curve-label, .deck-builder .curve-value { -fx-font-size: 0.7692em; }
+.deck-builder .builder-mana-pip { -fx-font-size: 0.6923em; -fx-font-weight: bold; -fx-text-fill: #18202a; -fx-background-color: #c0c6cd; -fx-background-radius: 20; -fx-padding: 1 2; -fx-alignment: center; }
+.deck-builder .builder-mana-w { -fx-background-color: #f0e9c6; }
+.deck-builder .builder-mana-u { -fx-background-color: #88c4e7; }
+.deck-builder .builder-mana-b { -fx-background-color: #b4a6bc; }
+.deck-builder .builder-mana-r { -fx-background-color: #e6987e; }
+.deck-builder .builder-mana-g { -fx-background-color: #98c7a1; }
+
+/* Adventure pack opening: presentation only, scoped to this overlay. */
+.pack-opening { -fx-background-color: radial-gradient(center 50% 42%, radius 75%, #243948, #090e18 70%); -fx-border-color: #a08048; -fx-border-width: 1; -fx-background-radius: 12; -fx-border-radius: 12; }
+.pack-opening .opening-title { -fx-font-size: 24px; -fx-font-weight: bold; -fx-text-fill: #f4d596; -fx-effect: dropshadow(gaussian, #bb7a3744, 14, 0.3, 0, 0); }
+.pack-opening .opening-detail { -fx-font-size: 12px; -fx-text-fill: #c6c5bc; }
+.pack-opening .opening-seal { -fx-background-color: linear-gradient(to bottom right, #233f50, #101d2d 45%, #394657 49%, #111c2a 53%, #263447); -fx-border-color: #e7bd70; -fx-border-width: 3 1 3 1; -fx-border-radius: 7; -fx-background-radius: 7; -fx-effect: dropshadow(gaussian, #e4a74388, 40, 0.2, 0, 0); -fx-cursor: hand; }
+.pack-opening .opening-seal:hover { -fx-effect: dropshadow(gaussian, #f9bc59bb, 60, 0.3, 0, 0); }
+.pack-opening .opening-crest { -fx-font-size: 90px; -fx-text-fill: #f6d596; }
+.pack-opening .opening-pack-label { -fx-font-size: 11px; -fx-text-fill: #efd7ab; -fx-font-weight: bold; }
+.pack-opening .opening-card-back { -fx-background-color: radial-gradient(center 50% 50%, radius 65%, #324b63, #111b2b 65%); -fx-border-color: #af925d; -fx-border-width: 2; -fx-background-radius: 9; -fx-border-radius: 9; -fx-cursor: hand; }
+.pack-opening .opening-rune { -fx-font-size: 66px; -fx-text-fill: #d1ae75; }
+.pack-opening .opening-card:hover, .pack-opening .opening-card:focused { -fx-effect: dropshadow(gaussian, #f6d797, 18, 0.35, 0, 0); }
+.pack-opening .opening-rare { -fx-effect: dropshadow(gaussian, #eec466, 22, 0.45, 0, 0); }
+.pack-opening .opening-mythic { -fx-effect: dropshadow(gaussian, #ff763c, 28, 0.5, 0, 0); }
+.pack-opening .opening-foil { -fx-border-color: #a2e9e5; -fx-border-radius: 8; }
+/* Te faltaba en un mazo de la Quest (21-10-2026): el ambar de "aviso" de la seccion 6,
+   el mismo de la lista de deseos del constructor. Despues de .opening-foil para ganarle el borde. */
+.pack-opening .opening-wanted { -fx-border-color: #E0A63C; -fx-border-width: 2; -fx-border-radius: 8; }
+.pack-opening .wanted-badge { -fx-font-size: 0.72em; -fx-font-weight: bold; -fx-text-fill: #0B0E13; -fx-background-color: #E0A63C; -fx-background-radius: 8; -fx-padding: 1 8 1 8; }
+/* Lo que vale una carta en la tienda de la Quest (sobres, coleccion). */
+.value-badge { -fx-font-size: 0.72em; -fx-font-weight: bold; -fx-text-fill: #F5CE88; -fx-background-color: rgba(11,14,19,0.86); -fx-background-radius: 8; -fx-border-color: #a77c40; -fx-border-radius: 8; -fx-padding: 1 7 1 7; }
+.pack-opening .opening-wanted-note { -fx-text-fill: #E0A63C; -fx-font-weight: bold; -fx-text-alignment: center; }
+.pack-opening .btn-primary { -fx-background-color: linear-gradient(to bottom, #ecc986, #a77c40); -fx-text-fill: #17120b; -fx-font-weight: bold; -fx-padding: 10 24; }
+
+/* ---------- atajos de teclado ---------- */
+/* El hueco de una tecla. Centrado, para que las dos columnas de huecos se lean
+   como una tabla y no como botones sueltos. */
+.shortcut-key {
+    -fx-alignment: center;
+}
+
+/* ---------- el reloj del draft en red ----------
+   Grande y a la derecha de la cabecera: no es un dato mas del progreso, es lo
+   unico que puede quitarte el pick de las manos. Los ultimos diez segundos
+   cambian de color, que es cuando deja de ser informacion y pasa a ser aviso. */
+.draft-clock {
+    -fx-font-size: 1.5em;
+    -fx-font-weight: bold;
+    -fx-text-fill: -neo-text-dim;
+    -fx-padding: 2 12 2 12;
+}
+
+.draft-clock:hurry {
+    -fx-text-fill: -neo-danger;
+}
+
+/* El banquillo de la tira de picks: separado del mazo por una raya y un poco
+   apagado, para que "lo que juegas" se lea primero sin tener que leer rotulos. */
+.draft-sideboard {
+    -fx-border-color: transparent transparent transparent -neo-line;
+    -fx-border-width: 0 0 0 2;
+    -fx-padding: 0 0 0 14;
+    -fx-opacity: 0.72;
+}
+
+/* La version del motor, abajo a la izquierda del menu. Es un TextField para
+   que se pueda copiar (quien reporte un fallo en Card-Forge la necesita), asi
+   que hay que quitarle TODO el aspecto de campo: fondo, borde y foco. */
+.home-version {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    -fx-border-color: transparent;
+    -fx-padding: 0;
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-size: 0.8em;
+}
+.home-version:focused {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+}
+
+/* La mano tactil: la carta que se mira con el dedo apoyado (TableScreen.showPeek). */
+.hand-peek {
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.75), 30, 0.35, 0, 8);
+}
+
+/* ---- Elegir comandante (CommanderPickDialog, 30-09-2026) ------------------
+   Cada opcion es una tarjeta como las de los mazos: la carta (o la pareja),
+   su nombre y, debajo, "por defecto" o "sugerido". La que lleva el mazo ahora
+   va marcada como la del mazo elegido en la pantalla de mazos. */
+.commander-pick .commander-option {
+    -fx-background-color: transparent;
+    -fx-background-radius: 10;
+    -fx-border-color: transparent;
+    -fx-border-radius: 10;
+    -fx-border-width: 2;
+    -fx-padding: 8;
+    -fx-cursor: hand;
+}
+.commander-pick .commander-option:hover {
+    -fx-background-color: rgba(74,155,224,0.10);
+    -fx-border-color: rgba(74,155,224,0.45);
+}
+.commander-pick .commander-option:selected {
+    -fx-background-color: rgba(74,155,224,0.18);
+    -fx-border-color: -neo-accent;
+}
+.commander-option-name { -fx-font-size: 0.95em; -fx-text-fill: -neo-text; -fx-font-weight: bold; }
+.commander-option-tag { -fx-font-size: 0.8em; -fx-text-fill: -neo-text-dim; }
+.commander-option-tag.suggested { -fx-text-fill: -neo-warn; }
+.commander-option-none {
+    -fx-background-color: rgba(255,255,255,0.04);
+    -fx-background-radius: 6;
+    -fx-border-color: -neo-line;
+    -fx-border-radius: 6;
+    -fx-border-style: segments(6, 4);
+}
+.commander-option-none .label { -fx-text-fill: -neo-text-dim; -fx-font-size: 1.05em; }
+
+/* La casilla de "Incluir la musica importada" (Ajustes -> Tus datos): el
+   check-box de fabrica pinta su texto casi negro sobre el panel oscuro. */
+.settings .check-box { -fx-text-fill: -neo-text; }
+.settings .check-box:disabled { -fx-opacity: 0.5; }
+
+/* ---- Hot seat: la cortina al pasar el aparato (TableScreen.showCurtain) ---- */
+.overlay.hotseat-curtain {
+    -fx-background-color: radial-gradient(center 50% 45%, radius 80%, #1b2430, #0a0e13);
+}
+
+.hotseat-curtain-hint {
+    -fx-font-size: 18px;
+    -fx-text-fill: #8D9AAB;
+    -fx-text-alignment: center;
+}
+
+.hotseat-curtain-title {
+    -fx-font-size: 34px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #E6EBF2;
+    -fx-text-alignment: center;
+}
+
+.seat-kind:selected {
+    -fx-background-color: rgba(224, 166, 60, 0.22);
+    -fx-border-color: #E0A63C;
+    -fx-text-fill: #E0A63C;
+}
+
+/* ---------- La columna de la derecha, plegada (itch.io, 04-10-2026) ---------- */
+.stack-chip {
+    -fx-background-color: rgba(27, 33, 42, 0.92);
+    -fx-border-color: -neo-line;
+    -fx-border-width: 1;
+    -fx-background-radius: 6;
+    -fx-border-radius: 6;
+    -fx-text-fill: -neo-text-dim;
+    -fx-font-size: 0.85em;
+    -fx-font-weight: bold;
+    -fx-padding: 6 10 6 10;
+    -fx-cursor: hand;
+}
+
+.stack-chip:active {
+    -fx-text-fill: -neo-text;
+    -fx-border-color: -neo-accent;
+}
+
+.stack-box.stack-floating {
+    -fx-background-color: rgba(27, 33, 42, 0.97);
+    -fx-border-color: -neo-accent;
+    -fx-border-width: 1;
+    -fx-background-radius: 8;
+    -fx-border-radius: 8;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.6), 16, 0.2, 0, 4);
+}
+
+.action-bar:inline {
+    -fx-background-color: rgba(27, 33, 42, 0.88);
+    -fx-background-radius: 8;
+    -fx-padding: 6 10 6 12;
+}
+
+/* Los jugadores entre los que el motor espera que elijas ("un rival elige una
+   pila" con varios rivales): un boton por jugador, en verde, que es el color de
+   "esto se puede elegir" (seccion 6). Ver forge.neo.match.PlayerPick. */
+.action-bar .player-choice {
+    -fx-border-color: -neo-valid;
+    -fx-text-fill: -neo-text;
+}
+.action-bar .player-choice:hover { -fx-background-color: rgba(79, 180, 119, 0.18); }
+.action-bar .player-choice:selected {
+    -fx-background-color: -neo-valid;
+    -fx-text-fill: #0B0E13;
+}
+
+/* La mano de un rival que puedes ver (azul) o de la que puedes lanzar (verde):
+   Sen Triplets, Telepathy... Ver forge.neo.match.RevealedHand. */
+.zone-button:revealed {
+    -fx-background-color: rgba(74, 155, 224, 0.22);
+    -fx-border-color: -neo-accent;
+    -fx-border-radius: 4;
+    -fx-background-radius: 4;
+}
+.zone-button:revealed .zone-count { -fx-text-fill: -neo-accent; }
+.zone-button:playable {
+    -fx-background-color: rgba(79, 180, 119, 0.22);
+    -fx-border-color: -neo-valid;
+    -fx-border-radius: 4;
+    -fx-background-radius: 4;
+}
+.zone-button:playable .zone-count { -fx-text-fill: -neo-valid; }
+.opponent-tab:revealed { -fx-border-color: -neo-accent; -fx-text-fill: -neo-accent; }
+.opponent-tab:playable { -fx-border-color: -neo-valid; -fx-text-fill: -neo-valid; }
+/* En esa mesa hay algo que elegir (proliferar a cuatro, Discord 08-10-2026):
+   el mismo azul de "elige esto" de las cartas, con su punto delante. */
+.opponent-tab:pickable {
+    -fx-background-color: derive(-neo-accent, -45%);
+    -fx-effect: dropshadow(gaussian, -neo-accent, 8, 0.4, 0, 0);
+}
+/* Y la que estas mirando se sigue distinguiendo de las otras. */
+.opponent-tab:pickable:selected {
+    -fx-background-color: -neo-panel-hi;
+    -fx-border-color: transparent transparent -neo-accent transparent;
+}
+.opponent-tab-pick { -fx-fill: -neo-accent; }
+
+/* Un aviso que se va solo, abajo y en medio de la ventana (forge.neo.ui.Toast):
+   "se ha abierto en tu navegador". Panel con el borde del acento, que es lo
+   que informa sin pedir nada. */
+.neo-toast {
+    -fx-background-color: rgba(27, 33, 42, 0.96);
+    -fx-background-radius: 8;
+    -fx-border-color: #4A9BE0;
+    -fx-border-radius: 8;
+    -fx-border-width: 1;
+    -fx-padding: 10 18 10 18;
+    -fx-text-fill: #E6EBF2;
+    -fx-font-size: 1.0em;
+    -fx-effect: dropshadow(gaussian, rgba(0, 0, 0, 0.55), 14, 0.2, 0, 3);
+}
+
+/* "Recordar estos artes para las proximas runs" (forge.neo.ascent.AscentArt),
+   en el pergamino de Tu mazo: tinta marron, como los textos de alli. */
+.ascent-remember {
+    -fx-text-fill: #4A3B22;
+    -fx-font-size: 1.1em;
+    -fx-cursor: hand;
+}
+.ascent-remember .box {
+    -fx-background-color: #F3E7C8;
+    -fx-border-color: #8C7448;
+    -fx-border-radius: 3;
+    -fx-background-radius: 3;
+}
+.ascent-remember:selected .mark {
+    -fx-background-color: #4A3B22;
+}
+
+/* La tecla de cada opcion de una pregunta del motor (1-9, NumberedChoice). */
+.key-hint {
+    -fx-text-fill: #E6EBF2;
+    -fx-background-color: #2C3542;
+    -fx-background-radius: 4;
+    -fx-border-color: #4A5566;
+    -fx-border-radius: 4;
+    -fx-font-weight: bold;
+    -fx-font-size: 0.8em;
+    -fx-padding: 1 6 1 6;
+}
+
+/* El botin de la Quest: cuantas tienes y venderla ahi mismo (CardHaul.Extras). */
+.haul-owned {
+    -fx-text-fill: #8D9AAB;
+    -fx-font-size: 0.85em;
+}
+.haul-sell {
+    -fx-font-size: 0.8em;
+    -fx-padding: 2 8 2 8;
+}
+.haul-sold {
+    -fx-text-fill: #4FB477;
+    -fx-font-weight: bold;
+}
+
+/* Reglas de la casa: la marca del mazo en la lista (23-10-2026). */
+.deck-tile-house { -fx-text-fill: #12161C; -fx-background-color: -neo-warn; -fx-background-radius: 4;
+    -fx-padding: 2 8 2 8; -fx-font-size: 12px; -fx-font-weight: bold; }
+
+/* Si a todo: mas visible que Resolverlo todo, sin quitarle el sitio a Si / No (23-10-2026). */
+.yes-to-all { -fx-border-color: -neo-valid; -fx-text-fill: -neo-valid; -fx-font-weight: bold; }
+
+/* El buscador de Ajustes, arriba del carril de pestanyas. */
+.settings-search {
+    -fx-pref-column-count: 9;
+}
+
+/* La enciclopedia como lista virtual de filas (24-10-2026): sin fondo ni seleccion
+   de ListView, y la barra discreta de los paneles. */
+.library-rows, .library-rows > .virtual-flow > .clipped-container > .sheet {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    -fx-padding: 0;
+}
+.library-rows:focused { -fx-background-color: transparent; }
+.library-rows .list-cell,
+.library-rows .list-cell:filled,
+.library-rows .list-cell:selected,
+.library-rows .list-cell:filled:hover {
+    -fx-background-color: transparent;
+    -fx-padding: 0 0 10 0;
+}
+.library-rows .scroll-bar:vertical { -fx-background-color: transparent; -fx-pref-width: 8; }
+.library-rows .scroll-bar:vertical > .thumb { -fx-background-color: -neo-line; -fx-background-radius: 4; }
+.library-rows .scroll-bar:vertical > .thumb:hover { -fx-background-color: -neo-text-dim; }
+.library-rows .scroll-bar > .increment-button,
+.library-rows .scroll-bar > .decrement-button { -fx-pref-height: 0; -fx-opacity: 0; }
+.library-rows .scroll-bar:horizontal { -fx-pref-height: 0; -fx-opacity: 0; }
+
+/* Ajustes -> Modos: una carta prohibida, con su X (BanListEditor). */
+.banlist-chip {
+    -fx-padding: 2 4 2 10;
+    -fx-background-color: #1B212A;
+    -fx-background-radius: 6;
+    -fx-border-color: #2C3542;
+    -fx-border-radius: 6;
+}
+.banlist-chip > .label {
+    -fx-text-fill: #E6EBF2;
+}

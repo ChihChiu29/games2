@@ -1,0 +1,478 @@
+package forge.neo.ui;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+
+import forge.card.CardEdition;
+import forge.neo.NeoText;
+import forge.model.CardBlock;
+import forge.neo.draft.NeoSealed;
+import forge.neo.draft.PackMix;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
+import javafx.scene.control.ScrollPane;
+import javafx.scene.control.TextField;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.FlowPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
+
+/**
+ * De que van a ser los sobres del draft.
+ *
+ * <p>Hasta ahora no habia pregunta: se drafteaba con
+ * {@code LimitedPoolType.Full}, o sea sobres <b>de todo Magic a la vez</b>
+ * metidos en una plantilla generica. Reportado jugando: <i>"los sobres que se
+ * abren llevan cartas de expansiones diferentes"</i>. Y es exactamente lo que
+ * pasaba: en un mismo sobre salia una carta de 1994 y una de este anyo.
+ *
+ * <p>Un draft de verdad es de <b>un set</b>. Es lo que le da sentido a los
+ * picks: el set tiene sus arquetipos, su curva y sus comunes buenas, y aprender
+ * eso es la mitad del juego. El motor ya lo hacia — la GUI vieja pregunta por
+ * bloque y por combinacion de sets — asi que aqui solo faltaba la pantalla.
+ *
+ * <p>Es la hermana de {@link SealedScreen}, a proposito: la pregunta es la
+ * misma ("de que expansion") y conviene que se conteste igual, con una rejilla
+ * y un buscador y no con una lista de 679 lineas.
+ */
+public class DraftSetupScreen extends BorderPane {
+
+    private static final javafx.css.PseudoClass PICKED =
+            javafx.css.PseudoClass.getPseudoClass("picked");
+    private static final javafx.css.PseudoClass SELECTED =
+            javafx.css.PseudoClass.getPseudoClass("selected");
+
+    /** Que puede hacer el jugador aqui. */
+    public interface Actions {
+        /**
+         * Empezar a abrir sobres.
+         *
+         * @param edition de que expansion, o {@code null} para el revoltijo de
+         *                todas las cartas de Forge
+         */
+        void start(CardEdition edition);
+
+        /**
+         * Empezar un draft de cubo (la auditoría del motor, apartado C2).
+         *
+         * @param cubeName el nombre EXACTO de {@code CustomLimited.getName()}
+         */
+        void startCube(String cubeName);
+
+        /**
+         * Empezar con sobres de VARIAS expansiones ({@link PackMix}), elegidas
+         * a mano o rellenadas desde un bloque de Forge.
+         */
+        void startMix(PackMix mix);
+
+        void back();
+    }
+
+    /**
+     * Las preguntas que caben aqui: una expansion, una MEZCLA de varias (con
+     * sus sobres), un BLOQUE de Forge (que rellena la mezcla), todo Magic, o
+     * un cubo. Mezcla y bloque: pedido en itch.io el 29-09-2026.
+     */
+    private enum Mode { SET, MIX, BLOCK, ALL, CUBE }
+
+    /** Sobres por jugador en un draft. */
+    private static final int DRAFT_PACKS = 3;
+
+    private final PackMix mix = new PackMix();
+    private final VBox mixBox = new VBox();
+    /** Importar de CubeCobra: solo con "Un cubo" (Discord, 25-10-2026). */
+    private final Region cubeImport = CubeView.importBar(this::cubeImported);
+    private List<CardBlock> shownBlocks = new ArrayList<>();
+    private Button[] modeButtons;
+    private Button go;
+
+    private final FlowPane grid = new FlowPane(10, 10);
+    private final TextField search = new TextField();
+    private final Pager pager;
+    private final Label chosenLabel = new Label();
+    private final VBox setBox;
+    private List<CardEdition> shown = new ArrayList<>();
+    private CardEdition chosen;
+    private List<forge.gamemodes.limited.CustomLimited> shownCubes = new ArrayList<>();
+    private forge.gamemodes.limited.CustomLimited chosenCube;
+
+    /** Cual de las tres preguntas esta contestando ahora mismo. */
+    private Mode mode = Mode.SET;
+
+    public DraftSetupScreen(final Actions actions) {
+        getStyleClass().addAll("table-root", "home");
+
+        final Label title = new Label(NeoText.get("draftNew.title"));
+        title.getStyleClass().add("home-title");
+        final Label sub = new Label(NeoText.get("draftNew.subtitle"));
+        sub.getStyleClass().add("home-subtitle");
+        final VBox head = new VBox(2, title, sub);
+        head.setAlignment(Pos.CENTER);
+        head.setPadding(new Insets(24, 20, 10, 20));
+        setTop(head);
+
+        pager = new Pager(24, this::paint);
+
+        search.setPromptText(NeoText.get("sealed.search"));
+        search.getStyleClass().add("text-input");
+        search.setPrefColumnCount(20);
+        search.textProperty().addListener((o, was, is) -> {
+            pager.reset();
+            reload();
+        });
+
+        grid.setAlignment(Pos.TOP_LEFT);
+        final ScrollPane scroll = new ScrollPane(grid);
+        scroll.getStyleClass().add("dialog-scroll");
+        scroll.setFitToWidth(true);
+        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        VBox.setVgrow(scroll, Priority.ALWAYS);
+        // La pagina es lo que quepa, no 24 fijas: ver Pager.fitTo.
+        pager.fitTo(scroll, grid, UiScale.px(210), UiScale.px(50), 8);
+
+        setBox = new VBox(8, mixBox, cubeImport, search, scroll, pager);
+        mixBox.setVisible(false);
+        mixBox.setManaged(false);
+        cubeImport.setVisible(false);
+        cubeImport.setManaged(false);
+        VBox.setVgrow(setBox, Priority.ALWAYS);
+
+        final VBox content = new VBox(12,
+                section(NeoText.get("draftNew.step1"), modeRow()),
+                section(NeoText.get("draftNew.step2"), setBox));
+        content.setPadding(new Insets(4, 30, 10, 30));
+        setCenter(content);
+
+        go = new Button(NeoText.get("draftNew.start"));
+        go.getStyleClass().add("btn-primary");
+        go.setMinWidth(Region.USE_PREF_SIZE);
+        go.setOnAction(e -> {
+            switch (mode) {
+                case SET:
+                    if (chosen == null) {
+                        return;
+                    }
+                    actions.start(chosen);
+                    break;
+                case CUBE:
+                    if (chosenCube == null) {
+                        return;
+                    }
+                    actions.startCube(chosenCube.getName());
+                    break;
+                case MIX:
+                case BLOCK:
+                    if (mix.total() != DRAFT_PACKS) {
+                        return;
+                    }
+                    actions.startMix(mix.copy());
+                    break;
+                default:
+                    actions.start(null);
+                    break;
+            }
+        });
+
+        final Button back = new Button(NeoText.get("common.back"));
+        back.getStyleClass().add("btn-secondary");
+        back.setMinWidth(Region.USE_PREF_SIZE);
+        back.setOnAction(e -> actions.back());
+
+        chosenLabel.getStyleClass().add("quest-ok");
+
+        final Region gap = new Region();
+        HBox.setHgrow(gap, Priority.ALWAYS);
+        final HBox footer = new HBox(12, chosenLabel, gap, back, go);
+        footer.setAlignment(Pos.CENTER_LEFT);
+        footer.setPadding(new Insets(12, 30, 22, 30));
+        setBottom(footer);
+
+        reload();
+        CardZoom.install(this);
+        mixTestHook(() -> switchMode(Mode.MIX, modeButtons, modeButtons[1]),
+                () -> switchMode(Mode.BLOCK, modeButtons, modeButtons[2]));
+    }
+
+    /**
+     * Solo pruebas: {@code -Dneo.mixTest=mix} abre "Mezclar" con 2xDOM + M19,
+     * y {@code =block} abre "Bloque". Para capturar sin clicar (la guía de pruebas).
+     */
+    private void mixTestHook(final Runnable toMix, final Runnable toBlock) {
+        final String t = System.getProperty("neo.mixTest");
+        if ("cube".equals(t)) {
+            // =cube: "Un cubo", con la barra de CubeCobra.
+            switchMode(Mode.CUBE, modeButtons, modeButtons[4]);
+            return;
+        }
+        if ("random".equals(t)) {
+            // =random: "Mezclar" y el boton "Al azar" pulsado (PackMix.random).
+            toMix.run();
+            javafx.application.Platform.runLater(() -> {
+                if (lookup("#mix-random") instanceof Button b) {
+                    b.fire();
+                }
+            });
+        } else if ("block".equals(t)) {
+            toBlock.run();
+        } else if ("mix".equals(t)) {
+            for (final CardEdition e : NeoSealed.editions()) {
+                if ("DOM".equals(e.getCode())) {
+                    mix.set(e, 2);
+                } else if ("M19".equals(e.getCode())) {
+                    mix.set(e, 1);
+                }
+            }
+            toMix.run();
+        }
+    }
+
+    /**
+     * Una expansion, o todas.
+     *
+     * <p>"Todas las cartas" se queda — es lo que habia y a alguien le puede
+     * gustar el disparate — pero deja de ser lo unico, y sobre todo deja de ser
+     * lo de fabrica.
+     */
+    private Region modeRow() {
+        final HBox row = new HBox(8);
+        row.setAlignment(Pos.CENTER_LEFT);
+
+        final Button set = new Button(NeoText.get("draftNew.oneSet"));
+        final Button mixB = new Button(NeoText.get("draftNew.mix"));
+        final Button blockB = new Button(NeoText.get("draftNew.block"));
+        final Button all = new Button(NeoText.get("draftNew.allCards"));
+        final Button cube = new Button(NeoText.get("draftNew.cube"));
+        final Button[] all3 = {set, mixB, blockB, all, cube};
+        modeButtons = all3;
+        for (final Button b : all3) {
+            b.getStyleClass().add("segment");
+            b.setMinWidth(Region.USE_PREF_SIZE);
+        }
+        set.pseudoClassStateChanged(SELECTED, true);
+
+        set.setOnAction(e -> switchMode(Mode.SET, all3, set));
+        mixB.setOnAction(e -> switchMode(Mode.MIX, all3, mixB));
+        blockB.setOnAction(e -> switchMode(Mode.BLOCK, all3, blockB));
+        all.setOnAction(e -> switchMode(Mode.ALL, all3, all));
+        cube.setOnAction(e -> switchMode(Mode.CUBE, all3, cube));
+
+        row.getChildren().addAll(all3);
+        return row;
+    }
+
+    private void switchMode(final Mode picked, final Button[] all3, final Button selected) {
+        mode = picked;
+        for (final Button b : all3) {
+            b.pseudoClassStateChanged(SELECTED, b == selected);
+        }
+        pager.reset();
+        reload();
+        refreshMode();
+    }
+
+    /** Con "todas las cartas" no hay nada que elegir: la rejilla se va. */
+    private void refreshMode() {
+        final boolean showGrid = mode != Mode.ALL;
+        setBox.setVisible(showGrid);
+        setBox.setManaged(showGrid);
+        cubeImport.setVisible(mode == Mode.CUBE);
+        cubeImport.setManaged(mode == Mode.CUBE);
+        refreshMix();
+        refreshChosen();
+    }
+
+    /** La barra de la mezcla: solo en "Mezclar", y se repinta en cada cambio. */
+    private void refreshMix() {
+        final boolean on = mode == Mode.MIX;
+        mixBox.setVisible(on);
+        mixBox.setManaged(on);
+        if (on) {
+            mixBox.getChildren().setAll(PackMixView.bar(mix, DRAFT_PACKS, () -> {
+                paint();
+                refreshMix();
+                refreshChosen();
+            }));
+        }
+        if (go != null) {
+            go.setDisable(mode == Mode.MIX && mix.total() != DRAFT_PACKS
+                    || mode == Mode.BLOCK);
+        }
+    }
+
+    private static Region section(final String caption, final Region content) {
+        final Label c = new Label(caption);
+        c.getStyleClass().add("caption");
+        final VBox box = new VBox(6, c, content);
+        VBox.setVgrow(box, Priority.SOMETIMES);
+        return box;
+    }
+
+    private void reload() {
+        final String q = search.getText() == null ? ""
+                : search.getText().trim().toLowerCase(Locale.ROOT);
+        if (mode == Mode.CUBE) {
+            shownCubes = new ArrayList<>();
+            for (final forge.gamemodes.limited.CustomLimited c : forge.neo.draft.NeoDraft.cubes()) {
+                if (q.isEmpty() || c.getName().toLowerCase(Locale.ROOT).contains(q)) {
+                    shownCubes.add(c);
+                }
+            }
+            pager.setTotal(shownCubes.size());
+            if (chosenCube == null && !shownCubes.isEmpty()) {
+                chosenCube = shownCubes.get(0);
+            }
+            paint();
+            refreshChosen();
+            return;
+        }
+        if (mode == Mode.BLOCK) {
+            shownBlocks = new ArrayList<>();
+            for (final CardBlock b : PackMix.blocks()) {
+                if (q.isEmpty() || b.getName().toLowerCase(Locale.ROOT).contains(q)
+                        || PackMix.blockCodes(b).toLowerCase(Locale.ROOT).contains(q)) {
+                    shownBlocks.add(b);
+                }
+            }
+            pager.setTotal(shownBlocks.size());
+            paint();
+            refreshChosen();
+            return;
+        }
+        shown = new ArrayList<>();
+        // Las mismas que el sellado: las que tienen sobre. Un draft de una
+        // expansion sin plantilla de sobre no existe.
+        for (final CardEdition e : NeoSealed.editions()) {
+            if (q.isEmpty() || e.getName().toLowerCase(Locale.ROOT).contains(q)
+                    || e.getCode().toLowerCase(Locale.ROOT).contains(q)) {
+                shown.add(e);
+            }
+        }
+        pager.setTotal(shown.size());
+        if (chosen == null && !shown.isEmpty()) {
+            chosen = shown.get(0);
+        }
+        paint();
+        refreshChosen();
+    }
+
+    private void paint() {
+        grid.getChildren().clear();
+        if (mode == Mode.CUBE) {
+            for (int i = pager.from(); i < Math.min(shownCubes.size(), pager.to()); i++) {
+                grid.getChildren().add(cubeTile(shownCubes.get(i)));
+            }
+            return;
+        }
+        if (mode == Mode.BLOCK) {
+            for (int i = pager.from(); i < Math.min(shownBlocks.size(), pager.to()); i++) {
+                final CardBlock b = shownBlocks.get(i);
+                // Elegir un bloque RELLENA la mezcla y lleva a ella: el bloque
+                // es un atajo, luego se retoca con los - y +.
+                grid.getChildren().add(PackMixView.blockTile(b, b.equals(mix.block()), () -> {
+                    final PackMix filled = PackMix.fromBlock(b, DRAFT_PACKS);
+                    mix.clear();
+                    for (final java.util.Map.Entry<CardEdition, Integer> e : filled.entries()) {
+                        mix.set(e.getKey(), e.getValue());
+                    }
+                    mix.setBlock(b);
+                    switchMode(Mode.MIX, modeButtons, modeButtons[1]);
+                }));
+            }
+            return;
+        }
+        for (int i = pager.from(); i < Math.min(shown.size(), pager.to()); i++) {
+            grid.getChildren().add(tile(shown.get(i)));
+        }
+    }
+
+    private Region cubeTile(final forge.gamemodes.limited.CustomLimited cube) {
+        return CubeView.tile(cube, cube.equals(chosenCube), () -> {
+            chosenCube = cube;
+            paint();
+            refreshChosen();
+        }, () -> {
+            if (cube.equals(chosenCube)) {
+                chosenCube = null;
+            }
+            reload();
+        });
+    }
+
+    /** Recien importado: se elige, y se va a la primera pagina, donde sale. */
+    private void cubeImported(final String name) {
+        search.clear();
+        pager.reset();
+        reload();
+        for (final forge.gamemodes.limited.CustomLimited c : shownCubes) {
+            if (c.getName().equals(name)) {
+                chosenCube = c;
+            }
+        }
+        paint();
+        refreshChosen();
+    }
+
+    private Region tile(final CardEdition edition) {
+        final int inMix = mode == Mode.MIX ? mix.count(edition) : 0;
+        final Label code = new Label(inMix > 0 ? edition.getCode() + "  \u00d7" + inMix : edition.getCode());
+        code.getStyleClass().add("set-code");
+
+        final Label name = new Label(edition.getName());
+        name.getStyleClass().add("duel-name");
+        name.setWrapText(true);
+        name.setMaxWidth(UiScale.px(190));
+        name.setMinHeight(Region.USE_PREF_SIZE);
+
+        final VBox box = new VBox(2, code, name);
+        box.getStyleClass().add("set-tile");
+        box.setPadding(new Insets(8, 10, 8, 10));
+        box.setPrefWidth(UiScale.px(210));
+        box.pseudoClassStateChanged(PICKED, mode == Mode.MIX ? inMix > 0 : edition.equals(chosen));
+        box.setOnMouseClicked(e -> {
+            if (e.getButton() == javafx.scene.input.MouseButton.PRIMARY) {
+                if (mode == Mode.MIX) {
+                    // En la mezcla, cada clic es un sobre mas de esa expansion
+                    // (hasta llenar los tres).
+                    if (mix.total() < DRAFT_PACKS) {
+                        mix.add(edition);
+                    }
+                    paint();
+                    refreshMix();
+                    refreshChosen();
+                    return;
+                }
+                chosen = edition;
+                paint();
+                refreshChosen();
+            }
+        });
+        return box;
+    }
+
+    private void refreshChosen() {
+        switch (mode) {
+            case ALL:
+                chosenLabel.setText(NeoText.get("draftNew.chosenAll"));
+                break;
+            case CUBE:
+                chosenLabel.setText(chosenCube == null ? ""
+                        : NeoText.get("draftNew.chosen", chosenCube.getName()));
+                break;
+            case MIX:
+                chosenLabel.setText(PackMixView.chosen(mix, DRAFT_PACKS));
+                break;
+            case BLOCK:
+                chosenLabel.setText(NeoText.get("mix.blockHelp"));
+                break;
+            default:
+                chosenLabel.setText(chosen == null ? ""
+                        : NeoText.get("draftNew.chosen", chosen.getName()));
+                break;
+        }
+    }
+}

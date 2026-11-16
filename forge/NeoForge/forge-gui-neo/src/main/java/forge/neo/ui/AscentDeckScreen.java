@@ -1,0 +1,292 @@
+package forge.neo.ui;
+
+import java.util.List;
+
+import forge.deck.Deck;
+import forge.deck.DeckSection;
+import forge.game.card.CardView;
+import forge.item.PaperCard;
+import forge.neo.NeoText;
+import forge.neo.ascent.AscentDecks;
+import forge.neo.ascent.AscentRun;
+import forge.neo.card.CardNode;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.StackPane;
+import javafx.scene.layout.VBox;
+import javafx.scene.paint.Color;
+
+/**
+ * Tu mazo, a mitad de run. <b>Se mira, no se toca</b> (el plan de Ascenso) — salvo
+ * el ARTE, que es solo el dibujo (Discord, 06-10-2026): clic en una carta.
+ *
+ * <h2>Por que hasta ahora no estaba</h2>
+ *
+ * <p>El boton llevaba tiempo pedido y a proposito sin poner: el unico visor de
+ * mazo que existia era el <b>editor</b>, y abrirlo aqui haria justo lo que el
+ * modo no permite — el mazo de una run se forma dentro de ella, y poder
+ * retocarlo a mano se carga el sentido de elegir premio y de quitar carta en el
+ * descanso. Un boton que abriera el editor seria un control que no hace lo que
+ * parece, o sea peor que no tenerlo (principio 1).
+ *
+ * <p>Lo que faltaba era esto: una vista de <b>solo lectura</b>. Y hace falta,
+ * porque sin ella las dos decisiones del modo se toman a ciegas — eliges 1 de 3
+ * cartas sin poder mirar que llevas, y decides que sobra sin ver el conjunto.
+ *
+ * <h2>Por tipo</h2>
+ *
+ * <p>Discord, 09-10-2026: <i>"add the ability to sort by type. I'd also love
+ * the ability to see how many lands I have as well as other card types"</i>.
+ * Debajo de los numeros va una linea con cuantas hay de cada tipo (siempre, en
+ * los dos ordenes) y dos botones, Por coste / Por tipo, que cambian el orden en
+ * los cuatro sitios donde sale el mazo (ver {@link AscentDecks#SORT_SETTING}).
+ *
+ * <h2>Los numeros de arriba</h2>
+ *
+ * <p>Cuantas cartas, cuantas tierras y el coste medio. No es adorno: son los
+ * tres numeros con los que se decide si al mazo le falta base de mana o le
+ * sobra parte alta, que es exactamente lo que hay que saber antes del nodo
+ * siguiente.
+ */
+public class AscentDeckScreen extends StackPane {
+
+    private final AscentRun run;
+    private final double cardWidth;
+    private final Runnable back;
+    /** El selector de arte, por encima de todo (Overlay: lo que contesta va en su capa). */
+    private final Overlay overlay = new Overlay();
+
+    /** Si se puede cambiar el arte: desde el mapa si, por encima de un nodo no. */
+    private final boolean editable;
+
+    public AscentDeckScreen(final AscentRun run, final double cardWidth, final Runnable back) {
+        this(run, cardWidth, back, true);
+    }
+
+    /**
+     * @param editable {@code false} encima de un premio, una tienda o un
+     *        descanso ({@link AscentQuickLook}): esas pantallas tienen YA su
+     *        copia del mazo (la lista de "quitar una carta", por ejemplo), y
+     *        cambiar ahi una impresion la dejaria apuntando a una carta que ya
+     *        no esta. El arte se cambia desde el mapa.
+     */
+    public AscentDeckScreen(final AscentRun run, final double cardWidth, final Runnable back,
+                            final boolean editable) {
+        this.editable = editable;
+        this.run = run;
+        this.cardWidth = cardWidth;
+        this.back = back;
+        getStyleClass().add("ascent-map-root");
+        build();
+        // Click derecho = la carta grande, como en todas partes.
+        CardZoom.install(this);
+        // Para capturarlo: -Dneo.ascent.deckPrinting=N abre el selector de arte
+        // de la N-esima carta (en el orden de la rejilla, de cara a barata).
+        final int test = Integer.getInteger("neo.ascent.deckPrinting", -1);
+        if (test >= 0 && editable) {
+            final List<PaperCard> cards = AscentDecks.sortedByCost(AscentDecks.load(run));
+            // La primera desde la N con mas de un arte: con uno solo no se abre nada.
+            for (int i = test; i < cards.size(); i++) {
+                final PaperCard c = cards.get(i);
+                if (AscentDecks.printingsOf(c).size() > 1) {
+                    javafx.application.Platform.runLater(() -> choosePrinting(c));
+                    break;
+                }
+            }
+        }
+    }
+
+    /** Monta (o vuelve a montar, tras cambiar un arte) la pantalla entera. */
+    private void build() {
+        final Parchment paper = new Parchment(run.getSeed() + 91L, Color.web("#E4D3AC"));
+        StackPane.setMargin(paper, new Insets(10));
+
+        final Deck deck = AscentDecks.load(run);
+        final List<PaperCard> cards = AscentDecks.sortedByCost(deck);
+
+        final Label title = new Label(NeoText.get("ascent.map.deck").toUpperCase());
+        title.getStyleClass().add("ascent-act");
+
+        final Label stats = new Label(summary(cards));
+        stats.getStyleClass().add("ascent-hint");
+
+        // Cuantas de cada tipo, y en que orden se ensenyan (09-10-2026).
+        final Label types = new Label(AscentDecks.typeLine(cards));
+        types.setId("ascent-deck-types");
+        types.getStyleClass().add("ascent-types");
+        types.setWrapText(true);
+        final HBox order = new HBox(8, sortButton(false), sortButton(true));
+        order.setAlignment(Pos.CENTER);
+
+        // El arte SI se toca (Discord, 06-10-2026: Final Fantasy, cartas en
+        // japones, Marvel...). Es solo el dibujo: ver AscentDecks.printingsOf.
+        final Label printHint = new Label(editable ? NeoText.get("ascent.deck.printHint") : "");
+        printHint.setManaged(editable);
+        printHint.setVisible(editable);
+        printHint.getStyleClass().add("ascent-hint");
+        printHint.setWrapText(true);
+
+        final AscentDeckView grid = new AscentDeckView(cards, cardWidth * 0.85,
+                editable ? this::choosePrinting : null);
+
+        final Button close = new Button(NeoText.get("common.back"));
+        close.getStyleClass().addAll("ascent-button", "btn-primary");
+        close.setOnAction(e -> back.run());
+        final HBox buttons = new HBox(close);
+        buttons.setAlignment(Pos.CENTER);
+        // El borde del papel esta ROTO: ver Parchment.SAFE_EDGE.
+        buttons.setPadding(new Insets(10, 0, Parchment.SAFE_EDGE, 0));
+
+        // RECORDAR LOS ARTES (Discord, 08-10-2026: "every time I start a new
+        // run, I have to edit the deck styles over again"). Apagado de fabrica;
+        // con el puesto, el arte que eliges aqui es tu favorito y las runs
+        // siguientes salen con el. Ver AscentArt.
+        final javafx.scene.control.CheckBox remember =
+                new javafx.scene.control.CheckBox(NeoText.get("ascent.deck.rememberArt"));
+        remember.setId("ascent-remember-art");
+        remember.getStyleClass().add("ascent-remember");
+        remember.setSelected(forge.neo.ascent.AscentArt.enabled());
+        remember.setTooltip(new javafx.scene.control.Tooltip(NeoText.get("ascent.deck.rememberArt.tip")));
+        remember.selectedProperty().addListener((obs, was, now) -> forge.neo.ascent.AscentArt.setEnabled(now));
+        remember.setManaged(editable);
+        remember.setVisible(editable);
+
+        final VBox head = new VBox(8, title, stats, types, order, printHint, remember);
+        head.setAlignment(Pos.TOP_CENTER);
+        head.setPadding(new Insets(22, 28, 6, 28));
+
+        // BorderPane y no un VBox: un mazo largo empuja el boton fuera de la
+        // pantalla, y entonces no hay forma de volver. Ver AscentOverScreen.
+        final BorderPane chrome = new BorderPane();
+        chrome.setTop(head);
+        chrome.setCenter(grid);
+        chrome.setBottom(buttons);
+        BorderPane.setMargin(grid, new Insets(0, 28, 0, 28));
+        final VBox commander = commanderColumn(deck, cardWidth, editable ? this::choosePrinting : null);
+        if (commander != null) {
+            chrome.setLeft(commander);
+            BorderPane.setMargin(grid, new Insets(0, 28, 0, 0));
+        }
+
+        getChildren().setAll(paper, chrome, overlay);
+    }
+
+    /**
+     * Uno de los dos botones del orden. El elegido, marcado: el estado se ve
+     * (principio 3). Cambiarlo guarda la preferencia y vuelve a montar la
+     * pantalla.
+     */
+    private Button sortButton(final boolean byType) {
+        final Button b = new Button(NeoText.get(byType ? "ascent.deck.sortType" : "ascent.deck.sortCost"));
+        b.setId(byType ? "ascent-sort-type" : "ascent-sort-cost");
+        b.getStyleClass().add("ascent-button");
+        if (AscentDecks.byType() == byType) {
+            b.getStyleClass().add("ascent-button-on");
+        }
+        b.setOnAction(e -> {
+            if (AscentDecks.byType() != byType) {
+                AscentDecks.setByType(byType);
+                build();
+            }
+        });
+        return b;
+    }
+
+    /**
+     * El selector de arte de siempre ({@link PrintingDialog}), con su contador
+     * de copias si hay varias. Al elegir se guarda el mazo de la run y se
+     * vuelve a pintar.
+     */
+    private void choosePrinting(final PaperCard card) {
+        final List<PaperCard> printings = AscentDecks.printingsOf(card);
+        if (printings.size() <= 1) {
+            return;
+        }
+        overlay.setOnBackgroundClick(overlay::hide);
+        final PrintingDialog[] dialog = new PrintingDialog[1];
+        dialog[0] = new PrintingDialog(card, printings, cardWidth, picked -> {
+            overlay.hide();
+            if (AscentDecks.switchPrinting(run, card, picked, dialog[0].copies()) > 0) {
+                // Y si recuerdas los artes, este es ya el tuyo (AscentArt).
+                forge.neo.ascent.AscentArt.remember(picked);
+                build();
+            }
+        }, overlay::hide).offerCopies(AscentDecks.copiesOf(run, card));
+        overlay.show(dialog[0]);
+    }
+
+    /**
+     * El comandante, <b>aparte</b> y mas grande, o {@code null} si el mazo no
+     * lo tiene (Estandar).
+     *
+     * <p>Pedido en itch.io (24-09-2026): <i>"es confuso, sobre todo si dejas
+     * que el juego lo elija por ti"</i>. Y tenia razon de mas: el comandante
+     * vive en su propia seccion del mazo y la rejilla solo ensenya la principal,
+     * asi que no es que se confundiera entre las demas — es que <b>no salia</b>.
+     * Con un comandante elegido al azar no habia forma de saber cual era sin
+     * entrar en una partida.
+     *
+     * <p>Columna a la izquierda y no una carta mas al principio de la rejilla:
+     * en la rejilla se ordena por coste y se mezclaria justo con lo que tiene
+     * que distinguirse (principio 3 del las notas de diseño, el estado se ve).
+     */
+    private static VBox commanderColumn(final Deck deck, final double cardWidth,
+                                        final java.util.function.Consumer<PaperCard> onPick) {
+        if (deck == null || !deck.has(DeckSection.Commander)) {
+            return null;
+        }
+        final List<PaperCard> commanders = deck.getCommanders();
+        if (commanders.isEmpty()) {
+            return null;
+        }
+        final Label label = new Label(NeoText.get("commander.yours").toUpperCase());
+        label.getStyleClass().add("ascent-hint");
+        final VBox column = new VBox(10, label);
+        column.setAlignment(Pos.TOP_CENTER);
+        column.setPadding(new Insets(4, 22, 0, 28));
+        for (final PaperCard c : commanders) {
+            final CardNode node = new CardNode(cardWidth * 1.35);
+            node.setRotationEnabled(false);
+            node.setCard(CardView.getCardForUi(c));
+            if (onPick != null) {
+                node.setCursor(javafx.scene.Cursor.HAND);
+                node.setOnMouseClicked(e -> {
+                    if (e.getButton() == javafx.scene.input.MouseButton.PRIMARY) {
+                        onPick.accept(c);
+                    }
+                });
+            }
+            column.getChildren().add(node);
+        }
+        return column;
+    }
+
+    /** Cuantas cartas, cuantas tierras y a cuanto sale el coste medio. */
+    private static String summary(final List<PaperCard> cards) {
+        int lands = 0;
+        int cmc = 0;
+        int spells = 0;
+        for (final PaperCard c : cards) {
+            if (c.getRules() == null) {
+                continue;
+            }
+            if (c.getRules().getType().isLand()) {
+                lands++;
+            } else {
+                spells++;
+                cmc += c.getRules().getManaCost().getCMC();
+            }
+        }
+        // El coste medio se cuenta SOLO sobre los hechizos. Metiendo las
+        // tierras (que cuestan 0) el numero baja siempre y deja de significar
+        // nada: es la misma razon por la que el mazo se mide por lo que hay que
+        // pagar y no por lo que hay en la caja.
+        final String avg = spells == 0 ? "-"
+                : String.format(java.util.Locale.ROOT, "%.1f", cmc / (double) spells);
+        return NeoText.get("ascent.deck.stats", cards.size(), lands, avg);
+    }
+}

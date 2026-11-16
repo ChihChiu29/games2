@@ -1,0 +1,6 @@
+/* Solo si se pide -Dneo.text.lcd=true: ver NeoFonts. Fue el primer intento
+   para Wine (su Direct2D no suaviza el texto gris; el LCD va por DirectWrite)
+   y se quedo corto. Bajo Wine lo que se usa ahora es prism.fontSizeLimit. */
+.text, Text {
+    -fx-font-smoothing-type: lcd;
+}

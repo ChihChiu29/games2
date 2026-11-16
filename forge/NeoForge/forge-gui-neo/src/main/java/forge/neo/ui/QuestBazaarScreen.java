@@ -1,0 +1,671 @@
+package forge.neo.ui;
+
+import java.util.List;
+
+import forge.gamemodes.quest.bazaar.IQuestBazaarItem;
+import forge.gamemodes.quest.bazaar.QuestPetController;
+import forge.neo.NeoText;
+import forge.neo.quest.NeoQuest;
+import forge.neo.quest.NeoQuestBazaar;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
+import javafx.scene.control.ScrollPane;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
+import javafx.scene.layout.VBox;
+
+/**
+ * El bazar: las mejoras permanentes y las mascotas.
+ *
+ * <p>Es la otra forma de gastar creditos, y la que no da cartas. Lo que compras
+ * aqui <b>no se pierde</b> y cambia como juegas: mas vidas de partida, los
+ * desafios llegando antes, mejor precio al vender, la primera cartada del
+ * mulligan gratis, y una criatura que empieza contigo en la mesa.
+ *
+ * <p>Se presenta por <b>puestos</b>, que es como lo tiene escrito Forge, y con
+ * su parrafo de ambientacion: son seis frases bien escritas que ya estaban en
+ * {@code index.xml} y que dan al modo la unica textura que tiene.
+ *
+ * <p>Como en el resto de la tienda: <b>elegir no compra</b>. Cada objeto lleva
+ * su precio y su boton, y el boton dice lo que hace.
+ *
+ * <p>Un puesto sin nada a la venta <b>se ensenya igual, vacio y con su motivo</b>.
+ * Los objetos desaparecen del mostrador segun los compras
+ * ({@code isAvailableForPurchase}), asi que un puesto que se queda en blanco es
+ * un puesto agotado — y eso es una recompensa, no un error.
+ */
+public class QuestBazaarScreen extends StackPane {
+
+    private static final javafx.css.PseudoClass SELECTED =
+            javafx.css.PseudoClass.getPseudoClass("selected");
+
+    /** Que puede hacer el jugador aqui. */
+    public interface Actions {
+        void back();
+
+        /** Algo ha cambiado: creditos, vidas, mascotas. Repintar el cuartel. */
+        void changed();
+    }
+
+    private final Actions actions;
+    private final Label credits = new Label();
+    /** Las vidas de cada duelo: el Elixir las sube y Pound of Flesh las baja. */
+    private final Label life = new Label();
+    private final VBox content = new VBox(16);
+    private final Overlay overlay = new Overlay();
+
+    public QuestBazaarScreen(final Actions actions) {
+        this.actions = actions;
+        getStyleClass().addAll("table-root", "quest");
+
+        final BorderPane frame = new BorderPane();
+        frame.setTop(header());
+        frame.setCenter(body());
+        // Volver, abajo a la derecha: el mismo sitio en todas las pantallas
+        // (las notas de diseño, principio 12). Antes iba en la cabecera.
+        frame.setBottom(BackBar.of(actions::back));
+        getChildren().addAll(frame, overlay);
+        // Clic derecho sobre una mascota: su carta en grande.
+        CardZoom.install(this);
+
+        // Solo pruebas: mejoras compradas en memoria para ver las insignias.
+        if (Boolean.getBoolean("neo.bazaar.demoUpgrades")) {
+            NeoQuestBazaar.demoUpgradesForTest();
+        }
+        reload();
+
+        // -Dneo.bazaar.ask=Flesh: abre la pregunta del objeto cuyo nombre lo
+        // contenga, para capturarla con --snapshot sin pulsar nada (la guía de pruebas).
+        final String ask = System.getProperty("neo.bazaar.ask");
+        if (ask != null) {
+            javafx.application.Platform.runLater(() -> {
+                for (final NeoQuestBazaar.Stall stall : NeoQuestBazaar.stalls()) {
+                    for (final IQuestBazaarItem item : stall.getItems()) {
+                        if (item.getPurchaseName().toLowerCase(java.util.Locale.ROOT)
+                                .contains(ask.toLowerCase(java.util.Locale.ROOT))) {
+                            askBeforeBuying(item, NeoQuestBazaar.gainOf(item));
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    /** Las imagenes llegan en segundo plano: hay que repedirlas. */
+    public void refreshArt() {
+        forge.neo.card.CardNode.refreshAllIn(this);
+    }
+
+    private Region header() {
+        final Label title = new Label(NeoText.get("bazaar.title"));
+        title.getStyleClass().add("home-title");
+        final Label sub = new Label(NeoText.get("bazaar.subtitle"));
+        sub.getStyleClass().add("home-subtitle");
+
+        credits.getStyleClass().addAll("stat-value", "stat-credits");
+        final Label cap = new Label(NeoText.get("quest.credits"));
+        cap.getStyleClass().add("caption");
+        final VBox money = new VBox(-2, credits, cap);
+        money.setAlignment(Pos.CENTER);
+        money.getStyleClass().add("stat-tile");
+        money.setPadding(new Insets(8, 18, 8, 18));
+
+        // Las vidas, al lado: dos de los objetos de aqui las cambian, y sin
+        // verlas comprar no parecia hacer nada (decision 295).
+        life.getStyleClass().add("stat-value");
+        final Label lifeCap = new Label(NeoText.get("quest.duelLife"));
+        lifeCap.getStyleClass().add("caption");
+        final VBox lives = new VBox(-2, life, lifeCap);
+        lives.setAlignment(Pos.CENTER);
+        lives.getStyleClass().add("stat-tile");
+        lives.setPadding(new Insets(8, 18, 8, 18));
+
+        final Region gap = new Region();
+        HBox.setHgrow(gap, Priority.ALWAYS);
+        final HBox row = new HBox(14, new VBox(2, title, sub), gap, lives, money);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.setPadding(new Insets(18, 28, 8, 30));
+        return row;
+    }
+
+    private Region body() {
+        content.setPadding(new Insets(8, 30, 22, 30));
+        final ScrollPane sp = new ScrollPane(content);
+        sp.getStyleClass().add("dialog-scroll");
+        sp.setFitToWidth(true);
+        sp.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        // -Dneo.bazaar.scroll=0..1: abierto ya bajado, para capturar los puestos
+        // de abajo (las mascotas) sin rueda (la guía de pruebas).
+        final String scroll = System.getProperty("neo.bazaar.scroll");
+        if (scroll != null) {
+            javafx.application.Platform.runLater(() -> sp.setVvalue(Double.parseDouble(scroll)));
+        }
+        return sp;
+    }
+
+    /**
+     * Se repinta ENTERO despues de cada compra.
+     *
+     * <p>No es pereza: comprar cambia el mostrador de verdad — la mejora que
+     * acabas de comprar desaparece, la mascota pasa a ofrecer el nivel
+     * siguiente y aparece en los huecos — asi que refrescar solo una fila
+     * dejaria la pantalla mintiendo.
+     */
+    private void reload() {
+        credits.setText(String.valueOf(NeoQuest.credits()));
+        life.setText(String.valueOf(NeoQuest.life()));
+        content.getChildren().clear();
+
+        content.getChildren().add(pets());
+        final Region upgrades = upgrades();
+        if (upgrades != null) {
+            content.getChildren().add(upgrades);
+        }
+
+        for (final NeoQuestBazaar.Stall stall : NeoQuestBazaar.stalls()) {
+            content.getChildren().add(stallBox(stall));
+        }
+
+        // El viaje va EL ULTIMO, y plegado.
+        //
+        // Estuvo arriba del todo y estaba mal: limitar la aventura a un bloque
+        // es una decision de veterano, y lo primero que se ve al entrar al
+        // bazar tiene que ser lo que se viene a hacer aqui, que es comprar. De
+        // fabrica se juega con todo.
+        // Una Quest limitada a unas expansiones no viaja (NeoQuestWorlds.travelTo).
+        if (forge.neo.quest.NeoQuest.chosenSets() == null) {
+            content.getChildren().add(worlds());
+        }
+    }
+
+    private Region stallBox(final NeoQuestBazaar.Stall stall) {
+        final Label name = new Label(stall.getTitle());
+        name.getStyleClass().add("quest-deck-name");
+
+        final Label fluff = new Label(stall.getFluff());
+        fluff.getStyleClass().add("home-subtitle");
+        fluff.setWrapText(true);
+        fluff.setMaxWidth(UiScale.px(880));
+        fluff.setMinHeight(Region.USE_PREF_SIZE);
+
+        final VBox box = new VBox(8, name, fluff);
+        box.getStyleClass().add("stat-tile");
+        box.setPadding(new Insets(14, 18, 14, 18));
+
+        final List<IQuestBazaarItem> items = stall.getItems();
+        // "Ya has comprado todo" solo si es verdad: una mascota que espera a
+        // tu rango no esta agotada (Discord, 15-10-2026).
+        if (items.isEmpty() && stall.getLocked().isEmpty()) {
+            final Label sold = new Label(NeoText.get("bazaar.soldOut"));
+            sold.getStyleClass().add("caption");
+            box.getChildren().add(sold);
+            return box;
+        }
+        for (final IQuestBazaarItem item : items) {
+            box.getChildren().add(itemRow(item));
+        }
+        for (final NeoQuestBazaar.LockedPet locked : stall.getLocked()) {
+            box.getChildren().add(lockedRow(locked));
+        }
+        return box;
+    }
+
+    /**
+     * Una mascota cuyo nivel siguiente aun no se vende: apagada, sin boton, y
+     * diciendo cuantas victorias faltan. Se ensenya para que se sepa que hay
+     * mas y como llegar.
+     */
+    private Region lockedRow(final NeoQuestBazaar.LockedPet locked) {
+        final Label name = new Label(NeoText.get("bazaar.petLevel",
+                locked.pet().getName(), locked.nextLevel()));
+        name.getStyleClass().add("duel-name");
+
+        final Label what = new Label(NeoText.get("bazaar.petLocked",
+                locked.rank(), locked.winsLeft()));
+        what.getStyleClass().add("home-subtitle");
+        what.setWrapText(true);
+        what.setMaxWidth(UiScale.px(620));
+        what.setMinHeight(Region.USE_PREF_SIZE);
+
+        final HBox row = new HBox(14, new VBox(2, name, what));
+        final Region card = petCard(locked.pet(), locked.nextLevel());
+        if (card != null) {
+            row.getChildren().add(0, card);
+        }
+        row.setOpacity(0.55);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.setPadding(new Insets(8, 4, 8, 4));
+        return row;
+    }
+
+    private Region itemRow(final IQuestBazaarItem item) {
+        final int price = NeoQuestBazaar.priceOf(item);
+        final boolean afford = NeoQuestBazaar.canAfford(item);
+
+        final Label name = new Label(item.getPurchaseName());
+        name.getStyleClass().add("duel-name");
+
+        // La descripcion la escribe el propio objeto y ya dice lo que hace y a
+        // que nivel lo tienes ("Level 2 -> 3"). No hay que inventarse nada.
+        final Label what = new Label(NeoQuestBazaar.descriptionOf(item));
+        what.getStyleClass().add("home-subtitle");
+        what.setWrapText(true);
+        what.setMaxWidth(UiScale.px(620));
+        what.setMinHeight(Region.USE_PREF_SIZE);
+
+        // Lo que te PAGAN, si te pagan (Pound of Flesh): "+250 cr." y no "0 cr.",
+        // que se leia como gratis (decision 295).
+        final int gain = NeoQuestBazaar.gainOf(item);
+        final Label cost = new Label(gain > 0 && price == 0
+                ? NeoText.get("bazaar.gain", gain)
+                : NeoText.get("shop.credits.short", price));
+        cost.getStyleClass().add(afford ? "set-price-ok" : "set-price-no");
+
+        final Button buy = new Button(NeoText.get("bazaar.buy"));
+        buy.getStyleClass().add("btn-primary");
+        buy.setMinWidth(Region.USE_PREF_SIZE);
+        buy.setDisable(!afford);
+        buy.setOnAction(e -> {
+            if (gain > 0) {
+                // Lo que te paga es porque te quita algo, y eso no se deshace:
+                // pregunta, con el texto entero y tus vidas delante (principio 6).
+                askBeforeBuying(item, gain);
+            } else {
+                buyNow(item);
+            }
+        });
+
+        final Region gap = new Region();
+        HBox.setHgrow(gap, Priority.ALWAYS);
+        final HBox row = new HBox(14, new VBox(2, name, what), gap, cost, buy);
+        // Una mascota lleva la carta del nivel que vas a COMPRAR: el arte
+        // cambia al subir (Discord, 13-10-2026), y asi se ve antes de pagar.
+        if (item instanceof QuestPetController pet) {
+            final int level = forge.model.FModel.getQuest().getAssets().getPetLevel(pet.getSaveFileKey());
+            final Region card = petCard(pet, Math.min(level + 1, pet.getMaxLevel()));
+            if (card != null) {
+                row.getChildren().add(0, card);
+            }
+        }
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.setPadding(new Insets(8, 4, 8, 4));
+        return row;
+    }
+
+    /**
+     * La carta de una mascota en ese nivel (la de Forge: "Wolf Pet · Level 2
+     * of 4"), o null si no la hay. Ver {@link forge.neo.card.PetArt}.
+     */
+    private static Region petCard(final QuestPetController pet, final int level) {
+        final forge.item.PaperToken token = forge.neo.card.PetArt.levelCard(pet.getSaveFileKey(), level);
+        if (token == null) {
+            return null;
+        }
+        final forge.neo.card.CardNode node = new forge.neo.card.CardNode(UiScale.px(96));
+        node.setCard(forge.game.card.CardView.getCardForUi(token));
+        node.setRotationEnabled(false);
+        return node;
+    }
+
+    private void buyNow(final IQuestBazaarItem item) {
+        if (NeoQuestBazaar.buy(item)) {
+            reload();
+            actions.changed();
+        }
+    }
+
+    /** La respuesta marcada es CANCELAR: es lo que sale de un Intro por inercia. */
+    private void askBeforeBuying(final IQuestBazaarItem item, final int gain) {
+        final String body = NeoQuestBazaar.descriptionOf(item).trim() + "\n\n"
+                + NeoText.get("bazaar.confirm.gain", gain) + " "
+                + NeoText.get("bazaar.confirm.status", NeoQuest.life(), NeoQuest.credits());
+        overlay.setOnBackgroundClick(overlay::hide);
+        overlay.show(new ConfirmDialog(NeoText.get("bazaar.confirm.title", item.getPurchaseName()), body,
+                List.of(NeoText.get("bazaar.buy"), NeoText.get("common.cancel")), 1,
+                choice -> {
+                    overlay.hide();
+                    if (choice == 0) {
+                        buyNow(item);
+                    }
+                }));
+    }
+
+    /**
+     * A donde puedes viajar.
+     *
+     * <p>Un mundo no es un decorado: decide <b>con que cartas existe el
+     * juego</b>. En Zendikar la tienda solo vende sobres de Zendikar, los
+     * premios salen de ahi y los rivales son los de esa carpeta. Viajar es la
+     * forma de cambiar de aventura sin empezar otra.
+     *
+     * <p>Va aqui, con el bazar, porque es lo mismo: cosas que cambian la
+     * aventura entera y que no son cartas.
+     */
+    private Region worlds() {
+        final Label cap = new Label(NeoText.get("bazaar.worlds"));
+        cap.getStyleClass().add("caption");
+
+        final forge.gamemodes.quest.QuestWorld now = forge.neo.quest.NeoQuestWorlds.current();
+        final boolean everything = now == null
+                || forge.gamemodes.quest.QuestWorld.MAINWORLDNAME.equals(now.getName());
+        final Label where = new Label(everything
+                ? NeoText.get("bazaar.worldAll") : NeoText.get("bazaar.worldNow", now.getName()));
+        where.getStyleClass().add("quest-deck-name");
+
+        final Label warn = new Label(NeoText.get("bazaar.worldWarn"));
+        warn.getStyleClass().add("home-subtitle");
+        warn.setWrapText(true);
+        warn.setMaxWidth(UiScale.px(880));
+        warn.setMinHeight(Region.USE_PREF_SIZE);
+
+        final Button toggle = new Button(NeoText.get("questNew.worldOpen"));
+        toggle.getStyleClass().add("btn-secondary");
+        toggle.setMinWidth(Region.USE_PREF_SIZE);
+
+        worldSearch.setPromptText(NeoText.get("questNew.worldSearch"));
+        worldSearch.getStyleClass().add("text-input");
+        worldSearch.setPrefColumnCount(18);
+        worldSearch.textProperty().addListener((o, was, is) -> paintWorlds());
+
+        worldGrid.setAlignment(Pos.TOP_LEFT);
+        final ScrollPane scroll = new ScrollPane(worldGrid);
+        scroll.getStyleClass().add("dialog-scroll");
+        scroll.setFitToWidth(true);
+        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        scroll.setPrefViewportHeight(UiScale.px(170));
+
+        paintWorlds();
+
+        final VBox picker = new VBox(8, warn, worldSearch, scroll);
+        picker.setVisible(false);
+        picker.setManaged(false);
+        toggle.setOnAction(e -> {
+            final boolean open = !picker.isVisible();
+            picker.setVisible(open);
+            picker.setManaged(open);
+            toggle.setText(NeoText.get(open ? "questNew.worldClose" : "questNew.worldOpen"));
+        });
+
+        final HBox head = new HBox(12, where, toggle);
+        head.setAlignment(Pos.CENTER_LEFT);
+
+        final VBox box = new VBox(8, cap, head, picker);
+        box.getStyleClass().add("stat-tile");
+        box.setPadding(new Insets(14, 18, 14, 18));
+        return box;
+    }
+
+    private final javafx.scene.control.TextField worldSearch = new javafx.scene.control.TextField();
+    private final javafx.scene.layout.FlowPane worldGrid = new javafx.scene.layout.FlowPane(8, 8);
+
+    private void paintWorlds() {
+        worldGrid.getChildren().clear();
+        final forge.gamemodes.quest.QuestWorld now = forge.neo.quest.NeoQuestWorlds.current();
+        final String q = worldSearch.getText() == null ? ""
+                : worldSearch.getText().trim().toLowerCase(java.util.Locale.ROOT);
+        for (final forge.gamemodes.quest.QuestWorld w
+                : forge.neo.quest.NeoQuestWorlds.all()) {
+            final String sets = forge.neo.quest.NeoQuestWorlds.describe(w);
+            final boolean here = now != null && now.getName().equals(w.getName());
+            // El mundo en el que estas nunca se filtra: si el buscador lo
+            // escondiera, dejaria de verse donde estas.
+            if (!q.isEmpty() && !here
+                    && !w.getName().toLowerCase(java.util.Locale.ROOT).contains(q)
+                    && !sets.toLowerCase(java.util.Locale.ROOT).contains(q)) {
+                continue;
+            }
+            worldGrid.getChildren().add(worldTile(w, sets, here));
+        }
+    }
+
+    private Region worldTile(final forge.gamemodes.quest.QuestWorld w,
+                             final String sets, final boolean here) {
+        final Label name = new Label(w.getName());
+        name.getStyleClass().add("duel-name");
+        name.setWrapText(true);
+        name.setMaxWidth(UiScale.px(210));
+        name.setMinHeight(Region.USE_PREF_SIZE);
+
+        final Label what = new Label(here ? NeoText.get("bazaar.worldHere") : sets);
+        what.getStyleClass().add("caption");
+        what.setWrapText(true);
+        what.setMaxWidth(UiScale.px(210));
+        what.setMinHeight(Region.USE_PREF_SIZE);
+
+        final VBox tile = new VBox(2, name, what);
+        tile.getStyleClass().add("set-tile");
+        tile.setPadding(new Insets(8, 10, 8, 10));
+        tile.setPrefWidth(UiScale.px(230));
+        tile.pseudoClassStateChanged(SELECTED, here);
+        tile.setOnMouseClicked(e -> {
+            if (e.getButton() == javafx.scene.input.MouseButton.PRIMARY
+                    && forge.neo.quest.NeoQuestWorlds.travelTo(w)) {
+                reload();
+                actions.changed();
+            }
+        });
+        return tile;
+    }
+
+    /**
+     * Los huecos de mascota.
+     *
+     * <p>Comprarla no basta: hay que <b>ponersela</b>. Es la mitad que se
+     * olvida — {@code selectPet} es una llamada aparte, y sin ella la mascota
+     * esta comprada, pagada y no sale a la mesa. Por eso los huecos van arriba
+     * del todo, antes que los puestos.
+     */
+    private Region pets() {
+        final Label cap = new Label(NeoText.get("bazaar.pets"));
+        cap.getStyleClass().add("caption");
+
+        final VBox box = new VBox(8, cap);
+
+        boolean any = false;
+        for (int slot = 0; slot < NeoQuestBazaar.petSlots(); slot++) {
+            final List<QuestPetController> owned = NeoQuestBazaar.ownedPets(slot);
+            if (owned.isEmpty()) {
+                continue;
+            }
+            any = true;
+            box.getChildren().add(petRow(slot, owned));
+        }
+        if (!any) {
+            final Label none = new Label(NeoText.get("bazaar.noPets"));
+            none.getStyleClass().add("home-subtitle");
+            none.setWrapText(true);
+            box.getChildren().add(none);
+        }
+        final VBox tile = new VBox(box);
+        tile.getStyleClass().add("stat-tile");
+        tile.setPadding(new Insets(14, 18, 14, 18));
+        return tile;
+    }
+
+    private Region petRow(final int slot, final List<QuestPetController> owned) {
+        final Label label = new Label(NeoText.get("bazaar.petSlot", slot + 1));
+        label.getStyleClass().add("caption");
+
+        final HBox choices = new HBox(6);
+        choices.setAlignment(Pos.CENTER_LEFT);
+
+        final String chosen = NeoQuestBazaar.selectedPet(slot);
+
+        // "Ninguna" es una opcion de verdad y tiene que estar: una mascota en
+        // la mesa es informacion que le das al rival, y hay quien prefiere no
+        // llevarla.
+        choices.getChildren().add(petPick(slot, null, NeoText.get("bazaar.noPet"), chosen == null));
+        for (final QuestPetController pet : owned) {
+            // Cada mascota con su carta del nivel que tiene, y el boton debajo.
+            final Button pick = petPick(slot, pet.getName(), pet.getName(), pet.getName().equals(chosen));
+            final int level = forge.model.FModel.getQuest().getAssets().getPetLevel(pet.getSaveFileKey());
+            final Region card = petCard(pet, Math.max(1, level));
+            if (card == null) {
+                choices.getChildren().add(pick);
+            } else {
+                final VBox one = new VBox(6, card, pick);
+                one.setAlignment(Pos.CENTER);
+                choices.getChildren().add(one);
+            }
+        }
+
+        final VBox row = new VBox(4, label, choices);
+        row.setPadding(new Insets(4, 0, 4, 0));
+        return row;
+    }
+
+    /**
+     * Las mejoras que ya tienes, como insignias (Discord, 25-10-2026: <i>"I
+     * bought a zeppelin, I'd like to show it off"</i>). Desaparecen del puesto
+     * al comprarlas y no se veian en ningun sitio. Cada una con el icono de
+     * Forge ({@link NeoQuestBazaar#ownedUpgrades}), su nivel si tiene varios y
+     * lo que hace al pasar el raton. Sin ninguna, el apartado no sale.
+     */
+    private Region upgrades() {
+        final List<NeoQuestBazaar.OwnedUpgrade> owned = NeoQuestBazaar.ownedUpgrades();
+        if (owned.isEmpty()) {
+            return null;
+        }
+        final Label cap = new Label(NeoText.get("bazaar.upgrades"));
+        cap.getStyleClass().add("caption");
+        final javafx.scene.layout.FlowPane badges = new javafx.scene.layout.FlowPane(10, 10);
+        for (final NeoQuestBazaar.OwnedUpgrade u : owned) {
+            final Region badge = upgradeBadge(u);
+            final Region adjust = u.adjustable() ? upgradeAdjust(u) : null;
+            badges.getChildren().add(adjust == null ? badge : new VBox(4, badge, adjust));
+        }
+        final Label hint = new Label(NeoText.get("bazaar.upgrade.hint"));
+        hint.getStyleClass().add("home-subtitle");
+        hint.setWrapText(true);
+        final VBox tile = new VBox(8, cap, hint, badges);
+        tile.getStyleClass().add("stat-tile");
+        tile.setPadding(new Insets(14, 18, 14, 18));
+        tile.setId("bazaar-upgrades");
+        return tile;
+    }
+
+    /**
+     * <b>Bajar o apagar una mejora comprada</b>, como se quita una mascota
+     * (Discord, 26-10-2026: volver a la vida de salida para que cueste mas, y
+     * subirla otra vez si se pone dificil). Con un nivel, un interruptor; con
+     * varios (el Elixir, Estates), "− 2/3 +". Subir es gratis hasta lo comprado:
+     * ver {@link forge.neo.quest.QuestUpgradeLevels}.
+     */
+    private Region upgradeAdjust(final NeoQuestBazaar.OwnedUpgrade u) {
+        if (u.owned() <= 1) {
+            final boolean on = u.level() > 0;
+            final Button toggle = new Button(NeoText.get(on ? "bazaar.upgrade.on" : "bazaar.upgrade.off"));
+            toggle.getStyleClass().add("segment");
+            toggle.pseudoClassStateChanged(SELECTED, on);
+            toggle.setMaxWidth(Double.MAX_VALUE);
+            toggle.setOnAction(e -> changeUpgrade(u, on ? 0 : 1));
+            return toggle;
+        }
+        final Button less = new Button("−");
+        final Button more = new Button("+");
+        for (final Button b : new Button[] {less, more}) {
+            b.getStyleClass().add("segment");
+            b.setMinWidth(Region.USE_PREF_SIZE);
+        }
+        less.setDisable(u.level() <= 0);
+        more.setDisable(u.level() >= u.owned());
+        less.setOnAction(e -> changeUpgrade(u, u.level() - 1));
+        more.setOnAction(e -> changeUpgrade(u, u.level() + 1));
+        final Label value = new Label(NeoText.get("bazaar.upgrade.active", u.level(), u.owned()));
+        value.getStyleClass().add("home-subtitle");
+        final javafx.scene.layout.Region gap1 = new javafx.scene.layout.Region();
+        final javafx.scene.layout.Region gap2 = new javafx.scene.layout.Region();
+        javafx.scene.layout.HBox.setHgrow(gap1, javafx.scene.layout.Priority.ALWAYS);
+        javafx.scene.layout.HBox.setHgrow(gap2, javafx.scene.layout.Priority.ALWAYS);
+        final javafx.scene.layout.HBox row = new javafx.scene.layout.HBox(4, less, gap1, value, gap2, more);
+        row.setAlignment(Pos.CENTER);
+        return row;
+    }
+
+    private void changeUpgrade(final NeoQuestBazaar.OwnedUpgrade u, final int level) {
+        NeoQuestBazaar.setUpgradeLevel(u, level);
+        reload();
+        actions.changed();
+    }
+
+    static Region upgradeBadge(final NeoQuestBazaar.OwnedUpgrade u) {
+        final VBox badge = new VBox(4);
+        // Apagada (QuestUpgradeLevels): se sigue viendo, que es tuya, pero en gris.
+        if (u.level() <= 0) {
+            badge.setOpacity(0.45);
+        }
+        badge.setAlignment(Pos.CENTER);
+        badge.getStyleClass().add("set-tile");
+        badge.setPadding(new Insets(10, 12, 10, 12));
+        badge.setPrefWidth(UiScale.px(124));
+        final javafx.scene.image.Image sprite = sprite(u.iconFile());
+        if (sprite != null && u.iconRect() != null) {
+            final int[] r = u.iconRect();
+            final javafx.scene.image.ImageView icon = new javafx.scene.image.ImageView(sprite);
+            icon.setViewport(new javafx.geometry.Rectangle2D(r[0], r[1], r[2], r[3]));
+            icon.setFitWidth(UiScale.px(56));
+            icon.setFitHeight(UiScale.px(56));
+            icon.setPreserveRatio(true);
+            icon.setSmooth(true);
+            badge.getChildren().add(icon);
+        }
+        final Label name = new Label(u.name());
+        name.getStyleClass().add("duel-name");
+        name.setWrapText(true);
+        name.setMaxWidth(UiScale.px(110));
+        name.setAlignment(Pos.CENTER);
+        name.setTextAlignment(javafx.scene.text.TextAlignment.CENTER);
+        name.setMinHeight(Region.USE_PREF_SIZE);
+        badge.getChildren().add(name);
+        if (u.maxLevel() > 1) {
+            final Label level = new Label(NeoText.get("bazaar.upgradeLevel", u.level(), u.maxLevel()));
+            level.getStyleClass().add("home-subtitle");
+            badge.getChildren().add(level);
+        }
+        if (u.description() != null && !u.description().isBlank()) {
+            final javafx.scene.control.Tooltip tip = new javafx.scene.control.Tooltip(u.description());
+            tip.setWrapText(true);
+            tip.setMaxWidth(UiScale.px(420));
+            // Casi al momento (Discord, 27-10-2026: "it would be nice to see
+            // what each upgrade does if you put the mouse above the icons"):
+            // con el segundo de JavaFX parecia que no habia nada que ver.
+            tip.setShowDelay(javafx.util.Duration.millis(150));
+            tip.setShowDuration(javafx.util.Duration.INDEFINITE);
+            javafx.scene.control.Tooltip.install(badge, tip);
+        }
+        return badge;
+    }
+
+    /** Las laminas de iconos, leidas una vez cada una: la de Forge y el zepelin, que va aparte. */
+    private static final java.util.Map<String, javafx.scene.image.Image> SPRITES = new java.util.HashMap<>();
+
+    private static javafx.scene.image.Image sprite(final String file) {
+        if (file == null) {
+            return null;
+        }
+        return SPRITES.computeIfAbsent(file, k -> {
+            final java.io.File f = new java.io.File(k);
+            return f.isFile() ? new javafx.scene.image.Image(f.toURI().toString()) : null;
+        });
+    }
+
+    private Button petPick(final int slot, final String value, final String label,
+                           final boolean selected) {
+        final Button b = new Button(label);
+        b.getStyleClass().add("segment");
+        b.setMinWidth(Region.USE_PREF_SIZE);
+        b.pseudoClassStateChanged(SELECTED, selected);
+        b.setOnAction(e -> {
+            NeoQuestBazaar.selectPet(slot, value);
+            reload();
+            actions.changed();
+        });
+        return b;
+    }
+}

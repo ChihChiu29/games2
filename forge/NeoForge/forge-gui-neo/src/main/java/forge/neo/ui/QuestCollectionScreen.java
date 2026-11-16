@@ -1,0 +1,349 @@
+package forge.neo.ui;
+
+import forge.neo.NeoText;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+import forge.game.card.CardView;
+import forge.item.PaperCard;
+import forge.neo.card.CardNode;
+import forge.neo.quest.NeoQuest;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+import javafx.scene.control.ComboBox;
+import javafx.scene.control.Label;
+import javafx.scene.control.ScrollPane;
+import javafx.scene.control.TextField;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.FlowPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
+import javafx.scene.layout.VBox;
+
+/**
+ * Tu coleccion de la aventura: que cartas tienes.
+ *
+ * <p>Es la otra mitad de la tienda. Abrir un sobre solo tiene gracia si despues
+ * puedes ir a mirar lo que llevas acumulado, y sin esto la coleccion era un
+ * numero en el cuartel general — <i>"130 cartas"</i> — que no se podia abrir.
+ *
+ * <p>Deliberadamente <b>solo se mira</b>: aqui no se monta mazo. Montar es otra
+ * tarea y tiene su pantalla (el constructor, que ademas usa esta misma
+ * coleccion de catalogo). Mezclar las dos convierte "a ver que tengo" en un
+ * sitio donde se puede tocar algo sin querer.
+ *
+ * <p>Click derecho amplia la carta ({@link CardZoom}): a este tamanyo no se lee
+ * el texto, y lo que se viene a hacer aqui es justamente leer lo que te ha
+ * tocado.
+ */
+public class QuestCollectionScreen extends StackPane {
+
+    /** Cuantas cartas se pintan por pagina. */
+    private static final int PAGE = 40;
+
+    private final double cardWidth;
+
+    private final TextField search = new TextField();
+    private final ComboBox<String> sort = new ComboBox<>();
+    private final FlowPane grid = new FlowPane(10, 10);
+    private final Pager pager;
+    private final Label summary = new Label();
+    private final Label resultCount = new Label();
+    /** La ayuda del pie: va a la izquierda de Volver, en la misma barra. */
+    private final Label hint = new Label(NeoText.get("haul.hint"));
+    /** La pantalla en si; encima, la capa del dialogo de exportar. */
+    private final BorderPane layout = new BorderPane();
+    private final Overlay overlay = new Overlay();
+
+    /** Todas tus cartas, una entrada por carta, con cuantas tienes. */
+    private final List<Entry> all = new ArrayList<>();
+    private List<Entry> filtered = new ArrayList<>();
+
+    /**
+     * Los filtros del constructor (color, tipo, rareza y coste), los mismos
+     * botones que en la tienda y la enciclopedia. Pedido el 16-10-2026: "todas
+     * esas cosas que tenemos en el creador de mazos tenemos que tenerlo tambien
+     * en la parte de coleccion".
+     */
+    private final CardFilterBar filters;
+
+    /** Una carta de la coleccion y cuantas copias tienes. */
+    private static final class Entry {
+        private final PaperCard card;
+        private final int count;
+        private final String lowerName;
+        private final String lowerType;
+        /** El texto de la carta: "defender" no salia (16-10-2026, Discord). */
+        private final String lowerText;
+
+        Entry(final PaperCard card, final int count) {
+            this.card = card;
+            this.count = count;
+            // El nombre ingles Y el traducido: en castellano se busca
+            // "Anillo solar", que es lo que pone la carta en pantalla.
+            this.lowerName = (card.getName() + " "
+                    + forge.neo.card.CardText.nameOf(card)).toLowerCase(Locale.ROOT);
+            this.lowerType = (card.getRules().getType().toString() + " "
+                    + forge.neo.card.CardText.typeOf(card)).toLowerCase(Locale.ROOT);
+            // Y el texto traducido, si lo hay: en castellano se busca "vuela".
+            final String oracle = card.getRules().getOracleText();
+            String translated = null;
+            try {
+                translated = forge.util.CardTranslation.getTranslatedOracle(card.getName());
+            } catch (final RuntimeException ignored) {
+                // sin traduccion: solo el ingles
+            }
+            this.lowerText = ((oracle == null ? "" : oracle) + " "
+                    + (translated == null ? "" : translated)).toLowerCase(Locale.ROOT);
+        }
+    }
+
+    public QuestCollectionScreen(final double cardWidth, final Runnable onBack) {
+        this.cardWidth = cardWidth;
+        getStyleClass().addAll("table-root", "quest");
+
+        pager = new Pager(PAGE, this::paint);
+        filters = new CardFilterBar(() -> {
+            pager.reset();
+            reload();
+        });
+
+        load();
+        layout.setTop(header(onBack));
+        layout.setCenter(body());
+        // Volver, abajo a la derecha: el mismo sitio en todas las pantallas
+        // (las notas de diseño, principio 12). Antes iba en la cabecera.
+        layout.setBottom(BackBar.of(onBack, hint));
+        getChildren().addAll(layout, overlay);
+        reload();
+        // -Dneo.collection.export=true abre el dialogo de exportar (capturas).
+        if (Boolean.getBoolean("neo.collection.export")) {
+            javafx.application.Platform.runLater(this::export);
+        }
+
+        CardZoom.install(this);
+    }
+
+    /**
+     * Se lee la coleccion UNA vez.
+     *
+     * <p>Se agrupa por nombre porque tener el Sol Ring de dos ediciones es
+     * tener dos Sol Rings, no dos cartas distintas — es la misma regla que usa
+     * la tienda para decidir que es "NUEVA" y el constructor para saber cuantas
+     * copias puedes meter.
+     */
+    private void load() {
+        final Map<String, Integer> counts = new java.util.HashMap<>();
+        final Map<String, PaperCard> first = new java.util.LinkedHashMap<>();
+        if (NeoQuest.isActive() && NeoQuest.collection() != null) {
+            for (final Map.Entry<PaperCard, Integer> e : NeoQuest.collection()) {
+                final String key = e.getKey().getName().toLowerCase(Locale.ROOT);
+                counts.merge(key, e.getValue(), Integer::sum);
+                first.putIfAbsent(key, e.getKey());
+            }
+        }
+        for (final Map.Entry<String, PaperCard> e : first.entrySet()) {
+            all.add(new Entry(e.getValue(), counts.getOrDefault(e.getKey(), 1)));
+        }
+    }
+
+    private Region header(final Runnable onBack) {
+        final Label title = new Label(NeoText.get("deck.collection"));
+        title.getStyleClass().add("home-title");
+
+        summary.getStyleClass().add("home-subtitle");
+
+        // Exportar: la coleccion en texto para otro programa (itch.io, 21-10-2026).
+        final javafx.scene.control.Button export = new javafx.scene.control.Button(NeoText.get("collection.export"));
+        export.getStyleClass().add("btn-secondary");
+        export.setId("collection-export");
+        export.setDisable(all.isEmpty());
+        export.setOnAction(e -> export());
+
+        final Region gap = new Region();
+        HBox.setHgrow(gap, Priority.ALWAYS);
+        final HBox row = new HBox(14, new VBox(2, title, summary), gap, export);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.setPadding(new Insets(18, 28, 8, 30));
+        return row;
+    }
+
+    private Region body() {
+        search.setPromptText(NeoText.get("deck.search.rules"));
+        // t:shrine, solo en la linea de tipo (forge.neo.deck.SearchTerms)
+        search.setTooltip(new javafx.scene.control.Tooltip(NeoText.get("deck.search.tip")));
+        search.getStyleClass().add("text-input");
+        search.setPrefColumnCount(22);
+        search.textProperty().addListener((o, was, is) -> {
+            pager.reset();
+            reload();
+        });
+
+        sort.getItems().addAll(NeoText.get("sort.name"), NeoText.get("sort.cost"),
+                NeoText.get("sort.owned"), NeoText.get("sort.type"), NeoText.get("sort.value"));
+        sort.getSelectionModel().select(Integer.getInteger("neo.collection.sort", 0)); // pruebas: 4 = valor
+        sort.setOnAction(e -> reload());
+
+        resultCount.getStyleClass().add("caption");
+
+        final Region gap = new Region();
+        HBox.setHgrow(gap, Priority.ALWAYS);
+        final HBox tools = new HBox(12, search, filters.bar(), new Label(NeoText.get("sort.caption")), sort,
+                gap, resultCount);
+        tools.setAlignment(Pos.CENTER_LEFT);
+
+        grid.setAlignment(Pos.TOP_LEFT);
+        // El sitio de la carta con el raton encima, que crece y sube: sin el,
+        // el visor le cortaba la cabeza a la primera fila (Discord, 16-10-2026).
+        // Lo mismo que las reliquias de Ascenso y el visor de zonas.
+        grid.setPadding(CardNode.hoverRoomFor(cardWidth));
+        final ScrollPane scroll = new ScrollPane(grid);
+        scroll.getStyleClass().add("dialog-scroll");
+        scroll.setFitToWidth(true);
+        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        VBox.setVgrow(scroll, Priority.ALWAYS);
+
+        hint.getStyleClass().add("home-subtitle");
+
+        final VBox content = new VBox(12, tools, filters.advanced(), scroll, pager);
+        content.setPadding(new Insets(4, 30, 18, 30));
+        return content;
+    }
+
+    // ---------------------------------------------------------------
+
+    private void reload() {
+        // Cada palabra en cualquier sitio de la carta y en cualquier orden:
+        // "flying, vigilance" encuentra a Zetalpa aunque tenga "double strike"
+        // en medio (forge.neo.deck.SearchTerms, 16-10-2026).
+        final String[] terms = forge.neo.deck.SearchTerms.parse(search.getText());
+
+        filtered = new ArrayList<>();
+        for (final Entry e : all) {
+            if (filters.test(e.card)
+                    && forge.neo.deck.SearchTerms.allInTyped(terms, new String[] {e.lowerType},
+                            e.lowerName, e.lowerType, e.lowerText)) {
+                filtered.add(e);
+            }
+        }
+        filtered.sort(comparator());
+
+        pager.setTotal(filtered.size());
+        paint();
+
+        int total = 0;
+        for (final Entry e : all) {
+            total += e.count;
+        }
+        summary.setText(NeoText.get("collection.summary", all.size(), total));
+        resultCount.setText(terms.length == 0 && !filters.isActive()
+                ? NeoText.get("count.cards", filtered.size())
+                : NeoText.get("collection.someOf", filtered.size(), all.size()));
+    }
+
+    /**
+     * Como se ordena.
+     *
+     * <p>"Cuantas tengo" primero es lo que se mira para saber de que puedes
+     * montar un mazo de verdad: cuatro copias de algo valen mas que una rara
+     * suelta.
+     */
+    private Comparator<Entry> comparator() {
+        final String choice = sort.getSelectionModel().getSelectedItem();
+        if (NeoText.get("sort.cost").equals(choice)) {
+            return Comparator
+                    .comparingInt((Entry e) -> e.card.getRules().getManaCost().getCMC())
+                    .thenComparing(e -> forge.neo.card.CardText.nameOf(e.card));
+        }
+        if (NeoText.get("sort.owned").equals(choice)) {
+            return Comparator.comparingInt((Entry e) -> -e.count)
+                    .thenComparing(e -> forge.neo.card.CardText.nameOf(e.card));
+        }
+        if (NeoText.get("sort.value").equals(choice)) {
+            // Lo que te dan en la tienda, la mas cara primero (itch.io, 23-10-2026).
+            return Comparator.comparingInt((Entry e) -> -forge.neo.quest.NeoQuestSell.priceOf(e.card))
+                    .thenComparing(e -> forge.neo.card.CardText.nameOf(e.card));
+        }
+        if (NeoText.get("sort.type").equals(choice)) {
+            return Comparator
+                    .comparing((Entry e) -> forge.neo.deck.DeckEditor.groupOf(e.card))
+                    .thenComparing(e -> forge.neo.card.CardText.nameOf(e.card));
+        }
+        return Comparator.comparing(e -> forge.neo.card.CardText.nameOf(e.card));
+    }
+
+    /** Solo la pagina actual: con mil cartas, pintarlas todas deja la app pegada. */
+    private void paint() {
+        grid.getChildren().clear();
+        for (int i = pager.from(); i < Math.min(filtered.size(), pager.to()); i++) {
+            grid.getChildren().add(tile(filtered.get(i)));
+        }
+    }
+
+    private Region tile(final Entry entry) {
+        final CardNode node = new CardNode(cardWidth);
+        node.setRotationEnabled(false);
+        node.setBadgesVisible(false);
+        node.setCard(CardView.getCardForUi(entry.card));
+
+        final StackPane box = new StackPane(node);
+        // El "xN" y el precio, delante de la carta aunque se levante (Discord, 09-11-2026).
+        DeckBuilderScreen.overlaysOverCard(box, node);
+        box.getStyleClass().add("catalogue-tile");
+        // La ampliada por encima de las vecinas: las de la derecha y la fila de
+        // abajo se pintan despues y le tapaban el borde.
+        node.hoverProperty().addListener((o, was, is) -> box.setViewOrder(is ? -1 : 0));
+        box.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+
+        // El "×N" solo cuando hay mas de una: en Commander casi todo va a 1 y
+        // una pastilla en cada carta seria ruido en toda la rejilla.
+        if (entry.count > 1) {
+            final Label count = new Label("×" + entry.count);
+            count.getStyleClass().add("catalogue-count");
+            box.getChildren().add(count);
+            StackPane.setAlignment(count, Pos.TOP_RIGHT);
+            StackPane.setMargin(count, DeckBuilderScreen.countMargin(cardWidth));
+        }
+        // Lo que vale en la tienda, siempre a la vista (itch.io, 23-10-2026).
+        if (forge.neo.quest.NeoQuest.isActive()) {
+            final Label value = new Label(NeoText.get("shop.credits.short",
+                    forge.neo.quest.NeoQuestSell.priceOf(entry.card)));
+            value.getStyleClass().add("value-badge");
+            value.setMouseTransparent(true);
+            box.getChildren().add(value);
+            StackPane.setAlignment(value, Pos.BOTTOM_LEFT);
+            StackPane.setMargin(value, new javafx.geometry.Insets(0, 0, 6, 6));
+        }
+        return box;
+    }
+
+    /**
+     * La coleccion entera en texto, una linea por impresion
+     * ({@link forge.neo.quest.NeoQuestCollection#exportText}), para copiarla e
+     * importarla en Moxfield, Archidekt o ManaBox. Mismo dialogo que exportar
+     * un mazo.
+     */
+    private void export() {
+        overlay.show(TextDialog.block(NeoText.get("collection.export.title"),
+                NeoText.get("collection.export.hint"),
+                forge.neo.quest.NeoQuestCollection.exportText(), NeoText.get("deck.export.copy"),
+                text -> {
+                    final javafx.scene.input.ClipboardContent content =
+                            new javafx.scene.input.ClipboardContent();
+                    content.putString(text);
+                    javafx.scene.input.Clipboard.getSystemClipboard().setContent(content);
+                    overlay.hide();
+                },
+                overlay::hide));
+    }
+
+    /** Las imagenes llegan de Scryfall en segundo plano: hay que repedirlas. */
+    public void refreshArt() {
+        CardNode.refreshAllIn(this);
+    }
+}

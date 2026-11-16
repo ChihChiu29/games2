@@ -1,0 +1,1614 @@
+package forge.neo;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.util.Properties;
+
+import forge.localinstance.properties.ForgeConstants;
+import forge.localinstance.properties.ForgePreferences;
+import forge.localinstance.properties.ForgePreferences.FPref;
+import forge.model.FModel;
+
+/**
+ * Ajustes de la interfaz Neo.
+ *
+ * <p><b>Fichero propio, no el de Forge.</b> Compartimos {@code %APPDATA%\Forge\}
+ * con la instalacion normal, que es lo que hace que los mazos de Commander del
+ * usuario ya esten ahi. Escribir en {@code forge.preferences} le cambiaria los
+ * ajustes de la GUI vieja por detras, asi que lo nuestro va en
+ * {@code preferences/neo.properties}, un fichero que solo tocamos nosotros.
+ *
+ * <p>Aqui SOLO van preferencias de presentacion (que mazo, cuantos rivales, que
+ * escala). Nada de reglas: eso es del motor.
+ */
+public final class NeoSettings {
+
+    private NeoSettings() {
+    }
+
+    /** Ultimo mazo elegido, por nombre. */
+    public static final String DECK = "lastDeck";
+    /** Numero de rivales de IA; se guarda POR FORMATO, ver {@link #opponents}. */
+    public static final String OPPONENTS = "opponents";
+    /**
+     * El equipo de cada asiento, el tuyo primero ("0,1,0,1"). Vacio = cada uno
+     * en el suyo, todos contra todos, que es como viene de fabrica. Ver
+     * {@code forge.neo.match.NeoTeams}.
+     */
+    public static final String TEAMS = "teams";
+    /** Perfil de IA (Cautious / Default / Reckless / Experimental). */
+    public static final String AI_PROFILE = "aiProfile";
+    /** Escala de interfaz; vacio o "auto" para automatica. */
+    public static final String UI_SCALE = "uiScale";
+    /** Cuanto crece una carta al pasarle el raton por encima, en por ciento. */
+    public static final String HOVER_ZOOM = "hoverZoom";
+
+    /** Zoom del texto del panel de detalle. */
+    public static final String TEXT_ZOOM = "textZoom";
+    /** Volumen de los efectos de sonido, 0-100. */
+    public static final String SOUND_VOLUME = "soundVolume";
+    /** Volumen de la musica, 0-100. */
+    public static final String MUSIC_VOLUME = "musicVolume";
+    /** Tamano del cuadro (4 u 8 participantes) del proximo torneo (la auditoría del motor, apartado C6). */
+    public static final String TOURNAMENT_SIZE = "tournamentSize";
+
+    /**
+     * Con que volumen se abre el juego la primera vez.
+     *
+     * <p>Bajo a proposito, y salio de abrirlo de cero: entraba a todo trapo y
+     * lo primero que hacia el jugador era ir corriendo a los ajustes. Subir es
+     * un gesto que se hace cuando te apetece; bajar es uno que haces con prisa.
+     *
+     * <p>Estan aqui y no escritos en cada sitio porque el valor por defecto se
+     * lee en tres — al aplicarlo al motor y en los dos deslizadores de ajustes
+     * — y con el numero suelto basta cambiar dos para que el panel ensenye una
+     * cosa y suene otra.
+     */
+    public static final int SOUND_VOLUME_DEFAULT = 10;
+    /** @see #SOUND_VOLUME_DEFAULT */
+    public static final int MUSIC_VOLUME_DEFAULT = 10;
+    /** Animaciones de carta encendidas. */
+    public static final String ANIMATIONS = "animations";
+    /**
+     * El brillo de las cartas foil (la auditoría del motor, apartado D5). Encendido de fabrica:
+     * es puro adorno, no cambia el ritmo de la partida — al contrario que
+     * {@link #AUTO_MANA} o {@link #SMART_PASS}, que si lo cambian y por eso
+     * vienen apagados.
+     */
+    public static final String FOIL_EFFECT = "foilEffect";
+    /**
+     * Los destellos sobre lo que acaba de ser objetivo de un hechizo y el
+     * remolino del permanente que entra lanzado ({@code forge.neo.ui.ImpactLayer}).
+     * Encendido de fabrica, como el brillo de las foil: es adorno que ademas
+     * informa, y no cambia el ritmo de la partida. Apagado, la mesa de siempre.
+     */
+    public static final String IMPACT_EFFECTS = "impactEffects";
+    /**
+     * La entrada de cine de TU comandante al entrar en la mesa
+     * ({@code forge.neo.ui.CommanderEntrance}). Encendido de fabrica; con su
+     * propio interruptor porque dura 1,8 s y hay quien lo querra quitar
+     * dejando los destellos.
+     */
+    public static final String COMMANDER_ENTRANCE = "commanderEntrance";
+    /**
+     * Las chapitas de palabras clave de combate sobre las cartas de la mesa
+     * (volar, toque mortal...). Encendido de fabrica: es lo que se mira al
+     * bloquear. Ver {@code forge.neo.card.KeywordIcon}.
+     */
+    public static final String KEYWORD_BADGES = "keywordBadges";
+    /**
+     * Pintar las cartas con su copia reducida por area en vez de encogerlas al
+     * pintar (ver {@code forge.neo.card.Resample}). Encendido de fabrica: es
+     * el arreglo de un fallo reportado, no una preferencia. Se deja apagable
+     * por si en algun equipo se nota lento o raro.
+     */
+    public static final String SHARP_ART = "sharpArt";
+    /**
+     * La mano en abanico (cartas inclinadas) o con las cartas rectas.
+     *
+     * <p>Encendido de fabrica: el abanico es lo que hace que una mano de siete
+     * cartas se lea de un vistazo. Se puede apagar porque inclinar una carta
+     * obliga a JavaFX a suavizarle los bordes, y en un monitor de 1080p eso se
+     * ve sucio. Ver {@code forge.neo.ui.HandFan}.
+     */
+    public static final String HAND_FAN = "handFan";
+
+    /**
+     * Si la mano se pinta en abanico. Encendido de fabrica.
+     *
+     * <p>{@code -Dneo.handFan=false} lo apaga sin escribir en las preferencias
+     * del jugador, que es lo unico que permite capturar las dos manos desde
+     * una sesion de prueba. Al reves que {@code allBoards}, aqui el defecto es
+     * SI, asi que la bandera tiene tres estados y no dos: sin poner, no hace
+     * nada.
+     *
+     * @see forge.neo.ui.HandFan
+     */
+    /** Lo que crecia la carta al pasar el raton antes de que esto se pudiera elegir. */
+    public static final int HOVER_ZOOM_DEFAULT = 108;
+
+    /**
+     * Cuanto crece una carta al pasarle el raton, como factor ({@code 1.08} =
+     * un 8 % mas grande).
+     *
+     * <h2>Por que es un ajuste y no un numero fijo</h2>
+     *
+     * <p>Pedido por un jugador el 22-09-2026: <i>"maybe an option to enlarge
+     * the card a bit on mouse over, not as much as with right click"</i>. El
+     * 8 % de siempre se queda corto en pantallas grandes y de sobra en las
+     * pequenyas, y no hay un numero que valga para las dos — por eso se
+     * pregunta en vez de subirlo para todos, que le cambiaria la mesa a quien
+     * ya la tiene como quiere.
+     *
+     * <p>Tiene <b>techo</b> a proposito: pasarse convierte el hover en el zoom
+     * del clic derecho, y entonces son dos gestos para lo mismo. El hover
+     * ensenya de que carta se trata; leerla entera es el otro.
+     *
+     * <p>{@code -Dneo.hoverZoom=N} lo fuerza sin escribir en las preferencias,
+     * para poder capturarlo.
+     */
+    public static double hoverZoom() {
+        final String forced = System.getProperty("neo.hoverZoom");
+        int pct;
+        if (forced != null && !forced.isEmpty()) {
+            try {
+                pct = Integer.parseInt(forced.trim());
+            } catch (final NumberFormatException e) {
+                pct = HOVER_ZOOM_DEFAULT;
+            }
+        } else {
+            pct = getInt(HOVER_ZOOM, HOVER_ZOOM_DEFAULT);
+        }
+        // Suelo en 100 (sin ampliar) y techo en 150: por debajo la carta
+        // encogeria al pasar el raton, que no lo quiere nadie, y por encima
+        // pisa al clic derecho.
+        pct = Math.max(100, Math.min(150, pct));
+        return pct / 100.0;
+    }
+
+    /**
+     * La mano ordenada por coste y color, como "Order hand by CMC and color"
+     * de Forge ({@code FPref.UI_ORDER_HAND}). Pedido en itch.io el 28-09-2026:
+     * <i>"an option for hand ordering like the vanilla forge option"</i>.
+     *
+     * <p>Clave nuestra y no la de Forge: las preferencias de Forge se comparten
+     * con la instalacion antigua y no se escriben a lo loco (las notas de diseño).
+     * Apagado de fabrica, como alli. {@code -Dneo.orderHand=true} lo fuerza
+     * sin escribir nada, para las capturas.
+     */
+    public static final String ORDER_HAND = "orderHand";
+
+    /**
+     * Lo que se puede lanzar desde el cementerio o el exilio, ensenyado al
+     * final de la mano (Discord, 29-10-2026, del Forge de movil). Encendido de
+     * fabrica. {@code -Dneo.handOutside=false} lo fuerza sin escribir nada.
+     */
+    public static final String HAND_OUTSIDE = "handShowsOutside";
+
+    /**
+     * Lo que un permanente tiene en el exilio (Banishing Light...), asomando
+     * por debajo como un equipo (Discord, 29-10-2026, "Show Linked Exile Cards"
+     * del Forge de movil). Encendido. {@code -Dneo.linkedExile=false} lo fuerza.
+     */
+    public static final String LINKED_EXILE = "linkedExile";
+
+    public static boolean linkedExile() {
+        final String forced = System.getProperty("neo.linkedExile");
+        if (forced != null && !forced.isEmpty()) {
+            return Boolean.parseBoolean(forced);
+        }
+        return getBool(LINKED_EXILE, true);
+    }
+
+    public static boolean handShowsOutside() {
+        final String forced = System.getProperty("neo.handOutside");
+        if (forced != null && !forced.isEmpty()) {
+            return Boolean.parseBoolean(forced);
+        }
+        return getBool(HAND_OUTSIDE, true);
+    }
+
+    public static boolean orderHand() {
+        final String forced = System.getProperty("neo.orderHand");
+        if (forced != null && !forced.isEmpty()) {
+            return Boolean.parseBoolean(forced);
+        }
+        return getBool(ORDER_HAND, false);
+    }
+
+    /**
+     * Planechase en las partidas normales (Discord, 08-10-2026). Se elige en el
+     * pie de la pantalla de inicio, al lado de los rivales, y se recuerda.
+     * Apagado de fabrica. {@code -Dneo.planechase=true} lo fuerza sin escribir
+     * nada. Ver {@code forge.neo.match.Planechase}.
+     */
+    public static final String PLANECHASE = "planechase";
+
+    public static boolean planechase() {
+        final String forced = System.getProperty("neo.planechase");
+        if (forced != null && !forced.isEmpty()) {
+            return Boolean.parseBoolean(forced);
+        }
+        return getBool(PLANECHASE, false);
+    }
+
+    /**
+     * Planechase con <b>un solo mazo planar para todos</b> (Discord, 09-10-2026:
+     * <i>"The adventuring feeling of the Singleton shared deck is part of the
+     * fun"</i>). Apagado de fabrica: lo de las reglas es un mazo por jugador.
+     * {@code -Dneo.planechase.shared=true} lo fuerza. Ver
+     * {@code forge.neo.match.Planechase.Shared}.
+     */
+    public static final String PLANECHASE_SHARED = "planechaseShared";
+
+    public static boolean planechaseShared() {
+        final String forced = System.getProperty("neo.planechase.shared");
+        if (forced != null && !forced.isEmpty()) {
+            return Boolean.parseBoolean(forced);
+        }
+        return getBool(PLANECHASE_SHARED, false);
+    }
+
+    /**
+     * Archenemy en las partidas normales (Discord, 11-10-2026), como
+     * Planechase: en el pie del inicio, recordado y apagado de fabrica.
+     * {@code -Dneo.archenemy=true} lo fuerza. Ver
+     * {@code forge.neo.match.Archenemy}.
+     */
+    public static final String ARCHENEMY = "archenemy";
+
+    public static boolean archenemy() {
+        final String forced = System.getProperty("neo.archenemy");
+        if (forced != null && !forced.isEmpty()) {
+            return Boolean.parseBoolean(forced);
+        }
+        return getBool(ARCHENEMY, false);
+    }
+
+    /**
+     * Quien es el archienemigo: "me" (tu, como Forge de fabrica), "rival" (uno
+     * al azar) o "all" (Archenemy Rumble). {@code -Dneo.archenemy.who=...} lo
+     * fuerza.
+     */
+    public static final String ARCHENEMY_WHO = "archenemyWho";
+
+    /**
+     * El ultimo nivel de Ascension elegido al montar una run de Ascenso, para
+     * que salga marcado la siguiente vez (Discord, 13-10-2026: "I just forget
+     * to check it before restarting"). Lo leen el escritorio y Android.
+     */
+    public static final String ASCENT_LAST_ASCENSION = "ascentLastAscension";
+
+    public static forge.neo.match.Archenemy.Who archenemyWho() {
+        final String forced = System.getProperty("neo.archenemy.who");
+        return forge.neo.match.Archenemy.Who.byId(forced != null && !forced.isEmpty()
+                ? forced : get(ARCHENEMY_WHO, "me"));
+    }
+
+    public static boolean handFan() {
+        final String forced = System.getProperty("neo.handFan");
+        if (forced != null && !forced.isEmpty()) {
+            return Boolean.parseBoolean(forced);
+        }
+        return getBool(HAND_FAN, true);
+    }
+
+    /**
+     * La mano tactil de la version de Android: apoyar para mirar, deslizar
+     * para pasar de carta, subir a la mesa para jugar. Ver
+     * {@code TableScreen.installDragGestures}.
+     *
+     * <p>Tres valores: {@link #TOUCH_HAND_OFF}, {@link #TOUCH_HAND_FINGER}
+     * (solo cuando el gesto viene de una pantalla tactil) y
+     * {@link #TOUCH_HAND_ALWAYS} (tambien con el raton). <b>Apagado de
+     * fabrica</b> (la auditoría del motor 1.1): cambia lo que hace tocar una carta de la
+     * mano, y eso no se le cambia a nadie sin que lo pida.
+     */
+    public static final String TOUCH_HAND = "touchHand";
+    public static final String TOUCH_HAND_OFF = "off";
+    public static final String TOUCH_HAND_FINGER = "finger";
+    public static final String TOUCH_HAND_ALWAYS = "always";
+
+    /** {@code -Dneo.touchHand=off|finger|always} lo fuerza sin escribir en las preferencias. */
+    public static String touchHand() {
+        final String forced = System.getProperty("neo.touchHand");
+        final String v = forced != null && !forced.isEmpty() ? forced
+                : get(TOUCH_HAND, TOUCH_HAND_OFF);
+        return TOUCH_HAND_FINGER.equals(v) || TOUCH_HAND_ALWAYS.equals(v) ? v : TOUCH_HAND_OFF;
+    }
+    /**
+     * <b>Como se llaman los rivales en una partida normal</b> (Discord,
+     * 30-10-2026: <i>"AI Player names randomly generated or changed to the
+     * name of the commander they're using"</i>): los de Personalizar
+     * ({@link #AI_NAMES_SAVED}, de fabrica), uno al azar en cada partida, o el
+     * nombre corto de su comandante. Ver {@code NeoPlayers.ai(int, String, Deck)}.
+     */
+    public static final String AI_NAMES = "aiNameMode";
+    public static final String AI_NAMES_SAVED = "saved";
+    public static final String AI_NAMES_RANDOM = "random";
+    public static final String AI_NAMES_COMMANDER = "commander";
+
+    /** {@code -Dneo.aiNames=saved|random|commander} lo fuerza sin escribir en las preferencias. */
+    public static String aiNames() {
+        final String forced = System.getProperty("neo.aiNames");
+        final String v = forced != null && !forced.isEmpty() ? forced : get(AI_NAMES, AI_NAMES_SAVED);
+        return AI_NAMES_RANDOM.equals(v) || AI_NAMES_COMMANDER.equals(v) ? v : AI_NAMES_SAVED;
+    }
+
+    /** Ventana a pantalla completa. */
+    public static final String FULLSCREEN = "fullscreen";
+    /** Pagar el mana automaticamente al lanzar, en vez de clicar tierras. */
+    public static final String AUTO_MANA = "autoMana";
+
+    /**
+     * Y viene APAGADO de fabrica.
+     *
+     * <p>Decidido jugando: el pago automatico elige por ti que tierras tapar, y
+     * elige mal en cuanto hay filtros, duales o una habilidad que querias dejar
+     * disponible. Es un ajuste que se enciende a proposito, no uno que haya que
+     * descubrir para poder apagarlo.
+     *
+     * <p>Va aqui y no repetido en cada pantalla: lo leian SIETE sitios, cada
+     * uno con su {@code true} copiado a mano, asi que cambiar el defecto era
+     * cambiarlo en siete y olvidarse en uno. Es el principio 8 de las notas de diseño.
+     */
+    public static final boolean AUTO_MANA_DEFAULT = false;
+
+    /** Si el mana se paga solo. Ver {@link #AUTO_MANA_DEFAULT}. */
+    public static boolean autoPayMana() {
+        return getBool(AUTO_MANA, AUTO_MANA_DEFAULT);
+    }
+
+    /**
+     * Que el pago automatico no gire criaturas (Discord, 26-10-2026). Apagado
+     * de fabrica. Ver {@code forge.neo.match.AutoPayCreatures}. La misma clave
+     * en Android.
+     */
+    public static final String AUTO_MANA_NO_CREATURES = "autoManaNoCreatures";
+
+    public static boolean autoManaNoCreatures() {
+        return getBool(AUTO_MANA_NO_CREATURES, false);
+    }
+
+    /**
+     * El interruptor del pago automatico en el menu de la partida (Discord,
+     * 26-10-2026: <i>"An easily accessible button that toggles auto pay
+     * without having to go into the settings"</i>). Apagado de fabrica: lo que
+     * sale nuevo en la mesa, solo si se pide (Ana). La misma clave en Android.
+     */
+    public static final String AUTO_MANA_QUICK = "autoManaQuick";
+
+    public static boolean autoManaQuick() {
+        return getBool(AUTO_MANA_QUICK, false);
+    }
+
+    /**
+     * Si el pago automatico prueba tambien las fuentes que el planificador del
+     * motor <b>no sabe ver</b>: las que cobran mana para dar mas del que
+     * cobran (tierras de filtro, amuletos de {@code {1},{T}: {G}{W}}).
+     *
+     * <p>Apagado de fabrica (la auditoría del motor 1.1) porque cada intento <b>gira una
+     * tierra</b> y eso no se deshace desde aqui. Solo entra cuando el "Auto"
+     * del motor ya se ha dado por vencido, o sea cuando hoy te quedas atascado
+     * de todas formas. Ver {@code forge.neo.match.FilterSources}.
+     */
+    public static final String BLIND_MANA = "blindManaSources";
+
+    /**
+     * Bajar el arte de las cartas en el idioma del juego.
+     *
+     * <p>Se puede querer jugar en castellano y seguir viendo las cartas en
+     * ingles: hay muchas que no se han impreso en otro idioma, y el arte
+     * traducido es una segunda descarga entera. Ver {@code CardArt}.
+     */
+    public static final String CARD_ART_LANGUAGE = "cardArtLanguage";
+
+    /**
+     * Cuanto frenar el turno del rival.
+     * 0 nunca · 1 si te afecta · 2 lo que va al stack · 3 en todo.
+     */
+    public static final String PAUSE_MODE = "pauseMode";
+
+    /**
+     * Donde sale lo que te pasa en el turno del rival.
+     * {@code 0} en la esquina, sin parar ({@code NoticeStack}, de fabrica) ·
+     * {@code 1} en el centro, esperando a que pulses ({@code PromptBanner.showAlert}).
+     */
+    public static final String NEWS_STYLE = "newsStyle";
+
+    /**
+     * Con {@link #NEWS_STYLE} en el centro: a los cuantos segundos se cierra
+     * solo el aviso si no lo pulsas. {@code 0} nunca (de fabrica) · 5 · 7 · 10.
+     * Discord, 27-10-2026. Ver {@code PromptBanner.showAlert}.
+     */
+    public static final String NEWS_AUTOCLOSE = "newsAutoClose";
+
+    /**
+     * <b>Parar la partida mientras el jugador lee.</b>
+     *
+     * <p>Pedido el 20-09-2026 por un jugador de itch.io, y el argumento es el
+     * que manda: <i>"un ajuste para pausar la partida al ampliar una carta
+     * dejaria a los jugadores nuevos o lentos leerse la carta sin perderse
+     * nada; hoy, si te pierdes algo, hay que ir al registro"</i>. Ampliar una
+     * carta es justo lo que hace un jugador que NO va sobrado, y era el unico
+     * momento en que la partida seguia corriendo detras.
+     *
+     * <p>Vale para las dos capas que el jugador abre a proposito: la carta
+     * ampliada y el menu de pausa (Escape), que tampoco paraba nada — se abria
+     * el menu a mitad del turno del rival y la IA seguia jugando detras.
+     *
+     * <p><b>Encendido de fabrica</b>, al reves que casi todo lo nuevo
+     * (la auditoría del motor 1.1) y a proposito: no aparece nada en pantalla que no
+     * estuviera, no cambia ninguna partida por su cuenta y solo ocurre cuando
+     * eres TU quien decide mirar una carta. Y quien lo necesita es justo quien
+     * no va a encontrar el ajuste. Se apaga para volver al ritmo de antes.
+     *
+     * <p>Lo aplica {@code NeoMatchUI.holdWhileReading}, durmiendo el hilo del
+     * motor. En <b>red no hace nada</b>: parar la mesa del anfitrion congela a
+     * los demas, y el invitado no tiene motor que parar.
+     */
+    public static final String PAUSE_WHILE_READING = "pauseWhileReading";
+
+    /**
+     * Si la partida se para mientras lees una carta.
+     *
+     * <p>{@code -Dneo.pauseWhileReading=true|false} lo fuerza en los dos
+     * sentidos sin escribir en las preferencias. Hacen falta los dos porque
+     * viene encendido: con {@code Boolean.getBoolean} no habria forma de
+     * probar el ritmo de antes sin cambiarle el ajuste al jugador.
+     */
+    public static boolean pauseWhileReading() {
+        final String forced = System.getProperty("neo.pauseWhileReading");
+        if (forced != null && !forced.isBlank()) {
+            return Boolean.parseBoolean(forced);
+        }
+        return getBool(PAUSE_WHILE_READING, true);
+    }
+
+    /**
+     * La regla de mulligan (la auditoría del motor, apartado B4): {@code MulliganDefs.MulliganRule}
+     * — Original, Paris, Vancouver, London u Houston. El motor la trae entera
+     * ({@code MulliganService} la lee de {@code StaticData.instance()} en cada
+     * partida) pero el jugador nunca podia elegirla: se aplicaba siempre la de
+     * fabrica del motor (London), sin ni un ajuste que lo dijera.
+     *
+     * <p>Va en NUESTRO fichero y no en las preferencias de Forge: la aplica
+     * {@code NeoGame.applyEnginePrefs} llamando a
+     * {@code StaticData.instance().setMulliganRule(...)}, que es exactamente
+     * lo que hacen las dos GUIs oficiales al cambiarla en sus ajustes — nunca
+     * se guarda en el fichero de Forge, solo en memoria.
+     */
+    public static final String MULLIGAN_RULE = "mulliganRule";
+
+    /** Nombre por defecto, igual al de {@code MulliganDefs.getDefaultRule()}. */
+    public static final String MULLIGAN_RULE_DEFAULT = "London";
+
+    /**
+     * Dificultad de la IA (la auditoría del motor, apartado B4): dejarle "hacer trampa" al barajar
+     * ({@code GameRules.setAllowCheatShuffle}, lo mismo que
+     * {@code UI_ENABLE_AI_CHEATS} de Forge). Solo afecta a
+     * {@code AiProps.CHEAT_WITH_MANA_ON_SHUFFLE}, un ajuste concreto de la IA
+     * al barajar su biblioteca — no es "mejorar la IA" (fuera de alcance de
+     * este proyecto, ver las notas de diseño), es encender un interruptor que Forge ya
+     * trae hecho. Apagado de fabrica, igual que en Forge.
+     */
+    public static final String AI_CHEAT_SHUFFLE = "aiCheatShuffle";
+
+    /**
+     * Segundos que la IA se puede tomar para cada decision
+     * ({@code MATCH_AI_TIMEOUT} de Forge, 5 de fabrica). No es dificultad: es
+     * un tope de tiempo para no dejar que una mesa enorme cuelgue el turno del
+     * rival. Hasta Forge #12265 (16-10-2026) solo cortaba la busqueda de
+     * atacantes; desde ahi vale para todo (hechizos, ataque y bloqueo) y al
+     * acabarse la IA pasa prioridad, bloquea solo lo obligatorio o ataca con
+     * lo que ya tenia. Es el reloj del aro ambar de su retrato.
+     * {@code HostedMatch.startGame()} ya lo lee solo de
+     * {@code FModel.getPreferences()} en cada partida; aqui solo hace falta
+     * escribirlo, en {@code NeoGame.applyEnginePrefs}.
+     */
+    public static final String AI_TIMEOUT = "aiTimeout";
+
+    /** El de fabrica de Forge (5 s). */
+    public static final int AI_TIMEOUT_DEFAULT = 5;
+
+    /**
+     * Jugar por apuesta (la auditoría del motor, apartado B4): solo afecta a los ~30 scripts
+     * viejos con una habilidad de ante de verdad (Arabian Nights, Antiquities,
+     * Legends, The Dark) — para el resto de las 33.696 cartas esto no cambia
+     * nada. Apagado de fabrica, como en Forge: es un mecanismo que PIERDE
+     * cartas del mazo de verdad, y algo asi no se puede encender sin que el
+     * jugador lo pida.
+     */
+    public static final String ANTE = "ante";
+    /** Si el ante se empareja por rareza (carta rara contra carta rara). */
+    public static final String ANTE_MATCH_RARITY = "anteMatchRarity";
+    /** Si las tierras basicas pueden entrar en el ante. */
+    public static final String ANTE_INCLUDE_BASIC_LANDS = "anteIncludeBasicLands";
+
+    /**
+     * Politica global de arte (la auditoría del motor, apartado B4: {@code UI_PREFERRED_ART}).
+     * Solo decide que impresion se usa cuando NADIE ha elegido una a mano —
+     * importar una lista, un mazo que genera el motor, la IA — porque
+     * {@code PrintingDialog} sigue mandando carta a carta. Al reves que el
+     * idioma, esto SI se puede cambiar en caliente:
+     * {@code StaticData.setCardArtPreference(boolean, boolean)} tiene setter
+     * de verdad y las dos GUIs oficiales lo llaman al momento, sin reiniciar.
+     */
+    public static final String CARD_ART_LATEST = "cardArtLatest";
+    /** De fabrica: la mas reciente (igual que {@code LATEST_ART_ALL_EDITIONS}). */
+    public static final boolean CARD_ART_LATEST_DEFAULT = true;
+    /** Si ademas se descartan las ediciones fuera de nucleo/expansion (promos, un-sets...). */
+    public static final String CARD_ART_CORE_ONLY = "cardArtCoreOnly";
+    /**
+     * De fabrica SI: solo ediciones normales. Hasta el 15-09-2026 era no, igual
+     * que Forge, y la "mas reciente de todas" traia Secret Lair, bocetos y marcos
+     * raros — reportado en r/forgeMTG: en un mismo cementerio cada carta parecia
+     * de un juego distinto. Solo cambia a quien nunca ha tocado el ajuste.
+     */
+    public static final boolean CARD_ART_CORE_ONLY_DEFAULT = true;
+
+    /**
+     * Arte variado en pools generados al azar (aventura, sellado del motor):
+     * {@code UI_RANDOM_ART_IN_POOLS}. Encendido de fabrica en Forge — apagarlo
+     * hace que todas las copias de una tierra basica usen el MISMO arte en vez
+     * de repartirse entre las que tiene la edicion.
+     */
+    public static final String RANDOM_ART_IN_POOLS = "randomArtInPools";
+
+    /** No ensenyar el aviso de "la IA no juega bien estas cartas". */
+    public static final String HIDE_AI_WARNING = "hideAiWarning";
+
+    /**
+     * Ver la mesa de TODOS los rivales a la vez, en vez de una y pestanyas.
+     *
+     * <p><b>Apagado de fabrica</b>, y no por prudencia: medido a 1920x1080 con
+     * tres rivales, una mesa normal (10-12 permanentes) deja las cartas a
+     * 55-72 px — practicamente lo de hoy, que son 72 — pero una mesa cargada
+     * (18 o mas) las deja en 28, que es el tope duro de {@code BattlefieldPane}
+     * y donde en vez de encoger empiezan a taparse unas a otras.
+     *
+     * <p>Lo que lo hace aceptable igualmente es que las dos salidas ya existen:
+     * el clic derecho amplia cualquier carta, y Ctrl+rueda acerca la mesa hasta
+     * x3 ({@code ZOOM_MAX}), o sea que hasta el caso malo se lee. Aun asi es
+     * una decision de gusto, y por eso se elige y no se impone.
+     *
+     * <p>A dos jugadores no cambia nada: un rival es un asiento.
+     */
+    public static final String ALL_BOARDS = "allBoards";
+
+    /**
+     * Ver todas las mesas a la vez. Apagado de fabrica.
+     *
+     * <p>{@code -Dneo.allBoards=true} lo enciende sin escribir en las
+     * preferencias: hace falta para poder capturarlo desde una sesion de prueba
+     * sin cambiarle el ajuste al jugador, que es justo el fallo que este modo
+     * no se puede permitir (nadie que no lo haya pedido deberia encontrarselo).
+     */
+    public static boolean allBoards() {
+        return Boolean.getBoolean("neo.allBoards") || getBool(ALL_BOARDS, false);
+    }
+
+    /**
+     * Ensenyar el panel de detalle al pasar el raton por una carta.
+     *
+     * <p>Este panel estuvo en la mesa y se quito a proposito: ocupaba un tercio
+     * de la columna para ensenyar una carta que ya se ve, y se lo quitaba al
+     * stack. Vuelve porque lo pidio un jugador nuevo, con el argumento que
+     * faltaba — <i>abajo a la derecha no hay nada</i>, que es verdad desde que
+     * el stack solo se estira cuando le hace falta.
+     *
+     * <p><b>Apagado de fabrica</b> (la auditoría del motor 1.1): la mesa de hoy funciona
+     * y nadie que no lo haya pedido deberia encontrarse algo nuevo ahi. Y
+     * encendido no le quita sitio a nada: se queda con lo que sobra y se
+     * encoge hasta desaparecer cuando el stack lo necesita.
+     */
+    public static final String HOVER_DETAIL = "hoverDetail";
+
+    /**
+     * A que tamanyo se bajan las imagenes de Scryfall: normal, large o png (solo
+     * el escritorio). Ver {@link forge.neo.card.ImageQuality}.
+     */
+    public static final String IMAGE_QUALITY = "imageQuality";
+
+    /**
+     * <b>La carta GRANDE al pasar el raton, como en el Forge de siempre</b>
+     * (Discord, 07-10-2026: <i>"i really want the large card on hover ... like
+     * in default forge"</i>). El Forge de escritorio ensenya siempre la carta
+     * que tienes bajo el raton, grande, en su panel de imagen; aqui sale a un
+     * lado de la mesa, en el contrario a la carta, y se va al salir de ella.
+     * Apagado de fabrica (la auditoría del motor 1.1): tapa media mesa mientras miras.
+     * Ver {@code TableScreen.showBigCard}.
+     */
+    public static final String BIG_HOVER_CARD = "bigHoverCard";
+
+    /** La carta grande al pasar el raton EN EL CONSTRUCTOR (itch.io, 23-10-2026). Encendido de fabrica. */
+    public static final String BUILDER_HOVER_CARD = "builderHoverCard";
+
+    /**
+     * La barra de botones en rojo cuando el motor espera algo tuyo (Discord,
+     * 12-11-2026). Encendido de fabrica; Ana: «que quien quiera lo pueda
+     * quitar». Ver {@code ActionBar.AWAITING}. Se lee en el acto.
+     */
+    public static final String AWAITING_HIGHLIGHT = "awaitingHighlight";
+
+    /** El reloj de la partida en la cabecera del rail (Discord, 14-11-2026). Encendido. */
+    public static final String GAME_CLOCK = "gameClock";
+
+    public static boolean gameClock() {
+        return getBool(GAME_CLOCK, true);
+    }
+
+    /**
+     * MODO DESARROLLADOR (Discord, 15-11-2026: "a Dev mode that lets you add
+     * mana, untap, etc for single player"). Apagado de fabrica. Con el, el menu
+     * de pausa de una partida SUELTA contra la IA trae "Dev" con las trampas que
+     * ya tiene Forge ({@code IGameController.cheat()}). Nunca en Ascenso, Quest,
+     * Aventura, draft, torneo, puzzles ni red: ahi ni sale (NeoApp.casualBinder).
+     * En neo.properties: el {@code DEV_MODE_ENABLED} de Forge no se toca.
+     */
+    public static final String DEV_MODE = "devMode";
+
+    /**
+     * LA BARRA DEL JUGADOR AL QUE LE TOCA, ENCENDIDA ENTERA (Discord, 15-11-2026:
+     * "If the player banner could be highlighted instead of just the word turn,
+     * it would be a lot easier to see in my peripheral vision"). Apagado de
+     * fabrica: es la marca :active de siempre (PlayerBar.setActiveTurn), pintada
+     * mucho mas fuerte, para pantallas grandes.
+     */
+    public static final String TURN_BAR_GLOW = "turnBarGlow";
+
+    public static boolean turnBarGlow() {
+        // -Dneo.turnGlow=true: encendido para capturarlo, sin tocar los ajustes.
+        return getBool(TURN_BAR_GLOW, false) || Boolean.getBoolean("neo.turnGlow");
+    }
+
+    public static boolean devMode() {
+        return getBool(DEV_MODE, false);
+    }
+
+    public static boolean awaitingHighlight() {
+        return getBool(AWAITING_HIGHLIGHT, true);
+    }
+
+    public static boolean bigHoverCard() {
+        return Boolean.getBoolean("neo.bigHoverCard") || getBool(BIG_HOVER_CARD, false);
+    }
+
+    /**
+     * <b>Como se ensenya lo enganchado</b> (equipos, auras, fortificaciones):
+     * abanico bajo la criatura (de fabrica) o <b>apilado detras</b> de ella.
+     *
+     * <p>Pedido en itch.io el 20-09-2026: <i>"con la mesa llena cuesta
+     * seleccionar el equipo o el aura, sobre todo si se lo has puesto a una
+     * criatura del rival"</i>. Y es verdad: el abanico reparte lo enganchado a
+     * lo ancho del borde de abajo, asi que con tres cosas encima cada una
+     * asoma una rendija, y ademas cuelga sobre la fila de atras.
+     *
+     * <p>Apilado, lo enganchado no ocupa ni un pixel fuera de la carta: se
+     * dibuja <b>detras</b>, como las fichas repetidas, con su contador. Y para
+     * verlo o elegirlo se clica ese contador, que abre el visor de siempre con
+     * las cartas en grande — un objetivo de raton enorme en vez de una
+     * rendija, que es justo lo que se pedia.
+     *
+     * <p><b>Apagado de fabrica</b> (la auditoría del motor 1.1) y esta vez el motivo no
+     * es solo la prudencia: apilado se pierde de un vistazo <b>que criatura
+     * esta encantada</b>, y eso importa — las auras que mas cambian una
+     * partida son las que te roban una criatura. Quien tenga la mesa llena lo
+     * enciende; quien mire mas que clique, lo deja como esta.
+     */
+    public static final String ATTACHMENTS_STACKED = "attachmentsStacked";
+
+    /**
+     * Apilar tambien las CARTAS iguales (tierras, criaturas, el resto de
+     * permanentes), no solo las fichas. Como Forge (que apila tierras siempre
+     * y criaturas con {@code UI_GROUP_PERMANENTS}). Pedido en itch.io el
+     * 29-09-2026 con treinta Rat Colony y una flecha de desplazamiento.
+     * Encendido de fabrica. {@code -Dneo.stackSame=false} lo apaga sin tocar
+     * las preferencias.
+     */
+    public static final String STACK_SAME = "stackSameCards";
+
+    public static boolean stackSameCards() {
+        final String forced = System.getProperty("neo.stackSame");
+        if (forced != null && !forced.isBlank()) {
+            return Boolean.parseBoolean(forced);
+        }
+        return getBool(STACK_SAME, true);
+    }
+
+    /**
+     * Si lo enganchado va apilado detras de su anfitriona.
+     *
+     * <p>{@code -Dneo.attachStacked=true|false} lo fuerza sin tocar las
+     * preferencias, para poder capturar los dos modos.
+     */
+    public static boolean attachmentsStacked() {
+        final String forced = System.getProperty("neo.attachStacked");
+        if (forced != null && !forced.isBlank()) {
+            return Boolean.parseBoolean(forced);
+        }
+        return getBool(ATTACHMENTS_STACKED, false);
+    }
+
+    /**
+     * Si una Aventura nueva en Commander empieza eligiendo entre tres comandantes
+     * y con el mazo generado, o con el mazo fijo de Forge. Encendido de fabrica.
+     * Lo lee el proceso de la Aventura (ver {@code forge.neo.adventure.StarterDeck}).
+     */
+    public static final String ADVENTURE_STARTER = "adventure.randomStarter";
+
+    public static boolean adventureStarter() {
+        return getBool(ADVENTURE_STARTER, true);
+    }
+
+    /**
+     * Si Discord ensenya a tus amigos que estas jugando. Ver
+     * {@code forge.neo.discord.DiscordRich}.
+     *
+     * <p><b>Encendido de fabrica</b>, que es lo que hace cualquier juego y es
+     * lo que pedia quien lo pidio. Se puede porque por encima de esto manda el
+     * interruptor del propio Discord ("Mostrar la actividad actual"), que el
+     * jugador ya controla: nadie acaba ensenyando nada sin tener donde
+     * apagarlo. Y lo que se ensenya esta elegido para que no cuente de nadie —
+     * ni nombres de rival, ni de mazo (ver {@code DiscordStatus}).
+     *
+     * <p>Sin Discord abierto no hace absolutamente nada, que es el caso de casi
+     * todo el mundo.
+     */
+    public static final String DISCORD = "discordRichPresence";
+
+    public static boolean discord() {
+        return getBool(DISCORD, true);
+    }
+
+    /**
+     * Si se pregunta a itch.io por una version nueva al arrancar. Ver
+     * {@code forge.neo.update.NeoUpdate}.
+     *
+     * <p><b>Encendido de fabrica</b>, que es para lo que se pidio (28-09-2026):
+     * quien baja el zip a mano no se entera de los arreglos. Se puede apagar
+     * porque preguntar le ensenya tu IP a itch.io. Sin internet no hace nada,
+     * este o no encendido.
+     */
+    public static final String UPDATE_CHECK = "updateCheck";
+
+    /**
+     * Grabar tus partidas para volver a verlas (Forge #12255, 16-10-2026).
+     * Encendido de fabrica, como en Forge; se pasa al motor en
+     * {@code NeoGame.applyEnginePrefs}, solo en memoria. Las repeticiones se
+     * ven desde el menu ({@code ReplaysScreen}); Forge guarda las 20 ultimas.
+     */
+    public static final String RECORD_REPLAYS = "recordReplays";
+
+    public static boolean recordReplays() {
+        return getBool(RECORD_REPLAYS, true);
+    }
+
+    public static boolean updateCheck() {
+        return getBool(UPDATE_CHECK, true);
+    }
+
+    /**
+     * El boton "Actualizar ahora" del aviso de version nueva (09-11-2026,
+     * {@code forge.neo.update.SelfUpdate}): solo en Windows y en el paquete
+     * del {@code .exe}. Encendido de fabrica; en Ajustes, como experimental.
+     */
+    public static final String SELF_UPDATE = "selfUpdate";
+
+    /**
+     * Modo streamer: las IP de las partidas en red no salen en pantalla
+     * ({@code forge.neo.net.StreamerMode}). Apagado de fabrica.
+     */
+    public static final String STREAMER_MODE = "streamerMode";
+
+    public static boolean streamerMode() {
+        return getBool(STREAMER_MODE, false);
+    }
+
+    public static boolean selfUpdate() {
+        return getBool(SELF_UPDATE, true);
+    }
+
+    /**
+     * Si el panel de detalle esta encendido.
+     *
+     * <p>{@code -Dneo.hoverDetail=true} lo enciende sin escribir en las
+     * preferencias, para poder capturarlo sin cambiarle el ajuste al jugador.
+     */
+    public static boolean hoverDetail() {
+        return Boolean.getBoolean("neo.hoverDetail") || getBool(HOVER_DETAIL, false);
+    }
+
+    /**
+     * Si el stack ensenya la CARTA de cada cosa que espera, y no solo su nombre.
+     *
+     * <p>Lo pidio un jugador el 09-09-2026, y el argumento es el que manda:
+     * <i>"el stack es donde se gana y se pierde una partida de Magic... el
+     * tuyo me cuesta mucho de usar. Seria enorme que se vieran las cartas de
+     * verdad y se pudieran desplegar para ver su orden y leer lo que
+     * hacen"</i>. Ya se desplegaban y ya venian numeradas; lo que faltaba era
+     * la carta, que es como se reconoce un hechizo de un vistazo — leyendo un
+     * nombre hay que recordarlo, mirando la carta no.
+     *
+     * <p>Y ademas es lo que este proyecto tenia escrito desde el principio:
+     * la seccion 6 de las notas de diseño dice <i>"cada StackItemView es una carta
+     * pequenya + su texto"</i>, no una lista de texto. Estaba pendiente.
+     *
+     * <p><b>Encendido de fabrica</b>, al reves que {@link #HOVER_DETAIL}, y a
+     * proposito: aquello era una cosa nueva que nadie habia pedido, y esto es
+     * el arreglo de algo que un jugador dice que le cuesta usar. El ajuste
+     * esta para volver a la lista compacta, que ocupa un tercio y sigue siendo
+     * mejor cuando se encadenan quince disparos.
+     */
+    public static final String STACK_CARDS = "stackCards";
+
+    /**
+     * La carta grande del stack en mitad de la mesa ({@code PromptBanner}).
+     *
+     * <p>Pedido en itch.io el 04-10-2026: poder moverla, agrandarla <i>o
+     * quitarla</i>. Encendida de fabrica — es lo de siempre —, y apagarla no
+     * esconde nada: el stack de la derecha dice lo mismo. El aviso de "esto te
+     * acaba de pasar", que usa el mismo cartel, sale igual: ahi el motor espera
+     * su boton. {@code -Dneo.stackBanner=true|false} lo fuerza sin escribir.
+     */
+    public static final String STACK_BANNER = "stackBanner";
+
+    /**
+     * La columna de la derecha plegada (itch.io, 04-10-2026): la mesa con todo
+     * el ancho, los botones en tu barra y el stack en una chapa. Apagado de
+     * fabrica, y SOLO desde Ajustes (Ana: nada cambia para quien no lo pida).
+     */
+    public static final String SIDE_FOLDED = "sideFolded";
+
+    /** Barras de jugador compactas (mismo pedido): menos alto, ningun dato menos. */
+    public static final String SLIM_BARS = "slimBars";
+
+    /**
+     * Tu barra junto a la mano, en una ficha, en vez de a todo el ancho encima
+     * de ella (Discord, 28-10-2026): la mesa gana esa franja y la mano se
+     * estrecha. Apagado de fabrica; con la columna plegada no se aplica (ahi la
+     * fila de tu barra lleva los botones).
+     */
+    public static final String SELF_BAR_BESIDE_HAND = "selfBarBesideHand";
+
+    /**
+     * Poder mover y agrandar esa carta (arrastrar, rueda, esquina). <b>Apagado
+     * de fabrica</b>: apagado es el cartel de siempre, sin un gesto nuevo que
+     * se pueda disparar sin querer. Ver {@code PromptBanner}.
+     */
+    public static final String STACK_BANNER_EDIT = "stackBannerEdit";
+
+    public static boolean stackBannerEditable() {
+        final String forced = System.getProperty("neo.stackBannerEdit");
+        if (forced != null && !forced.isBlank()) {
+            return Boolean.parseBoolean(forced);
+        }
+        return getBool(STACK_BANNER_EDIT, false);
+    }
+
+    /**
+     * La carta grande del stack solo UN MOMENTO, y luego vuela a la columna del
+     * stack. Visto en XMage Nexus (20-10-2026), y es lo que pedian en Discord
+     * ese mismo dia: <i>"the popup you get is great but does block the board
+     * behind it"</i>. Apagado de fabrica: el cartel de siempre.
+     * {@code -Dneo.stackBannerBrief=true} lo fuerza.
+     */
+    public static final String STACK_BANNER_BRIEF = "stackBannerBrief";
+
+    public static boolean stackBannerBrief() {
+        final String forced = System.getProperty("neo.stackBannerBrief");
+        if (forced != null && !forced.isBlank()) {
+            return Boolean.parseBoolean(forced);
+        }
+        return getBool(STACK_BANNER_BRIEF, false);
+    }
+
+    public static boolean stackBanner() {
+        final String forced = System.getProperty("neo.stackBanner");
+        if (forced != null && !forced.isBlank()) {
+            return Boolean.parseBoolean(forced);
+        }
+        return getBool(STACK_BANNER, true);
+    }
+
+    /**
+     * Si el stack pinta las cartas.
+     *
+     * <p>{@code -Dneo.stackCards=true|false} lo fuerza en los dos sentidos sin
+     * escribir en las preferencias. Hacen falta los dos porque este viene
+     * encendido: con el patron de {@code Boolean.getBoolean} no habria forma de
+     * capturar la lista compacta sin cambiarle el ajuste al jugador.
+     */
+    /**
+     * Juntar en una fila, con su "×6", las entradas IGUALES y seguidas del
+     * stack (Discord, 08-10-2026, Munkster: <i>"collapse similar triggers"</i>).
+     * Solo como se pinta: ver {@code forge.neo.match.StackGroups}.
+     *
+     * <p><b>Encendido de fabrica</b>, como {@link #STACK_CARDS} y por lo mismo:
+     * lo ha pedido un jugador que se lo encuentra cada partida. El ajuste esta
+     * para volver a ver una fila por disparo.
+     * {@code -Dneo.groupStack=true|false} lo fuerza sin escribir.
+     */
+    public static final String GROUP_STACK = "groupStack";
+
+    public static boolean groupStack() {
+        final String forced = System.getProperty("neo.groupStack");
+        if (forced != null && !forced.isEmpty()) {
+            return Boolean.parseBoolean(forced);
+        }
+        return getBool(GROUP_STACK, true);
+    }
+
+    public static boolean stackCards() {
+        final String forced = System.getProperty("neo.stackCards");
+        if (forced != null && !forced.isBlank()) {
+            return Boolean.parseBoolean(forced);
+        }
+        return getBool(STACK_CARDS, true);
+    }
+
+    /**
+     * Al sortear rival, que salga mas a menudo un mazo moderno.
+     *
+     * <p>Encendido de fabrica, y es lo pedido: no quita ningun mazo, solo
+     * cambia el orden en que salen de la bolsa. Ver {@code forge.neo.deck.DeckAge},
+     * que trae los numeros — en Estandar, ocho de cada diez preconstruidos de
+     * Forge son de antes de 2018, con sus escaneos de la epoca.
+     */
+    public static final String MODERN_RIVALS = "modernRivals";
+
+    /**
+     * El color de lo que puedes jugar ahora (Discord, 26-10-2026: <i>"it's
+     * really hard to tell if a card is playable. The bluish highlight border
+     * doesn't stand out much, especially on blue cards"</i>). Un indice en
+     * {@link #ACTIONABLE_COLORS}; la misma clave en Android.
+     */
+    public static final String ACTIONABLE_COLOR = "actionableColor";
+
+    /**
+     * Los colores que se ofrecen: el celeste de siempre y otros que no se
+     * confunden con nada de la mesa (el verde es "elige una", el rojo atacar y
+     * los objetivos). El naranja, porque es el de Arena, aunque se cruza con
+     * el plan de "Auto" mientras pagas (que tambien es naranja). Las
+     * claves de texto, en el mismo orden ({@code settings.actionableColor.*}).
+     */
+    public static final String[] ACTIONABLE_COLORS = {"#66CCFF", "#FFE14D", "#FF9A2E", "#FFFFFF", "#FF6FD8", "#B8FF3C"};
+    public static final String[] ACTIONABLE_COLOR_KEYS = {"blue", "yellow", "orange", "white", "pink", "lime"};
+
+    /**
+     * EL COLOR PERSONALIZADO (Discord, 26-10-2026: <i>"Does that let us pick
+     * our own colors from a palette?"</i>): el indice que va detras de los de
+     * la lista, y el color en {@code #RRGGBB} en esta otra clave. Puede
+     * coincidir con el verde de "elige una" o el rojo de atacar: es cosa de
+     * quien lo elige.
+     */
+    public static final int ACTIONABLE_CUSTOM_INDEX = ACTIONABLE_COLORS.length;
+    public static final String ACTIONABLE_CUSTOM = "actionableCustom";
+
+    public static int actionableColorIndex() {
+        return Math.max(0, Math.min(ACTIONABLE_CUSTOM_INDEX, getInt(ACTIONABLE_COLOR, 0)));
+    }
+
+    /** El color en {@code #RRGGBB}. */
+    public static String actionableColor() {
+        final int i = actionableColorIndex();
+        return i == ACTIONABLE_CUSTOM_INDEX ? actionableCustom() : ACTIONABLE_COLORS[i];
+    }
+
+    /** El personalizado, o el celeste si no hay ninguno valido guardado. */
+    public static String actionableCustom() {
+        final String hex = hexColor(get(ACTIONABLE_CUSTOM, ""));
+        return hex == null ? ACTIONABLE_COLORS[0] : hex;
+    }
+
+    /** Guarda el personalizado y lo deja elegido. Lo que no sea un color no se guarda. */
+    public static void setActionableCustom(final String color) {
+        final String hex = hexColor(color);
+        if (hex != null) {
+            set(ACTIONABLE_CUSTOM, hex);
+            setInt(ACTIONABLE_COLOR, ACTIONABLE_CUSTOM_INDEX);
+        }
+    }
+
+    /** {@code #RRGGBB} en mayusculas, o null. Acepta {@code RRGGBB}, {@code #RRGGBBAA} y {@code 0xRRGGBBAA}. */
+    public static String hexColor(final String s) {
+        if (s == null) {
+            return null;
+        }
+        String t = s.trim();
+        if (t.startsWith("0x") || t.startsWith("0X")) {
+            t = t.substring(2);
+        } else if (t.startsWith("#")) {
+            t = t.substring(1);
+        }
+        if (t.length() == 8) {
+            t = t.substring(0, 6);
+        }
+        if (!t.matches("[0-9A-Fa-f]{6}")) {
+            return null;
+        }
+        return "#" + t.toUpperCase(java.util.Locale.ROOT);
+    }
+
+    /**
+     * Preguntar antes de salir de tu fase principal.
+     *
+     * <p>{@code 0} nunca · {@code 1} solo al ir al combate · {@code 2} en las
+     * dos fases principales. Ver {@code NeoMatchUI.confirmLeavingMain}.
+     */
+    public static final String CONFIRM_PHASE = "confirmPhase";
+
+    /**
+     * Y viene puesto en "las dos" de fabrica.
+     *
+     * <p>Sale de jugar: una fase principal con disparos se contesta a base de
+     * OK, uno por disparo, y en cuanto se acaban el siguiente OK — el que ya
+     * ibas a dar — te planta en el combate. Eso no se deshace, asi que por
+     * defecto se pregunta (principio 6). Quien vaya atento a cada OK lo apaga
+     * en Ajustes y vuelve a como estaba.
+     */
+    public static final int CONFIRM_PHASE_DEFAULT = 2;
+
+    /**
+     * Cuanto se recuerda un "pasar esta habilidad" o un "siempre si / siempre
+     * no" del stack (Discord, 31-10-2026, con Sheoldred y Spiteful Visions:
+     * <i>"it's getting tiring having to click auto every match"</i>).
+     *
+     * <p>Es el {@code UI_AUTO_DECISION_MODE} de Forge, con sus cuatro valores
+     * ({@link #AUTO_DECISION_MODES}): esta carta, esta partida (lo de fabrica),
+     * hasta cerrar el juego y siempre. La memoria es del motor
+     * ({@code YieldController}): "siempre" la guarda el en
+     * {@code auto-yields.dat}. Aqui solo se elige, y se le pasa en memoria en
+     * {@code NeoGame.applyEnginePrefs}, como el resto. Android lo tiene desde
+     * su decision 152.
+     */
+    public static final String AUTO_DECISION = "autoDecisionMode";
+
+    /** Los cuatro, en el orden de los botones. */
+    public static final String[] AUTO_DECISION_MODES = {
+            forge.localinstance.properties.ForgeConstants.AUTO_DECISION_PER_CARD,
+            forge.localinstance.properties.ForgeConstants.AUTO_DECISION_PER_ABILITY,
+            forge.localinstance.properties.ForgeConstants.AUTO_DECISION_PER_ABILITY_SESSION,
+            forge.localinstance.properties.ForgeConstants.AUTO_DECISION_PER_ABILITY_INSTALL};
+
+    /** El elegido, como indice de {@link #AUTO_DECISION_MODES}: 1 de fabrica. */
+    public static int autoDecisionMode() {
+        return Math.max(0, Math.min(AUTO_DECISION_MODES.length - 1, getInt(AUTO_DECISION, 1)));
+    }
+
+    /** Cuando preguntar antes de salir de la fase principal. */
+    public static int confirmPhaseMode() {
+        return Math.max(0, Math.min(2, getInt(CONFIRM_PHASE, CONFIRM_PHASE_DEFAULT)));
+    }
+
+    /**
+     * Preguntar antes de dejar pasar un combate sin bloquear con nada,
+     * pudiendo (Discord, 03-10-2026). Apagado de fabrica: lo pidio asi quien
+     * lo propuso. Ver {@code forge.neo.match.BlockGuard}. La misma clave en
+     * Android.
+     */
+    public static final String CONFIRM_NO_BLOCK = "confirmNoBlock";
+
+    public static boolean confirmNoBlock() {
+        return getBool(CONFIRM_NO_BLOCK, false);
+    }
+
+    /**
+     * Preguntar antes de dejar pasar tu ataque sin declarar a nadie, pudiendo
+     * (Discord, 04-11-2026). El gemelo de {@link #CONFIRM_NO_BLOCK}, apagado
+     * de fabrica igual. Ver {@code forge.neo.match.AttackGuard}. La misma clave
+     * en Android.
+     */
+    public static final String CONFIRM_NO_ATTACK = "confirmNoAttack";
+
+    public static boolean confirmNoAttack() {
+        return getBool(CONFIRM_NO_ATTACK, false);
+    }
+
+    /**
+     * Preguntar antes del toque que cerraria una eleccion de "elige N cartas"
+     * (descartar, sacrificar...), que el motor confirma solo al llegar a N
+     * (Discord, 11-10-2026). Apagado de fabrica. Ver
+     * {@code forge.neo.match.PickGuard}. La misma clave en Android.
+     */
+    public static final String CONFIRM_LAST_PICK = "confirmLastPick";
+
+    public static boolean confirmLastPick() {
+        return getBool(CONFIRM_LAST_PICK, false);
+    }
+
+    /**
+     * Lo mismo, pero SOLO para el descarte de la limpieza (llegar a la mano
+     * maxima). Encendido de fabrica (Discord, 06-11-2026: <i>"Many times now I
+     * have accidentally selected the wrong card to discard when I was just
+     * trying to view it"</i>): ese descarte no se deshace y llega cuando ya
+     * vas pasando el turno. Si {@link #confirmLastPick} esta puesto, ese manda
+     * y pregunta en todas. La misma clave en Android.
+     */
+    public static final String CONFIRM_DISCARD = "confirmCleanupDiscard";
+
+    public static boolean confirmCleanupDiscard() {
+        return getBool(CONFIRM_DISCARD, true);
+    }
+
+    /**
+     * Los simbolos de mana de Forge en vez de {U}, {T}... (itch.io,
+     * 06-11-2026). Encendido de fabrica; apagado, todo como antes. Ver
+     * {@code forge.neo.card.ManaSymbols}. La misma clave en Android.
+     */
+    public static final String MANA_ICONS = "manaIcons";
+
+    public static boolean manaIcons() {
+        return getBool(MANA_ICONS, true);
+    }
+
+    /**
+     * Preguntar antes de que un toque en un permanente active su habilidad
+     * (Discord, 11-10-2026: "back out of a tap effect"). Apagado de fabrica.
+     * Ver {@code forge.neo.match.ActivateGuard}. La misma clave en Android.
+     */
+    public static final String CONFIRM_ACTIVATE = "confirmActivate";
+
+    /**
+     * Preguntar antes de que tocar una carta de la mano la cicle (o use otra
+     * habilidad desde la mano) en vez de lanzarla: pasa con algo en la pila,
+     * cuando la carta no se puede lanzar y ciclarla es lo unico que puede hacer
+     * (Discord, 17-10-2026). ENCENDIDO de fabrica, por decision del autor: es un
+     * accidente que tiene casi todo el mundo y solo pregunta en ese caso. Ver
+     * {@code ActivateGuard.handAbilityFor}.
+     */
+    public static final String CONFIRM_HAND_ABILITY = "confirmHandAbility";
+
+    public static boolean confirmHandAbility() {
+        return getBool(CONFIRM_HAND_ABILITY, true);
+    }
+
+    public static boolean confirmActivate() {
+        return getBool(CONFIRM_ACTIVATE, false);
+    }
+
+    /**
+     * A que ritmo juega la IA, en centesimas de multiplicador.
+     *
+     * <p>{@code 100} es x1, o sea la pausa base entre carta y carta
+     * ({@code NeoMatchUI.AI_STEP_MS}). {@code 200} es x2 (la mitad de espera),
+     * {@code 50} es x0,5 (el doble) y {@code 0} es sin pausa ninguna, que es
+     * como se jugaba antes de que esto existiera.
+     *
+     * <p>Va en centesimas y no en milisegundos a proposito: lo que el jugador
+     * elige es "x2", no "1500 ms", y guardar lo que se elige evita que cambiar
+     * la pausa base deje los ajustes viejos apuntando a otra cosa.
+     */
+    public static final String AI_SPEED = "aiSpeed";
+
+    /**
+     * Que la prioridad se pase SOLA cuando no puedes hacer nada.
+     *
+     * <p>Es {@code YIELD_AUTO_PASS_NO_ACTIONS} del motor. Viene <b>encendido</b>,
+     * que es como se ha jugado siempre aqui, pero ya no a la fuerza: pedido en
+     * r/forgeMTG el 15-09-2026 (<i>"add an option to turn off auto passing when
+     * I have nothing to do, let me do it myself"</i>). Apagado, el juego te para
+     * en cada fase con parada del rail aunque no tengas nada que jugar, que es
+     * como va el Forge de siempre. Lo aplica {@code NeoGame.applyEnginePrefs},
+     * y en vivo {@code NeoGame.refreshAutoPass}.
+     */
+    public static final String AUTO_PASS = "autoPass";
+
+    /**
+     * Que los disparos de TUS reliquias de Ascenso se resuelvan solos.
+     *
+     * <p>Discord (Tommy, 10-10-2026), con una veintena de reliquias: <i>"I'm
+     * getting prompted a lot of times just to hit OK once there is no decision
+     * to be made here"</i>. Cada disparo va al stack y para pasar la prioridad
+     * habia que dar OK, uno por reliquia y turno. Lo hace
+     * {@code NeoMatchUI.passRelicTriggerSoon}: solo con un disparo de una
+     * reliquia tuya ENCIMA del stack y el motor pidiendote prioridad, y tras
+     * una pausa corta para que se vea. Lo que el disparo pregunte (objetivos,
+     * un "puedes") se sigue preguntando. Viene <b>encendido</b>.
+     */
+    public static final String RELIC_PASS = "relicTriggersPass";
+
+    /**
+     * Las paradas del rail de fases, en tus turnos y en los del rival:
+     * nombres de {@code PhaseType} separados por comas, {@code "-"} para
+     * ninguna y sin valor para las de fabrica. Las lee y escribe
+     * {@code NeoMatchUI}.
+     */
+    public static final String PHASE_STOPS_MINE = "phaseStops.mine";
+    public static final String PHASE_STOPS_THEIRS = "phaseStops.theirs";
+
+    /**
+     * Que el pase automatico se PARE cuando pasa algo que te importa.
+     *
+     * <p>Esto no lo programamos nosotros: Forge trae el sistema entero en
+     * {@code forge.gamemodes.match.YieldController} (623 lineas) y lo unico
+     * que le faltaba era que alguien lo encendiera. Nosotros ya poniamos
+     * {@code YIELD_AUTO_PASS_NO_ACTIONS} — o sea "pasa la prioridad sola
+     * cuando no tengo nada que hacer" — pero dejabamos apagado el interruptor
+     * maestro de las interrupciones, asi que el pase no se paraba NUNCA:
+     * el rival te atacaba o te lanzaba algo y la partida seguia de largo.
+     *
+     * <p>Viene <b>apagado</b>. Es un cambio de ritmo de la partida y esos se
+     * eligen, no se imponen: quien ya juega comodo no tiene por que notar
+     * nada al actualizar.
+     */
+    public static final String SMART_PASS = "smartPass";
+
+    /**
+     * Cuanto se para, de lo poco a lo todo.
+     *
+     * <p>{@code 0} ataques y hechizos del rival · {@code 1} y ademas lo que te
+     * apunta y los barridos · {@code 2} y ademas los disparos y lo que se
+     * revela.
+     *
+     * <p>Son <b>tres posiciones y no seis casillas</b> a proposito. El motor
+     * tiene una preferencia por cada tipo de interrupcion
+     * ({@code YIELD_INTERRUPT_ON_*}), pero seis casillas sueltas obligan al
+     * jugador a saber que es un "barrido" o un "disparo" antes de poder
+     * decidir, y lo que en realidad quiere elegir es cuanto le paran. Las tres
+     * posiciones se traducen a las seis preferencias en
+     * {@code NeoGame.applyEnginePrefs}.
+     */
+    public static final String SMART_PASS_LEVEL = "smartPassLevel";
+
+    /**
+     * Si "Fin de turno" (y el pase automatico) se corta cuando un rival te
+     * ataca o lanza algo: las dos interrupciones que Forge trae encendidas
+     * ({@code YIELD_INTERRUPT_ON_ATTACKERS} y {@code _ON_OPPONENT_SPELL}).
+     *
+     * <p>Encendido de fabrica, como Forge. Discord pidio las dos cosas: el
+     * 15-10-2026 que nada cortaba el "Fin de turno" (ni un Cyclonic Rift), y el
+     * 20-10-2026, ya arreglado, <i>"the app keeps giving me prio ... in declare
+     * blockers (with no creatures on board because turbofog)"</i>. Apagado, el
+     * boton te lleva al final del turno como antes de la 1.0.27. Lo vuelcan al
+     * motor {@code NeoGame.applySmartPass} y Android ({@code pasoInteligente}).
+     */
+    public static final String END_TURN_INTERRUPTS = "endTurnInterrupts";
+
+    public static boolean endTurnInterrupts() {
+        return getBool(END_TURN_INTERRUPTS, true);
+    }
+
+    /** Cuanto para el pase automatico. 0 poco · 1 normal · 2 todo. */
+    public static int smartPassLevel() {
+        return Math.max(0, Math.min(2, getInt(SMART_PASS_LEVEL, 0)));
+    }
+
+    /**
+     * Numero de rating sobre cada carta del sobre, en el draft.
+     *
+     * <p>Viene <b>apagado</b> a proposito, al contrario que la preferencia de
+     * Forge de la que sale el dato ({@code UI_OVERLAY_DRAFT_RANKING}, "true" de
+     * fabrica): para quien esta aprendiendo a draftear es una ayuda, pero para
+     * quien ya sabe es la respuesta puesta antes de pensarla, y a ese le
+     * estropea el draft. Se enciende a proposito, como {@link #AUTO_MANA}.
+     */
+    public static final String DRAFT_RANKING = "draftRanking";
+
+    /** Si se ensenya el numero de rating sobre las cartas del sobre. */
+    public static boolean showDraftRanking() {
+        return getBool(DRAFT_RANKING, false);
+    }
+
+    /**
+     * Jugar cada partido del evento (draft o sellado) al mejor de 3, con
+     * banquillo entre partida y partida.
+     *
+     * <p>Apagado de fabrica: una sola partida por rival es lo que ya se
+     * jugaba, y sigue siendo lo mas rapido para quien solo quiere avanzar el
+     * evento. Se lee una vez, al pulsar "jugar" en el marcador del evento
+     * ({@code DraftRunScreen}) — cambiarlo a mitad de un evento solo afecta
+     * al PROXIMO partido, nunca al que ya esta en curso.
+     */
+    public static final String DRAFT_BO3 = "draftBo3";
+
+    /** Si el proximo partido del evento se juega al mejor de 3. */
+    public static boolean bo3() {
+        return getBool(DRAFT_BO3, false);
+    }
+
+    private static final Properties PROPS = new Properties();
+    private static boolean loaded;
+
+    /**
+     * Donde vive nuestro fichero de ajustes.
+     *
+     * <p>Normalmente, junto a las preferencias de Forge. Pero el proceso de la
+     * <b>Aventura</b> corre con su propio perfil de Forge (sus partidas
+     * guardadas van aparte a proposito), y eso arrastraba nuestros ajustes con
+     * el: ahi dentro el jugador se encontraba <b>sus atajos, su auto-pass y su
+     * ritmo de la IA de fabrica</b>, porque se estaban leyendo de otro fichero.
+     * Reportado el 20-09-2026 — <i>"me da que no se aplican los atajos que
+     * tengo en NeoForge sino los basicos"</i>, y era exactamente eso.
+     *
+     * <p>Las partidas de la Aventura son suyas; <b>los ajustes de la interfaz
+     * son del jugador</b> y solo hay unos. Por eso el lanzador le pasa la ruta
+     * de verdad en {@code neo.settingsFile} y aqui se respeta.
+     */
+    private static File file() {
+        final String forced = System.getProperty("neo.settingsFile");
+        if (forced != null && !forced.isBlank()) {
+            return new File(forced);
+        }
+        return new File(ForgeConstants.USER_PREFS_DIR, "neo.properties");
+    }
+
+    /** La ruta, para poder pasarsela a otro proceso. Ver {@link #file()}. */
+    public static String path() {
+        return file().getAbsolutePath();
+    }
+
+    /**
+     * Vuelve a leer el fichero.
+     *
+     * <p>Hace falta porque la Aventura corre en OTRO proceso y comparte estos
+     * ajustes: si el jugador cambia algo en su menu de pausa, el que se quedo
+     * esperando aqui tiene la copia vieja en memoria y la escribiria encima.
+     */
+    public static synchronized void reload() {
+        PROPS.clear();
+        loaded = false;
+        load();
+    }
+
+    /**
+     * true si ya hay un fichero de ajustes nuestro.
+     *
+     * <p>Es la forma honesta de saber si alguien ha abierto esto antes. Lo usa
+     * el tutorial para decidir si se pone delante del menu: a quien lleva
+     * jugando meses no se le puede recibir con un tutorial solo porque hayamos
+     * anyadido la marca hoy.
+     */
+    public static boolean exists() {
+        return file().exists();
+    }
+
+    private static synchronized void load() {
+        if (loaded) {
+            return;
+        }
+        loaded = true;
+        final File f = file();
+        if (!f.exists()) {
+            return;
+        }
+        try (FileInputStream in = new FileInputStream(f)) {
+            PROPS.load(in);
+        } catch (final IOException e) {
+            // Unos ajustes ilegibles no son motivo para no arrancar.
+            System.err.println("[neo] no se han podido leer los ajustes: " + e.getMessage());
+        }
+    }
+
+    public static synchronized void save() {
+        final File f = file();
+        try {
+            final File dir = f.getParentFile();
+            if (dir != null && !dir.exists() && !dir.mkdirs()) {
+                return;
+            }
+            try (FileOutputStream out = new FileOutputStream(f)) {
+                PROPS.store(out, "NeoForge - ajustes de la interfaz Neo");
+            }
+        } catch (final IOException e) {
+            System.err.println("[neo] no se han podido guardar los ajustes: " + e.getMessage());
+        }
+    }
+
+    public static synchronized String get(final String key, final String fallback) {
+        load();
+        final String v = PROPS.getProperty(key);
+        return v == null || v.isBlank() ? fallback : v;
+    }
+
+    /**
+     * Las claves guardadas que empiezan por ese prefijo.
+     *
+     * <p>Existe para poder <b>salvar y reponer</b> un bloque entero de ajustes:
+     * {@code AscentCheck} recorre veinte runs de mentira escribiendo en
+     * {@code ascent.*}, y sin esto la corrida de pruebas se llevaria por
+     * delante la run de verdad del jugador — que en un modo donde no se puede
+     * volver atras es el peor destrozo posible.
+     */
+    public static synchronized java.util.List<String> keysWithPrefix(final String prefix) {
+        load();
+        final java.util.List<String> out = new java.util.ArrayList<>();
+        for (final String key : PROPS.stringPropertyNames()) {
+            if (key.startsWith(prefix)) {
+                out.add(key);
+            }
+        }
+        return out;
+    }
+
+    public static synchronized void set(final String key, final String value) {
+        load();
+        if (value == null) {
+            PROPS.remove(key);
+        } else {
+            PROPS.setProperty(key, value);
+        }
+    }
+
+    public static int getInt(final String key, final int fallback) {
+        try {
+            return Integer.parseInt(get(key, String.valueOf(fallback)));
+        } catch (final NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    public static void setInt(final String key, final int value) {
+        set(key, String.valueOf(value));
+    }
+
+    /**
+     * Cuantos rivales se eligieron la ultima vez EN ESTE FORMATO, o los de
+     * fabrica del formato (Estandar 1, Commander 3...) si nunca se toco.
+     *
+     * <p>Hasta el 26-09-2026 era un solo ajuste para todos, y el de fabrica
+     * del formato solo valia mientras no se hubiera jugado nada: una partida
+     * de Commander a cuatro dejaba Estandar tambien a cuatro. Reportado tal
+     * cual: <i>"Estandar por defecto es 1v1"</i>. Por eso la clave lleva el
+     * formato, y por eso NO se lee la vieja ({@link #OPPONENTS} a secas): lo
+     * que diga es de cualquier formato, justo el fallo.
+     */
+    public static int opponents(final forge.neo.match.NeoFormat format) {
+        return getInt(OPPONENTS + "." + format.name(), format.getDefaultOpponents());
+    }
+
+    public static void setOpponents(final forge.neo.match.NeoFormat format, final int n) {
+        setInt(OPPONENTS + "." + format.name(), n);
+    }
+
+    /**
+     * Al mejor de cuantas partidas se juega en este formato: 1 (lo de siempre),
+     * 3 (Discord, 19-10-2026: <i>"there is no bo3 option, correct?"</i>) o 5
+     * (Discord, 01-11-2026: <i>"a Best-of-5 (first to 3 wins)"</i>). Lo
+     * elige el boton PARTIDO de la pantalla de mazos y se recuerda por formato.
+     * Con 3, el motor juega el partido entero y pide el banquillo entre
+     * partidas donde el formato lo permite (no en Commander).
+     */
+    public static int bestOf(final forge.neo.match.NeoFormat format) {
+        return validBestOf(getInt(BEST_OF + "." + format.name(), 1));
+    }
+
+    public static void setBestOf(final forge.neo.match.NeoFormat format, final int games) {
+        setInt(BEST_OF + "." + format.name(), validBestOf(games));
+    }
+
+    /** 1, 3 o 5; cualquier otra cosa, una partida. */
+    private static int validBestOf(final int games) {
+        return games == 3 || games == 5 ? games : 1;
+    }
+
+    private static final String BEST_OF = "bestOf";
+
+    /**
+     * Con que mazo juega el rival {@code seat} (0, 1, 2) de este formato: el
+     * nombre de un mazo, o la clave de un sorteo ("Al azar de <coleccion>"), o
+     * vacio = al azar entre todos. Cada pantalla guarda su propia clave; aqui
+     * solo se guarda (Discord, 17-10-2026: <i>"retain AI random deck selection
+     * of a collection between matches? It keeps resetting back to all
+     * decks"</i>). Por formato, como {@link #opponents}.
+     */
+    public static String rivalDeck(final forge.neo.match.NeoFormat format, final int seat) {
+        return get("rivalDeck." + format.name() + "." + seat, "");
+    }
+
+    public static void setRivalDeck(final forge.neo.match.NeoFormat format, final int seat,
+                                    final String choice) {
+        set("rivalDeck." + format.name() + "." + seat, choice == null ? "" : choice);
+    }
+
+    /** Los equipos de este formato. Por formato por lo mismo que {@link #opponents}. */
+    public static String teams(final forge.neo.match.NeoFormat format) {
+        return get(TEAMS + "." + format.name(), "");
+    }
+
+    public static void setTeams(final forge.neo.match.NeoFormat format, final String teams) {
+        set(TEAMS + "." + format.name(), teams);
+    }
+
+    /** Escala guardada, o {@code null} si es automatica. */
+    public static Double getScale() {
+        final String v = get(UI_SCALE, "auto");
+        if ("auto".equalsIgnoreCase(v)) {
+            return null;
+        }
+        try {
+            return Double.valueOf(v);
+        } catch (final NumberFormatException e) {
+            return null;
+        }
+    }
+
+    public static void setScale(final Double scale) {
+        set(UI_SCALE, scale == null ? "auto" : String.format(java.util.Locale.ROOT, "%.2f", scale));
+    }
+
+    public static double getDouble(final String key, final double fallback) {
+        try {
+            return Double.parseDouble(get(key, String.valueOf(fallback)));
+        } catch (final NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    public static void setDouble(final String key, final double value) {
+        set(key, String.format(java.util.Locale.ROOT, "%.2f", value));
+    }
+
+    public static boolean getBool(final String key, final boolean fallback) {
+        return Boolean.parseBoolean(get(key, String.valueOf(fallback)));
+    }
+
+    public static void setBool(final String key, final boolean value) {
+        set(key, String.valueOf(value));
+    }
+
+    /**
+     * Pasa el volumen a las preferencias del motor.
+     *
+     * <p>El {@code SoundSystem} de Forge lee el volumen de SUS preferencias
+     * ({@code UI_VOL_SOUNDS}, {@code UI_VOL_MUSIC}), asi que no hay mas remedio
+     * que escribirlas. Se hace <b>solo en memoria, sin guardar</b>: ese fichero
+     * lo comparte la instalacion normal de Forge y no vamos a cambiarle los
+     * ajustes al usuario por detras. Nuestro valor de verdad vive en
+     * {@code neo.properties} y se vuelve a aplicar en cada arranque.
+     */
+    /** Propiedad que pone {@code AdventureNeoMain}: este proceso es el de la Aventura. */
+    public static final String ADVENTURE_PROCESS = "neo.adventure.process";
+
+    public static void applyAudioToEngine() {
+        final int sound = getInt(SOUND_VOLUME, SOUND_VOLUME_DEFAULT);
+        // En el proceso de la Aventura la musica es la de NeoForge, que suena en
+        // el otro proceso: aqui se queda callada aunque se toque el volumen
+        // desde la pausa de un duelo (ver AdventureSettings).
+        final int music = Boolean.getBoolean(ADVENTURE_PROCESS)
+                ? 0 : getInt(MUSIC_VOLUME, MUSIC_VOLUME_DEFAULT);
+        final ForgePreferences prefs = FModel.getPreferences();
+        prefs.setPref(FPref.UI_ENABLE_SOUNDS, sound > 0);
+        prefs.setPref(FPref.UI_ENABLE_MUSIC, music > 0);
+        prefs.setPref(FPref.UI_VOL_SOUNDS, String.valueOf(sound));
+        prefs.setPref(FPref.UI_VOL_MUSIC, String.valueOf(music));
+        // Nada de prefs.save(): el cambio muere con el proceso.
+        try {
+            forge.sound.SoundSystem.instance.refreshVolume();
+        } catch (final RuntimeException e) {
+            // Todavia no hay musica sonando: no es un problema.
+        }
+    }
+
+    /**
+     * Pasa la politica de arte a las preferencias del motor (la auditoría del motor, apartado B4).
+     *
+     * <p>Se llama una vez al arrancar ({@code NeoApp.applyEngineSettings}, en
+     * cuanto el catalogo esta leido) y otra vez cada vez que se toca en
+     * Ajustes — al reves que el idioma, esto no necesita reiniciar:
+     * {@code StaticData} tiene setters de verdad y las dos GUIs oficiales los
+     * llaman al momento.
+     */
+    public static void applyCardArtToEngine() {
+        final boolean latest = getBool(CARD_ART_LATEST, CARD_ART_LATEST_DEFAULT);
+        final boolean coreOnly = getBool(CARD_ART_CORE_ONLY, CARD_ART_CORE_ONLY_DEFAULT);
+        FModel.getMagicDb().setCardArtPreference(latest, coreOnly);
+        // Y que se note: el motor guarda la politica pero no recalcula la
+        // impresion por defecto de cada carta, que es la del catalogo, la
+        // enciclopedia y Ascenso (Discord, 09-10-2026). Ver UniquePrints.
+        final long t0 = System.currentTimeMillis();
+        final int changed = forge.neo.card.UniquePrints.rebuild();
+        forge.neo.deck.CardLibrary.invalidate();
+        System.out.printf("[art] policy %s%s: %d cards to their default printing (%d ms)%n",
+                latest ? "latest" : "original", coreOnly ? ", core sets only" : "",
+                changed, System.currentTimeMillis() - t0);
+        // UI_RANDOM_ART_IN_POOLS si es una preferencia de Forge de verdad
+        // (Quest y el generador de pools sellados la leen sola de
+        // FModel.getPreferences() cada vez), asi que basta con escribirla.
+        FModel.getPreferences().setPref(FPref.UI_RANDOM_ART_IN_POOLS,
+                getBool(RANDOM_ART_IN_POOLS, true));
+        // Nada de prefs.save(): el fichero de Forge no se toca por detras.
+    }
+}

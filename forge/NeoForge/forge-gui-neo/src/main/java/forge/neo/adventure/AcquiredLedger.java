@@ -1,0 +1,201 @@
+package forge.neo.adventure;
+
+import com.badlogic.gdx.Gdx;
+import forge.adventure.player.AdventurePlayer;
+import forge.adventure.world.WorldSave;
+import forge.item.PaperCard;
+import forge.model.FModel;
+
+import java.io.File;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/**
+ * <b>Cuando conseguiste cada carta</b>, para poder ordenar la coleccion por lo
+ * ultimo que ha entrado.
+ *
+ * <p>Pedido en itch.io el 27-09-2026: <i>"sort the cards by acquisition time in
+ * the overview or deck building screens in adventure mode"</i>. El Adventure no
+ * lo guarda en ningun sitio: la coleccion es un {@code CardPool} sobre un
+ * {@code ConcurrentHashMap} y al guardar se escribe <b>ordenada por nombre</b>
+ * ({@code CardPool.toCardList}). Lo unico parecido es {@code newCards}, que es
+ * un "desde que cerraste el editor" sin orden dentro, y que ademas solo vacia
+ * el editor de Forge — con el nuestro crece para siempre. Y su fichero de
+ * partida no se toca (regla de oro), asi que el dato lo apuntamos nosotros, al
+ * lado.
+ *
+ * <p>Como: cada pocos segundos, en el hilo de libGDX (donde vive el jugador),
+ * se cuentan las copias de cada carta <b>por nombre</b> — el catalogo del
+ * editor es una tesela por nombre — y si alguna ha subido, se le pone la hora.
+ * Sube por un premio, una tienda, un sobre o un cofre: da igual por donde, que
+ * es justo por lo que se mira el total y no cada camino. El editor tambien lo
+ * pide al abrirse ({@link #syncNow}), asi que lo que acabas de ganar ya cuenta.
+ *
+ * <p>Tres decisiones que no se ven leyendo:
+ * <ul>
+ *   <li><b>Cargar una partida no es conseguir cartas.</b> La coleccion salta de
+ *       cero a cientos de golpe; tras cada carga ({@code onLoad}) se toman los
+ *       totales como estan, sin poner horas. Y una partida nueva empieza el
+ *       registro de cero: el mazo de salida no es "lo ultimo".</li>
+ *   <li><b>Lo vendido no se borra</b>, se queda con cero copias. Si luego
+ *       vuelve a entrar, sube de cero y cuenta como nueva — que es lo que es.</li>
+ *   <li><b>Lo de antes no tiene hora</b> (0): el registro existe desde la 3.9.
+ *       Esas cartas van detras de las fechadas, por nombre, y el boton lo dice.</li>
+ * </ul>
+ *
+ * <p>Un fichero por personaje, junto a sus partidas:
+ * {@code <adventure>/<plano>/neo-adquiridas-<nombre>.txt}. No toca nada del
+ * Adventure: si se borra, solo se pierde el orden.
+ *
+ * <p><b>Tambien lo usa Android</b> (06-10-2026, Discord: <i>"sort by recent in
+ * the deck part seems not working"</i>): alli nadie lo armaba, todas las cartas
+ * tenian hora 0 y "Lo ultimo conseguido" era el orden por nombre — invertirlo no
+ * cambiaba nada. Lo arma su {@code AccesoAventura}. Por eso nada de aqui toca
+ * clases con JavaFX (el registro va por {@link #log}). Y dos seguros que hoy no
+ * hacen falta: {@link #arm} vale una vez por proceso, y un repaso en cola de un
+ * libGDX que ya no existe se olvida ({@code queuedFor}). Alli la Aventura vive
+ * en el proceso de la app, y si un dia se vuelve a entrar sin reiniciarlo — hoy
+ * se reinicia, {@code AventuraActivity.abrir} — el registro no se queda mudo.
+ */
+public final class AcquiredLedger {
+
+    private AcquiredLedger() {
+    }
+
+    /** Cada cuanto se miran los totales. Contar 2.000 entradas es nada. */
+    private static final long PERIOD_MS = 3000;
+
+    private static final Book book = new Book();
+    private static final AtomicBoolean armed = new AtomicBoolean();
+    private static final AtomicBoolean queued = new AtomicBoolean();
+    /**
+     * El libGDX al que se le pidio el repaso que esta en cola. En Android cada
+     * visita a la Aventura trae uno nuevo, y lo pedido al de antes no se hara
+     * nunca: sin esto, {@code queued} se quedaba en true y no se volvia a mirar.
+     */
+    private static volatile com.badlogic.gdx.Application queuedFor;
+    private static volatile boolean listening;
+    /** Hubo una carga: los proximos totales se toman como estan. */
+    private static volatile boolean rebase = true;
+    /** La carga era una partida NUEVA: el registro empieza de cero. */
+    private static volatile boolean fresh;
+    private static volatile String owner;
+
+    /**
+     * Arranca el vigilante. Lo llaman {@link AdventureNeoMain} y, en Android,
+     * {@code AccesoAventura}. Una vez por proceso: llamarlo otra vez no hace nada.
+     */
+    static void arm() {
+        if ("false".equalsIgnoreCase(System.getProperty("neo.adventure.acquired"))) {
+            return;
+        }
+        if (!armed.compareAndSet(false, true)) {
+            return;
+        }
+        final Thread t = new Thread(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(PERIOD_MS);
+                } catch (final InterruptedException e) {
+                    return;
+                }
+                try {
+                    final com.badlogic.gdx.Application app = Gdx.app;
+                    if (app != null && queued.get() && queuedFor != app) {
+                        queued.set(false); // lo pedido a un libGDX que ya no esta
+                    }
+                    if (app != null && FModel.getMagicDb() != null
+                            && queued.compareAndSet(false, true)) {
+                        // Uno en cola como mucho: si libGDX esta parado (un
+                        // duelo nuestro delante), no se amontonan.
+                        queuedFor = app;
+                        app.postRunnable(() -> {
+                            queued.set(false);
+                            syncNow();
+                        });
+                    }
+                    book.write();
+                } catch (final Throwable ignored) {
+                    // todavia cargando, o un fallo al escribir: el orden es un
+                    // adorno y no puede tumbar la Aventura
+                }
+            }
+        }, "neo-adventure-acquired");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * Mira los totales ya. <b>En el hilo de libGDX</b>, que es donde se cargan
+     * y se tocan las cartas del jugador.
+     */
+    static void syncNow() {
+        try {
+            final WorldSave save = WorldSave.getCurrentSave();
+            if (!listening) {
+                listening = true;
+                save.onLoad(() -> {
+                    rebase = true;
+                    if (StarterDeck.fromNewWorld()) {
+                        fresh = true;
+                    }
+                });
+            }
+            if (save.getWorld().getData() == null) {
+                return; // en la portada: no hay partida
+            }
+            final AdventurePlayer player = save.getPlayer();
+            final String name = player.getName();
+            if (name == null || name.isBlank()) {
+                return;
+            }
+            if (!name.equals(owner)) {
+                book.write();
+                owner = name;
+                book.read(new File(WorldSave.getSaveDir(), "neo-adquiridas-" + safe(name) + ".txt"));
+                rebase = true;
+            }
+            if (fresh) {
+                fresh = false;
+                book.clear();
+            }
+            final Map<String, Integer> counts = new HashMap<>();
+            for (final Map.Entry<PaperCard, Integer> e : player.getCards()) {
+                counts.merge(key(e.getKey()), e.getValue(), Integer::sum);
+            }
+            book.update(counts, rebase, System.currentTimeMillis());
+            rebase = false;
+        } catch (final Throwable e) {
+            log("registro de cartas conseguidas: " + e);
+        }
+    }
+
+    /** Como {@code NeoDuelBridge.log}, sin cargar esa clase: trae JavaFX, y en Android no hay. */
+    private static void log(final String s) {
+        System.out.println("[aventura] " + s);
+    }
+
+    /** Cuando entro esa carta (milisegundos), o 0 si no se sabe. */
+    static long acquiredAt(final PaperCard card) {
+        return book.stampOf(key(card));
+    }
+
+    static String key(final PaperCard card) {
+        return card == null ? "" : card.getName().toLowerCase(Locale.ROOT);
+    }
+
+    private static String safe(final String name) {
+        final String s = name.replaceAll("[^\\p{L}\\p{N}_ -]", "_").trim();
+        return s.isEmpty() ? "_" : s;
+    }
+
+    /**
+     * El registro en si, sin libGDX: lo que prueba {@code AdventureCheck}. Vive
+     * en {@link forge.neo.deck.AcquiredBook} desde que la Quest tambien lo usa
+     * ({@link forge.neo.quest.QuestAcquired}).
+     */
+    static final class Book extends forge.neo.deck.AcquiredBook {
+    }
+}

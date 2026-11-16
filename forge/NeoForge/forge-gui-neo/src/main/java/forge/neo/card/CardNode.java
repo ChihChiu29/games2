@@ -1,0 +1,2548 @@
+package forge.neo.card;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import forge.neo.NeoText;
+import forge.neo.ascent.AscentRelic;
+import forge.neo.ascent.AscentRelics;
+
+import com.google.common.collect.Multiset;
+
+import forge.game.card.CardView;
+import forge.game.card.CardView.CardStateView;
+import forge.game.card.CounterEnumType;
+import forge.game.card.CounterType;
+import forge.game.zone.ZoneType;
+import javafx.animation.Interpolator;
+import javafx.animation.RotateTransition;
+import javafx.animation.ScaleTransition;
+import javafx.animation.TranslateTransition;
+import javafx.geometry.Pos;
+import javafx.scene.CacheHint;
+import javafx.scene.control.Label;
+import javafx.scene.effect.BlendMode;
+import javafx.scene.effect.DropShadow;
+import javafx.scene.image.Image;
+import javafx.scene.image.ImageView;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
+import javafx.scene.layout.VBox;
+import javafx.scene.paint.Color;
+import javafx.scene.paint.CycleMethod;
+import javafx.scene.paint.LinearGradient;
+import javafx.scene.paint.Stop;
+import javafx.scene.shape.Rectangle;
+import javafx.util.Duration;
+
+/**
+ * Una carta en pantalla.
+ *
+ * <p>Es el ladrillo del que se compone toda la interfaz: mano, mesa, stack,
+ * cementerio, previsualizacion. Todo lo que pinta sale de un {@link CardView}
+ * — nunca del estado vivo del motor.
+ *
+ * <p>Si la imagen aun no esta descargada, dibuja un respaldo procedural legible
+ * (nombre, coste, tipo, P/T) en vez de un hueco vacio. Cuando la imagen llega,
+ * {@link #refresh()} la sustituye.
+ *
+ * <p>Rendimiento: NO recrear estos nodos en cada actualizacion. Reutilizar el
+ * mismo CardNode por id de carta y llamar a {@link #refresh()}.
+ */
+public class CardNode extends StackPane {
+
+    /** Proporcion real de una carta de Magic: 63 x 88 mm. */
+    public static final double ASPECT = 88.0 / 63.0;
+
+    private static final Duration TAP_TIME = Duration.millis(220);
+    private static final Duration HOVER_TIME = Duration.millis(140);
+
+    /**
+     * Si las cartas se mueven o cambian de golpe.
+     *
+     * <p>Es un ajuste, no un adorno: en un portatil flojo con la mesa llena, la
+     * decena de transiciones simultaneas de un turno de combate se nota. Apagado
+     * se ve exactamente lo mismo, solo que sin recorrido.
+     */
+    private static volatile boolean animations = true;
+
+    public static void setAnimationsEnabled(final boolean on) {
+        animations = on;
+    }
+
+    public static boolean areAnimationsEnabled() {
+        return animations;
+    }
+
+    /**
+     * Si las cartas foil brillan (la auditoría del motor, apartado D5).
+     *
+     * <p>Encendido de fabrica: es puro adorno, no cambia nada de como se
+     * juega — al reves que el pago automatico o el pase inteligente, que
+     * cambian el RITMO de la partida y por eso vienen apagados. Aqui la
+     * regla es la de las animaciones (las notas de diseño): apagado se ve
+     * exactamente la carta de siempre, sin ningun brillo.
+     */
+    private static volatile boolean foilEffect = true;
+
+    public static void setFoilEffectEnabled(final boolean on) {
+        foilEffect = on;
+    }
+
+    public static boolean isFoilEffectEnabled() {
+        return foilEffect;
+    }
+
+    /**
+     * Si las cartas de la mesa ensenyan sus iconos de habilidad (volar, toque
+     * mortal, arrollar...), como el Forge de siempre. Encendido de fabrica.
+     *
+     * <p>Pedido desde Reddit el 26-09-2026. Es un ajuste porque ocupa una
+     * esquina de la carta: quien juega con la mesa grande y se sabe las cartas
+     * puede preferir el arte limpio. Ver {@link KeywordIcon}.
+     */
+    private static volatile boolean keywordBadges = true;
+
+    public static void setKeywordBadgesEnabled(final boolean on) {
+        keywordBadges = on;
+    }
+
+    public static boolean areKeywordBadgesEnabled() {
+        return keywordBadges;
+    }
+
+    /**
+     * Si el reflejo de la foil se MUEVE, o se queda quieto como antes.
+     *
+     * <p>No es un ajuste del menu — el interruptor que ve el jugador sigue
+     * siendo uno solo, "brillo de las foil" (§2 de la auditoría del motor: una casilla
+     * es una pregunta distinta, y "¿quieto o en movimiento?" no lo es). Es la
+     * palanca con la que se compara una cosa con la otra al medir, desde
+     * {@code -Dneo.foil.static=true}, y la red por si algun dia hace falta
+     * dejar quietas las foil en una maquina floja sin apagarlas del todo.
+     */
+    private static volatile boolean foilMotion = !Boolean.getBoolean("neo.foil.static");
+
+    public static void setFoilMotionEnabled(final boolean on) {
+        foilMotion = on;
+    }
+
+    public static boolean isFoilMotionEnabled() {
+        return foilMotion;
+    }
+
+    /**
+     * Trata TODA carta como foil. Solo para medir el peor caso posible — un
+     * Commander entero en foil, que es justo lo que hay que poder descartar
+     * antes de dar esto por bueno. En una partida real son ~1 de cada 20
+     * ({@code Match.preparePlayerZone}).
+     */
+    private static final boolean FOIL_EVERYTHING = Boolean.getBoolean("neo.foil.all");
+
+    /**
+     * La <b>difraccion</b> de una foil: rayas diagonales finas de color que se
+     * repiten por toda la carta, en modo {@code SCREEN} para que ACLAREN el
+     * arte de debajo en vez de teñirlo — es lo que hace que una lamina
+     * metalica brille en vez de quedar sucia.
+     *
+     * <p>Antes esto era UN solo degradado estirado de esquina a esquina, con
+     * bandas anchisimas: eso no es un reflejo, es un tinte, y el ojo lo lee
+     * como una calcomania pegada encima. Lo que identifica a una foil de
+     * verdad es la <b>frecuencia</b> — rayas finas — y que el color
+     * <b>cambie al mover la carta</b>. De ahi {@link CycleMethod#REPEAT} sobre
+     * un tramo corto (0,16 de la diagonal) y un alfa bajo: mucho mas suave que
+     * antes, porque ahora quien llama la atencion es el movimiento y no el
+     * color.
+     *
+     * <p>Un {@code LinearGradient} y nada mas (D5 lo pedia asi): nada de
+     * texturas ni imagenes, que no las tenemos — el skin de Swing las trae
+     * de una descarga aparte que no hacemos. Coordenadas proporcionales
+     * (0..1), asi que UN solo gradiente vale para cualquier tamano de carta
+     * sin recalcular nada.
+     */
+    private static final LinearGradient FOIL_TINT = new LinearGradient(
+            0, 0, 0.11, 0.11, true, CycleMethod.REPEAT,
+            new Stop(0.00, Color.rgb(255, 170, 90, 0.09)),
+            new Stop(0.25, Color.rgb(120, 255, 205, 0.09)),
+            new Stop(0.50, Color.rgb(110, 190, 255, 0.09)),
+            new Stop(0.75, Color.rgb(215, 140, 255, 0.09)),
+            new Stop(1.00, Color.rgb(255, 170, 90, 0.09)));
+
+    /**
+     * El <b>reflejo</b>: una banda estrecha y clara que cruza la carta en
+     * diagonal cada siete segundos. Es la pieza que hace que parezca metal en
+     * vez de papel pintado, y la unica que se mueve.
+     *
+     * <p>Va en composicion normal, <b>no</b> en {@code SCREEN}, y eso es una
+     * decision de rendimiento: un modo de mezcla obliga a JavaFX a componer el
+     * nodo en una pasada aparte, y esta banda se repinta constantemente. Con
+     * un blanco sobre el arte se ve practicamente igual y no cuesta esa
+     * pasada. Las dos franjas de color de los bordes son la orla que deja el
+     * reflejo de una foil de verdad al separar la luz.
+     *
+     * <p>Lo brillante que es (0,40 en el nucleo) esta topado por la
+     * legibilidad, que en este proyecto va antes que el adorno (§6): a 0,52
+     * la banda lavaba el arte y el texto de las cartas pequenas de la mesa, y
+     * eso con un mazo entero en foil es todo el rato.
+     */
+    private static final LinearGradient FOIL_SPECULAR = new LinearGradient(
+            0, 0, 1, 0, true, CycleMethod.NO_CYCLE,
+            new Stop(0.00, Color.rgb(255, 255, 255, 0.00)),
+            new Stop(0.26, Color.rgb(140, 255, 220, 0.13)),
+            new Stop(0.42, Color.rgb(255, 255, 255, 0.17)),
+            new Stop(0.50, Color.rgb(255, 255, 255, 0.40)),
+            new Stop(0.58, Color.rgb(255, 255, 255, 0.17)),
+            new Stop(0.74, Color.rgb(205, 155, 255, 0.13)),
+            new Stop(1.00, Color.rgb(255, 255, 255, 0.00)));
+
+    /** Inclinacion del reflejo, en grados. */
+    private static final double FOIL_TILT = 22;
+
+    private final ImageView art = new ImageView();
+    private final Rectangle clip = new Rectangle();
+    private final Rectangle foilTint = new Rectangle();
+    private final Rectangle foilShine = new Rectangle();
+
+    /**
+     * El desfase propio de esta carta dentro del ciclo de siete segundos.
+     *
+     * <p>Sin esto, cuarenta foil de la misma mesa destellan <b>a la vez</b>, y
+     * eso no parece un reflejo: parece un estrobo. Se reparte con el numero
+     * aureo en vez de al azar para que dos cartas seguidas nunca caigan cerca
+     * — y para que una captura de pantalla salga siempre igual.
+     */
+    private final double foilPhase = nextFoilPhase();
+
+    private static double foilPhaseSeed;
+
+    private static synchronized double nextFoilPhase() {
+        foilPhaseSeed += 0.6180339887;
+        foilPhaseSeed -= Math.floor(foilPhaseSeed);
+        return foilPhaseSeed;
+    }
+
+    /** Si el reflejo de la foil esta dado de alta en {@link FoilClock}. */
+    private boolean foilTicking;
+    private final Rectangle border = new Rectangle();
+
+    /**
+     * La cara de una reliquia de Ascenso, para las cartas que nos inventamos
+     * nosotros.
+     *
+     * <p>Va aqui y no en las pantallas de Ascenso por el <b>principio 8</b>:
+     * una reliquia se ve en siete sitios — el premio, la tienda, la barra del
+     * mapa, el visor del mazo, el resumen del final, la carta ampliada y la
+     * zona de mando de la partida — y todos la pintan con un {@code CardNode}.
+     * Puesta aqui sale bien en los siete; puesta en una pantalla, en una.
+     *
+     * <p>Se construye siempre aunque casi nunca se use: son cuatro nodos
+     * vacios por carta, y la alternativa —crearla la primera vez que hace
+     * falta— obliga a tocar el grafo de escena a mitad de un refresco.
+     */
+    private final RelicArt relicFace = new RelicArt();
+
+    private final VBox fallback = new VBox(2);
+    private final Label fbName = new Label();
+    private final Label fbCost = new Label();
+    /**
+     * El icono de su tipo, en medio de la carta sin imagen (Discord, 07-11-2026):
+     * la silueta de game-icons.net que da {@link TypeIcons}, a escala.
+     */
+    private final javafx.scene.shape.SVGPath fbIcon = new javafx.scene.shape.SVGPath();
+    private String fbIconPath;
+    private String fbColour;
+    private final Label fbType = new Label();
+    private final Label fbPt = new Label();
+    /** La caja de F/R como la de una carta impresa, si el ajuste la pide. Ver {@link PtBox}. */
+    private final PtBox ptBadge = new PtBox();
+    private static final javafx.css.PseudoClass PT_BUFFED = javafx.css.PseudoClass.getPseudoClass("buffed");
+    private static final javafx.css.PseudoClass PT_WEAKENED = javafx.css.PseudoClass.getPseudoClass("weakened");
+    private static final javafx.css.PseudoClass PT_LETHAL = javafx.css.PseudoClass.getPseudoClass("lethal");
+    /** La pastilla negra de siempre, la de fabrica (la otra, con {@link PtBoxStyle#CARD_STYLE}). */
+    private final Label ptClassic = new Label();
+    private final Label damageBadge = new Label();
+    private final Label rankBadge = new Label();
+    /** El impuesto de comandante, en la zona de mando. Ver {@link #setCommanderTax}. */
+    private final Label taxBadge = new Label();
+    /** De donde viene una carta que se ensenya en la mano sin estar en ella. Ver {@link #setOrigin}. */
+    private final Label originTag = new Label();
+    /**
+     * "El coste depende de lo que elijas": la carta levantada de la mano cuya
+     * prevision del pago no se puede dar todavia (ver {@code TapPreview.Kind}).
+     * Encima de la etiqueta de la zona, para no pisarla.
+     */
+    private final Label hintTag = new Label();
+    /**
+     * Provocada (Discord, 29-10-2026). Solo el icono, abajo a la izquierda: la
+     * esquina que en la mesa esta libre (el rating solo sale en el draft), y
+     * pequeno, para no tapar ni la P/T ni el nombre. QUIEN la provoco va al
+     * ampliarla ({@link AffectedBy}, "Provocada por X"), como pidio Ana.
+     */
+    private final Label goadTag = new Label("⚔");
+    /**
+     * EL TINTE DE "QUE LE VA A PASAR" (Discord, 06-11-2026: sacrifico una
+     * carta sin saber que la eleccion era para sacrificar). Encima de la carta
+     * elegible que tiene el raton, del color de la accion y con su nombre:
+     * "SACRIFICAR", "DESCARTAR"... La accion la pone {@link #setChoiceAction}.
+     */
+    private final StackPane actionTint = new StackPane() {
+        @Override
+        protected void layoutChildren() {
+            super.layoutChildren();
+            // Que el rotulo quepa en UNA linea en la carta que se VE, sea del
+            // tamanyo que sea: se baja la letra, nunca se corta. (A escala no
+            // vale: la carta va con cache y el dibujo se quedaba sin encoger.)
+            actionLabel.applyCss();
+            final double want = actionLabel.prefWidth(-1);
+            final double room = getWidth() * 0.8;
+            if (want > 0 && room > 0) {
+                final double size = Math.max(7, Math.min(ACTION_FONT, actionFont * room / want));
+                if (Math.abs(size - actionFont) > 0.5) {
+                    actionFont = size;
+                    actionLabel.setStyle(String.format(java.util.Locale.ROOT, "-fx-font-size: %.1fpx;", size));
+                }
+            }
+        }
+    };
+    /** La letra del rotulo de la accion: 14 px, o menos si no cabe. */
+    private static final double ACTION_FONT = 14;
+    private double actionFont = ACTION_FONT;
+    private final Label actionLabel = new Label();
+    private int commanderTax;
+
+    /**
+     * Los contadores de la carta, en fila por la esquina de arriba.
+     *
+     * <p>Incluye la <b>lealtad</b> de un planeswalker: en el motor la lealtad
+     * ES un contador ({@code CounterEnumType.LOYALTY}), asi que sale sola por
+     * el mismo camino y no hay que tratarla aparte. Sin esto no habia forma de
+     * ver cuanta lealtad le queda a un planeswalker de la mesa.
+     */
+    private final HBox counters = new HBox(3);
+    private final VBox markers = new VBox(2);
+
+    /**
+     * Los iconos de habilidad, en columna por el lado derecho como en el Forge
+     * de siempre. Ver {@link #refreshKeywords()}.
+     */
+    private final VBox keywords = new VBox(0);
+
+    /**
+     * Lo que se pinto la ultima vez en {@link #keywords}, para no rehacer las
+     * iconos en cada aviso del motor (llegan decenas por turno y la carta se
+     * repinta con cada uno).
+     */
+    private String shownKeywords = "";
+
+    /** Danyo marcado y P/T, en la misma esquina y en este orden. */
+    private final HBox ptRow = new HBox(3, damageBadge, ptBadge, ptClassic);
+
+    private final DropShadow lift = new DropShadow(18, Color.rgb(0, 0, 0, 0.65));
+
+    private CardView card;
+    private double cardWidth;
+    private boolean tapped;
+    /**
+     * Si este nodo ya ha pintado una carta. Hasta entonces no hay nada que
+     * "girar": la carta NACE como esta. Ver refresh.
+     */
+    private boolean stateShown;
+    private boolean hoverEnabled = true;
+    private String shownImageKey;
+
+    /**
+     * Hacia donde avanza esta carta al atacar: -1 arriba (tu campo), +1 abajo
+     * (el del rival), 0 no avanza. Lo pone quien la coloca, porque la carta no
+     * sabe en que lado de la mesa esta.
+     */
+    private int combatDirection;
+
+    /**
+     * Desplazamiento vertical "de reposo": el avance del atacante.
+     *
+     * <p>Existe porque el hover TAMBIEN mueve la carta en vertical. Si las dos
+     * animaciones escribieran translateY directamente, pasar el raton por
+     * encima de un atacante lo devolveria a la fila.
+     */
+    private double baseTranslateY;
+    private boolean advanced;
+
+    /**
+     * Orden de pintado "de reposo".
+     *
+     * <p>Existe por el mismo motivo que {@link #baseTranslateY}: el hover
+     * TAMBIEN toca el orden de pintado para levantar la carta por encima de sus
+     * vecinas. Si al salir el raton se devolviera a cero a secas, una carta que
+     * vive delante a proposito — lo enganchado a una criatura — se caeria
+     * detras de su anfitriona en cuanto el raton pasara por encima, que es
+     * justo el fallo que hacia que un aura se viera "solo un poquito".
+     */
+    private double baseViewOrder;
+
+    public CardNode(final double width) {
+        // Arabe (de derecha a izquierda): esto se dibuja como siempre. Ver Rtl.
+        forge.neo.ui.Rtl.keepLtr(this);
+        getStyleClass().add("card");
+        setAlignment(Pos.CENTER);
+        setPickOnBounds(true);
+
+        art.setPreserveRatio(false);
+        art.setSmooth(true);
+        // LAS CARTAS APAISADAS (Planechase, 08-10-2026): un plano, un fenomeno o
+        // una batalla traen la imagen tumbada; metida tal cual en el marco de
+        // 5:7 salia aplastada. Se gira 90 grados como la carta fisica puesta de
+        // lado. Solo esas: el recorte de arte (UI_CARD_ART_FORMAT) tambien es
+        // ancho y no hay que girarlo. CardZoom gira la carta entera para leerla.
+        art.imageProperty().addListener((o, was, now) -> updateSideways());
+
+        border.setFill(Color.TRANSPARENT);
+        border.getStyleClass().add("card-border");
+
+        // Las dos capas van SOBRE el arte y DEBAJO del borde: asi tiñen la
+        // carta pero el canto se sigue leyendo nitido encima. Ni un click ni
+        // un hover pueden ir a parar aqui.
+        //
+        // La difraccion si va en SCREEN (aclara el arte en vez de ensuciarlo)
+        // y se queda quieta, asi que la caja del nodo la absorbe. El reflejo
+        // va en composicion normal porque es el que se repinta: ver
+        // FOIL_SPECULAR.
+        foilTint.setFill(FOIL_TINT);
+        foilTint.setBlendMode(BlendMode.SCREEN);
+        foilTint.setMouseTransparent(true);
+        foilTint.setVisible(false);
+
+        foilShine.setFill(FOIL_SPECULAR);
+        foilShine.setMouseTransparent(true);
+        foilShine.setVisible(false);
+        foilShine.setRotate(FOIL_TILT);
+
+        // --- respaldo procedural, por si no hay imagen todavia ---
+        fallback.getStyleClass().add("card-fallback");
+        fallback.setAlignment(Pos.TOP_LEFT);
+        fbName.getStyleClass().add("card-fb-name");
+        fbName.setWrapText(true);
+        fbCost.getStyleClass().add("card-fb-cost");
+        fbType.getStyleClass().add("card-fb-type");
+        fbType.setWrapText(true);
+        fbPt.getStyleClass().add("card-fb-pt");
+        // El hueco de en medio lleva el icono del tipo (TypeIcons): sin imagen
+        // la carta era un rectangulo gris con letras, y se miraba como vacia.
+        fbIcon.setOpacity(0.75);
+        fbIcon.setMouseTransparent(true);
+        // En un Group: la escala cuenta para el tamanyo, y el StackPane lo centra.
+        final StackPane spacer = new StackPane(new javafx.scene.Group(fbIcon));
+        spacer.setMinHeight(0);
+        VBox.setVgrow(spacer, javafx.scene.layout.Priority.ALWAYS);
+        fallback.getChildren().addAll(fbName, fbCost, fbType, spacer, fbPt);
+
+        ptBadge.setVisible(false);
+        ptClassic.getStyleClass().add("card-pt");
+        ptClassic.setVisible(false);
+        // La que no se ve no ocupa sitio en la fila.
+        ptBadge.managedProperty().bind(ptBadge.visibleProperty());
+        ptClassic.managedProperty().bind(ptClassic.visibleProperty());
+
+        damageBadge.getStyleClass().add("card-damage");
+        damageBadge.setVisible(false);
+
+        // El rating del draft: la unica esquina que quedaba libre (contadores
+        // arriba-izquierda, marcadores arriba-derecha, P/T abajo-derecha).
+        rankBadge.getStyleClass().add("card-draft-rank");
+        rankBadge.setVisible(false);
+        rankBadge.setMouseTransparent(true);
+        StackPane.setAlignment(rankBadge, Pos.BOTTOM_LEFT);
+
+        // El impuesto de comandante, arriba a la derecha: encima del coste,
+        // que es lo que sube. Comparte esquina con los marcadores, pero solo
+        // sale en la zona de mando, donde un comandante no los lleva (Clase,
+        // Anillo y habitaciones son de la mesa).
+        taxBadge.getStyleClass().add("card-commander-tax");
+        taxBadge.setVisible(false);
+        taxBadge.setMouseTransparent(true);
+        StackPane.setAlignment(taxBadge, Pos.TOP_RIGHT);
+
+        originTag.getStyleClass().add("card-origin-tag");
+        originTag.setVisible(false);
+        originTag.setMouseTransparent(true);
+        StackPane.setAlignment(originTag, Pos.BOTTOM_CENTER);
+
+        hintTag.getStyleClass().add("card-cost-hint");
+        hintTag.setVisible(false);
+        hintTag.setMouseTransparent(true);
+        hintTag.setWrapText(true);
+        hintTag.setTextAlignment(javafx.scene.text.TextAlignment.CENTER);
+        StackPane.setAlignment(hintTag, Pos.BOTTOM_CENTER);
+
+        actionLabel.getStyleClass().add("card-action-label");
+        actionLabel.setWrapText(false);
+        // Su ancho de verdad, aunque no quepa: lo encoge actionTint a escala.
+        actionLabel.setMinWidth(Region.USE_PREF_SIZE);
+        actionTint.getChildren().add(actionLabel);
+        actionTint.getStyleClass().add("card-action-tint");
+        actionTint.setVisible(false);
+        actionTint.setMouseTransparent(true);
+        hoverProperty().addListener((o, was, is) -> refreshActionTint());
+
+        goadTag.getStyleClass().add("card-goad-tag");
+        goadTag.setVisible(false);
+        goadTag.setMouseTransparent(true);
+        StackPane.setAlignment(goadTag, Pos.BOTTOM_LEFT);
+
+        // Danyo y fuerza/resistencia JUNTOS, y en la esquina donde van
+        // impresos. Separados (el danyo en la otra punta) hay que mirar dos
+        // sitios y hacer la resta de cabeza para saber si una criatura muere.
+        ptRow.getStyleClass().add("card-pt-row");
+        ptRow.setAlignment(Pos.BOTTOM_RIGHT);
+        ptRow.setMouseTransparent(true);
+        StackPane.setAlignment(ptRow, Pos.BOTTOM_RIGHT);
+
+        counters.getStyleClass().add("card-counters");
+        counters.setAlignment(Pos.TOP_LEFT);
+        StackPane.setAlignment(counters, Pos.TOP_LEFT);
+        // Es informacion, no un control: el click tiene que llegar a la carta.
+        counters.setMouseTransparent(true);
+        counters.setVisible(false);
+
+        // Los marcadores del motor: velocidad, nivel de Clase, nivel del
+        // Anillo, en que habitacion estas. Abajo a la izquierda, que es la
+        // unica esquina libre (contadores arriba, P/T abajo a la derecha).
+        markers.getStyleClass().add("card-markers");
+        markers.setAlignment(Pos.TOP_RIGHT);
+        // Arriba a la DERECHA porque es la unica esquina que queda libre: los
+        // contadores van arriba a la izquierda y la P/T abajo a la derecha.
+        // Abajo a la izquierda chocaban con la P/T y se comian el numero.
+        StackPane.setAlignment(markers, Pos.TOP_RIGHT);
+        markers.setMouseTransparent(true);
+        markers.setVisible(false);
+        // El alto de verdad de los marcadores solo se sabe tras aplicarles el
+        // CSS (relleno, letra): se recoloca la columna de iconos entonces.
+        markers.layoutBoundsProperty().addListener((o, a, b) -> placeKeywords());
+
+        keywords.setFillWidth(false);
+        StackPane.setAlignment(keywords, Pos.TOP_LEFT);
+        keywords.setMouseTransparent(true);
+        keywords.setVisible(false);
+
+        relicFace.setVisible(false);
+
+        getChildren().addAll(fallback, relicFace, art, foilTint, foilShine, border,
+                counters, markers, keywords, ptRow, rankBadge, taxBadge, originTag, goadTag, hintTag,
+                actionTint);
+        setClip(clip);
+
+        setCardWidth(width);
+        setCache(true);
+        setCacheHint(CacheHint.QUALITY);
+
+        // Una foil solo se anima si esta PUESTA en la pantalla. Cuando se
+        // descarta una pantalla entera, sus cartas salen de la escena y aqui
+        // se dan de baja solas: sin esto el reloj seguiria repartiendo fase a
+        // cartas que ya no ve nadie, y ademas no se soltarian nunca.
+        sceneProperty().addListener((o, was, now) -> updateFoilMotion());
+        visibleProperty().addListener((o, was, now) -> updateFoilMotion());
+
+        setOnMouseEntered(e -> { if (hoverEnabled) { entering(e); } });
+        // Ojo: la salida NO se atiende a secas. Ver leaving().
+        setOnMouseExited(e -> { if (hoverEnabled) { leaving(e); } });
+    }
+
+    // ---------------------------------------------------------------
+    // Foil
+    // ---------------------------------------------------------------
+
+    /**
+     * Cuanto recorre el reflejo, en anchos de carta.
+     *
+     * <p>Este numero se midio, no se eligio. Con 4,6 la banda tardaba tanto en
+     * ir y volver que solo entraba en la carta el 22 % del ciclo: el reflejo
+     * <b>casi nunca se veia</b>. No se noto mirando capturas — se noto
+     * restando dos capturas y viendo que dos fases distintas daban la misma
+     * imagen. Con 2,2 el nucleo brillante cruza durante algo mas de la mitad
+     * del ciclo (unos 3,8 s de los 7) y descansa el resto, que es lo que se
+     * pedia: que se mueva, pero no mucho.
+     */
+    private static final double FOIL_TRAVEL = 2.2;
+
+    /**
+     * A partir de que distancia del centro la banda ya no toca la carta, en
+     * anchos de carta. Sale de su tamano: media anchura del rectangulo mas lo
+     * que se ensancha al inclinarlo 22 grados, que suma 0,58; mas la media
+     * carta, 1,08.
+     */
+    private static final double FOIL_ON_CARD = 1.08;
+
+    /**
+     * Congela el reflejo en un punto del ciclo, entre 0 y 1, y le quita a
+     * cada carta su desfase propio: {@code -Dneo.foil.phase=0.5} lo deja
+     * justo en el centro. Es lo unico que hace verificable con
+     * {@code --snapshot} algo que se mueve — sin esto, una captura pilla la
+     * banda donde le toque, y la mitad de las veces fuera de la carta.
+     */
+    private static final double FOIL_FROZEN =
+            Double.parseDouble(System.getProperty("neo.foil.phase", "-1"));
+
+    /** Si esta carta es foil. Ver {@link #setFoil}. */
+    private boolean foil;
+
+    /** Pone o quita las dos capas de foil, y da de alta o de baja el reflejo. */
+    private void setFoil(final boolean on) {
+        if (foilTint.isVisible() != on) {
+            foilTint.setVisible(on);
+        }
+        this.foil = on;
+        updateFoilMotion();
+    }
+
+    /**
+     * Decide si esta carta se anima ahora mismo, y lo apunta en
+     * {@link FoilClock}.
+     *
+     * <p>Tienen que darse las tres: que sea foil, que el jugador no lo haya
+     * apagado, y que este puesta en una pantalla y visible.
+     *
+     * <p>Hubo una cuarta — un ancho minimo, para no animar cartas tan
+     * pequenas que el reflejo no se percibe — y se quito despues de medir:
+     * <b>no estaba optimizando nada</b> (84 cartas barriendo a la vez dan los
+     * mismos 75 fps que la mesa sin una sola foil) y en cambio abria un
+     * agujero, porque acercar la mesa con Ctrl+rueda no cambia el ancho de la
+     * carta sino la escala de sus padres: una carta que se ve al doble se
+     * habria quedado sin brillar. Una optimizacion que no optimiza y encima
+     * tiene un caso raro no se queda.
+     */
+    /**
+     * Rehace la foto en cache de cada carta de ese arbol.  La cache se pinta a
+     * la escala de pantalla del momento y no se invalida sola si esta cambia.
+     */
+    public static void refreshCachesIn(final javafx.scene.Node root) {
+        if (root instanceof CardNode cn) {
+            if (!cn.foilTicking) {
+                cn.setCache(false);
+                cn.setCache(true);
+            }
+        }
+        if (root instanceof javafx.scene.Parent p) {
+            for (final javafx.scene.Node child : p.getChildrenUnmodifiable()) {
+                refreshCachesIn(child);
+            }
+        }
+    }
+
+    private void updateFoilMotion() {
+        final boolean want = foil && foilEffect && foilMotion
+                && getScene() != null && isVisible();
+        if (want == foilTicking) {
+            return;
+        }
+        foilTicking = want;
+        if (want) {
+            // Mientras se anima, la caja del nodo no sirve para nada: se
+            // invalidaria en cada frame y encima habria que reescribirla. Se
+            // apaga, y se vuelve a poner en cuanto el reflejo para.
+            setCache(false);
+            FoilClock.register(this);
+        } else {
+            FoilClock.unregister(this);
+            foilShine.setVisible(false);
+            setCache(true);
+        }
+    }
+
+    /**
+     * Un latido del reloj compartido: coloca el reflejo dentro de su ciclo.
+     *
+     * <p>Cuando la banda esta del todo fuera de la carta no se toca <b>ni una
+     * propiedad</b>, y eso no es tacaneria: cualquier escritura ensuciaria el
+     * nodo y obligaria a JavaFX a repintar la carta entera para no cambiar
+     * nada. Con el recorrido corto de ahora eso pasa poco — la banda esta casi
+     * siempre rozando la carta, aunque su nucleo brillante solo la cruza
+     * durante el 45 % del ciclo — asi que esto ya no es la optimizacion que
+     * era: es una comparacion que no cuesta nada y evita repintar de balde.
+     */
+    void tickFoil(final double phase) {
+        double p = FOIL_FROZEN >= 0 ? FOIL_FROZEN : phase + foilPhase;
+        p -= Math.floor(p);
+        final double tx = p * FOIL_TRAVEL - FOIL_TRAVEL / 2;
+        if (Math.abs(tx) >= FOIL_ON_CARD) {
+            if (foilShine.isVisible()) {
+                foilShine.setVisible(false);
+            }
+            return;
+        }
+        foilShine.setTranslateX(tx * cardWidth);
+        if (!foilShine.isVisible()) {
+            foilShine.setVisible(true);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Geometria
+    // ---------------------------------------------------------------
+
+    private final javafx.beans.property.ReadOnlyBooleanWrapper sideways =
+            new javafx.beans.property.ReadOnlyBooleanWrapper(false);
+
+    /** Si el arte va girado dentro del marco (una carta apaisada con la imagen ancha). */
+    public javafx.beans.property.ReadOnlyBooleanProperty sidewaysArtProperty() {
+        return sideways.getReadOnlyProperty();
+    }
+
+    private final javafx.beans.property.ReadOnlyDoubleWrapper readRotation =
+            new javafx.beans.property.ReadOnlyDoubleWrapper(0);
+
+    /**
+     * Cuanto hay que girar la carta ENTERA para leerla derecha: 0 casi siempre;
+     * en un plano, un fenomeno o una batalla, +90 — Scryfall las sirve en
+     * vertical con el dibujo girado a la izquierda (488x680, medido) — o -90 si
+     * la imagen viniera ancha y la hubieramos girado aqui. Lo usa CardZoom.
+     */
+    public javafx.beans.property.ReadOnlyDoubleProperty readRotationProperty() {
+        return readRotation.getReadOnlyProperty();
+    }
+
+    private void updateSideways() {
+        final Image img = art.getImage();
+        final CardStateView st = card == null ? null : shownState();
+        final forge.card.CardTypeView t = st == null ? null : st.getType();
+        // Planos, batallas, habitaciones y partidas: Sideways (lo comparte Android).
+        final boolean landscapeCard = st != null && Sideways.reads(card, t);
+        final boolean wide = img != null && img.getWidth() > img.getHeight() * 1.15;
+        final boolean on = landscapeCard && wide;
+        readRotation.set(!landscapeCard || img == null ? 0 : wide ? -90 : 90);
+        if (on != sideways.get()) {
+            sideways.set(on);
+            fitArt();
+        }
+    }
+
+    /** El arte del tamanyo de la carta; girado, con ancho y alto cambiados. */
+    private void fitArt() {
+        final double w = cardWidth;
+        final double h = w * ASPECT;
+        if (sideways.get()) {
+            art.setFitWidth(h);
+            art.setFitHeight(w);
+            art.setRotate(90);
+        } else {
+            art.setFitWidth(w);
+            art.setFitHeight(h);
+            art.setRotate(0);
+        }
+    }
+
+    public final void setCardWidth(final double w) {
+        this.cardWidth = w;
+        final double h = w * ASPECT;
+        final double radius = w * 0.05;
+
+        setPrefSize(w, h);
+        setMinSize(w, h);
+        setMaxSize(w, h);
+
+        fitArt();
+
+        clip.setWidth(w);
+        clip.setHeight(h);
+        clip.setArcWidth(radius * 2);
+        clip.setArcHeight(radius * 2);
+
+        border.setWidth(w - 1);
+        border.setHeight(h - 1);
+        border.setArcWidth(radius * 2);
+        border.setArcHeight(radius * 2);
+
+        foilTint.setWidth(w);
+        foilTint.setHeight(h);
+        foilTint.setArcWidth(radius * 2);
+        foilTint.setArcHeight(radius * 2);
+
+        // El reflejo es una banda estrecha y MAS ALTA que la carta: al
+        // inclinarla 22 grados tiene que seguir tapando las dos esquinas. No
+        // lleva esquinas redondeadas porque no hace falta — el clip del nodo
+        // ya recorta la carta entera.
+        foilShine.setWidth(w * 0.34);
+        foilShine.setHeight(h * 1.60);
+        updateFoilMotion();
+
+        relicFace.setSize(w, h);
+
+        // El respaldo tiene que ocupar la carta entera. Sin fijar el tamano, el
+        // StackPane lo encoge a su contenido y el texto se parte letra a letra.
+        fallback.setPrefSize(w, h);
+        fallback.setMinSize(w, h);
+        fallback.setMaxSize(w, h);
+
+        final double pad = Math.max(4, w * 0.06);
+        fallback.setPadding(new javafx.geometry.Insets(pad));
+        final double textWidth = w - pad * 2;
+        fbName.setMaxWidth(textWidth);
+        fbName.setPrefWidth(textWidth);
+        fbType.setMaxWidth(textWidth);
+        fbType.setPrefWidth(textWidth);
+        fbCost.setMaxWidth(textWidth);
+        fbPt.setMaxWidth(textWidth);
+        final double iconScale = w * 0.46 / TypeIcons.BOX;
+        fbIcon.setScaleX(iconScale);
+        fbIcon.setScaleY(iconScale);
+        final double fs = Math.max(7, w * 0.085);
+        fbName.setStyle("-fx-font-size:" + fs + "px;");
+        fbCost.setStyle("-fx-font-size:" + (fs * 0.85) + "px;");
+        fbType.setStyle("-fx-font-size:" + (fs * 0.78) + "px;");
+        fbPt.setStyle("-fx-font-size:" + (fs * 1.05) + "px;");
+        // La P/T es el numero que mas se mira de la mesa: va mas grande que
+        // cualquier otra pastilla.
+        ptBadge.setFontSize(fs * 1.2);
+        ptClassic.setStyle("-fx-font-size:" + (fs * 1.2) + "px;");
+        damageBadge.setStyle("-fx-font-size:" + (fs * 1.05) + "px;");
+        rankBadge.setStyle("-fx-font-size:" + (fs * 1.05) + "px;");
+        taxBadge.setStyle("-fx-font-size:" + (fs * 1.15) + "px;");
+        StackPane.setMargin(taxBadge, new javafx.geometry.Insets(w * 0.035, w * 0.035, 0, 0));
+        originTag.setStyle("-fx-font-size:" + (fs * 1.0) + "px;");
+        StackPane.setMargin(originTag, new javafx.geometry.Insets(0, 0, w * 0.06, 0));
+        goadTag.setStyle("-fx-font-size:" + (fs * 0.95) + "px;");
+        hintTag.setStyle("-fx-font-size:" + (fs * 0.9) + "px;");
+        hintTag.setMaxWidth(w * 0.86);
+        StackPane.setMargin(hintTag, new javafx.geometry.Insets(0, 0, w * 0.2, 0));
+        StackPane.setMargin(goadTag, new javafx.geometry.Insets(0, 0, w * 0.035, w * 0.035));
+        counterFontPx = fs * 0.95;
+        for (final javafx.scene.Node n : counters.getChildren()) {
+            applyCounterFont((Label) n);
+        }
+        for (final javafx.scene.Node n : markers.getChildren()) {
+            ((Label) n).setStyle("-fx-font-size:" + (counterFontPx * 0.92) + "px;");
+            ((Label) n).setMaxWidth(Math.max(36, w * 0.68));
+        }
+
+        // Los iconos de habilidad van en proporcion a la carta: el tamano forma parte de
+        // lo que se compara para decidir si rehacerlas.
+        refreshKeywords();
+
+        // El avance esta en proporcion al tamano de carta, asi que cambia con el.
+        applyAdvance(false);
+    }
+
+    /** true si se esta mostrando la imagen real de la carta. */
+    public boolean hasArt() {
+        return art.getImage() != null;
+    }
+
+    public double getCardWidth() {
+        return cardWidth;
+    }
+
+    public double getCardHeight() {
+        return cardWidth * ASPECT;
+    }
+
+    // ---------------------------------------------------------------
+    // Contenido
+    // ---------------------------------------------------------------
+
+    public CardView getCard() {
+        return card;
+    }
+
+    public void setCard(final CardView card) {
+        this.card = card;
+        this.shownImageKey = null;
+        refresh();
+    }
+
+    /** Vuelve a leer el CardView y actualiza lo que haya cambiado. */
+    /**
+     * Refresca TODAS las cartas que cuelguen de un nodo.
+     *
+     * <p>Las imagenes llegan de Scryfall en segundo plano, asi que una carta
+     * recien pintada ensenya el marcador hasta que su imagen aparece y alguien
+     * la vuelve a pedir. Antes cada pantalla enumeraba a mano sus listas de
+     * cartas, y lo que no estuviera en esa lista se quedaba con el marcador para
+     * siempre — sintoma real: el selector de ediciones salia vacio la primera
+     * vez y bien la segunda, porque para entonces ya estaban descargadas.
+     *
+     * <p>Recorrer el arbol no enumera nada: coge tambien las cartas de los
+     * dialogos que se abran en el futuro, sin que haya que acordarse.
+     */
+    public static void refreshAllIn(final javafx.scene.Node root) {
+        if (root instanceof CardNode) {
+            ((CardNode) root).refresh();
+            return;
+        }
+        if (root instanceof javafx.scene.Parent) {
+            for (final javafx.scene.Node child
+                    : ((javafx.scene.Parent) root).getChildrenUnmodifiable()) {
+                refreshAllIn(child);
+            }
+        }
+    }
+
+    /**
+     * Pintar una cara CONCRETA de la carta, no la que este boca arriba.
+     *
+     * <p>Existe para poder ensenyar <b>la otra cara</b>: una carta que se
+     * transforma, una de dos caras modal, una partida. El motor las publica
+     * ({@code CardView.getAlternateState}, {@code getLeftSplitState} y
+     * {@code getRightSplitState}) y hasta ahora no habia forma de mirarlas —
+     * veias la cara de arriba y la de abajo no existia para el juego.
+     *
+     * <p>Con {@code null} vuelve a la cara que este boca arriba.
+     */
+    public void setFace(final CardView card, final CardStateView face) {
+        this.forcedFace = face;
+        setCard(card);
+    }
+
+    private CardStateView forcedFace;
+
+    /**
+     * La cara que se pinta: la forzada, o la que esta boca arriba.
+     *
+     * <p>Salvo una carta <b>boca abajo fuera de la mesa que puedes mirar</b> —
+     * lo que exilia Gonti, Night Minister ("puedes jugarla mientras siga
+     * exiliada") o una carta escondida con hideaway —: esa se pinta por su
+     * cara. El dorso no tiene arte, asi que salia un marco vacio y la carta
+     * solo se veia en la descripcion (Discord, 14-10-2026). En la mesa no: un
+     * morfo es un 2/2 sin nombre aunque sepas lo que es. Quien puede mirarla lo
+     * dice el motor ({@code canFaceDownBeShownToAny}), con los mismos
+     * "nosotros" que la carta ampliada ({@code CardZoom.localViewers}).
+     */
+    private CardStateView shownState() {
+        if (forcedFace != null) {
+            return forcedFace;
+        }
+        final CardStateView current = card.getCurrentState();
+        if (card.isFaceDown() && card.getZone() != ZoneType.Battlefield) {
+            try {
+                if (card.canFaceDownBeShownToAny(forge.neo.ui.CardZoom.localViewers())) {
+                    final CardStateView real = card.getAlternateState();
+                    if (real != null && real != current && real.getImageKey() != null) {
+                        return real;
+                    }
+                }
+            } catch (final RuntimeException e) {
+                // Sin poder preguntarlo, el dorso: nunca ensenyar de mas.
+            }
+        }
+        return current;
+    }
+
+    /**
+     * Si al cambiar de carta se borra el arte mientras llega el nuevo.
+     *
+     * <p><b>Apagado por defecto, y a proposito.</b> En la mesa, en la mano y en
+     * el catalogo un nodo ensenya siempre la misma carta: si su imagen esta
+     * puesta, es la suya, y borrarla porque una consulta a la cache llegue en
+     * mal momento seria hacer parpadear cartas que se ven perfectamente. Ahi la
+     * regla es la de siempre: <i>si no esta cargada se carga, tarde lo que
+     * tarde</i>.
+     *
+     * <p>Se enciende en los nodos que van <b>cambiando de carta</b> — el cartel
+     * central es el caso — donde lo que se queda puesto no es el arte de esta
+     * carta sino el de la anterior. Reportado jugando: el rival juega algo, el
+     * texto sale bien al instante (se relee en cada refresco) y el arte sigue
+     * siendo el del hechizo de antes. Ahi si: mejor sin arte, con el respaldo
+     * diciendo el nombre, el coste y el tipo de la carta buena.
+     */
+    private boolean blankWhileLoading;
+
+    /** Ver {@link #blankWhileLoading}. */
+    public void setBlankWhileLoading(final boolean on) {
+        this.blankWhileLoading = on;
+    }
+
+    /**
+     * La imagen original (488x680) de la carta que se ve, la que dio
+     * {@code CardImages.get}. El {@code ImageView} puede estar pintando esta o
+     * su copia nitida; hace falta tenerla para volver a ella.
+     */
+    private Image fullArt;
+
+    /**
+     * Cambia el arte por su copia ya reducida a los pixeles a los que se ve.
+     *
+     * <p>Ver {@code Resample}: reducir 488 px a 120 al pintar, con el filtro de
+     * JavaFX, deja la carta ilegible. La copia se hace una vez, en segundo plano,
+     * y mientras no esta se sigue pintando la original — asi que esto no puede
+     * dejar una carta sin arte ni hacerla parpadear. Y si el tamano cambia
+     * (se acerca la mesa) y la copia de ese tamano aun no esta, se vuelve a la
+     * original antes que agrandar una pequena, que se veria borrosa.
+     */
+    private void sharpenArt() {
+        final Image full = fullArt;
+        if (full == null || shownImageKey == null || art.getImage() == null) {
+            return;
+        }
+        final int[] px = wantedPixels();
+        final Image sharp = px == null ? null : CardImages.scaled(shownImageKey, full, px[0], px[1]);
+        Image want = sharp != null ? sharp : full;
+        // Mientras llega la copia del tamano nuevo, si el tamano apenas ha
+        // cambiado se deja la copia nitida que ya habia. Reportado en r/forgeMTG
+        // el 15-09-2026 con video: al aparecer o quitarse el aviso de un disparo
+        // la mesa se recoloca, las cartas cambian un par de pixeles, y durante
+        // medio segundo TODA la mesa se veia borrosa (la original, reducida por
+        // el bilineal) hasta que llegaban las copias nuevas. Un 15% arriba o abajo
+        // no se nota; agrandar mas una copia pequena si, y ahi sigue mandando la
+        // original (acercar la mesa).
+        final Image current = art.getImage();
+        if (sharp == null && px != null && current != null && current != full
+                && current.getWidth() >= px[0] * 0.85 && current.getWidth() <= px[0] * 1.15) {
+            want = current;
+        }
+        if (art.getImage() != want) {
+            art.setImage(want);
+        }
+    }
+
+    /**
+     * A cuantos pixeles de PANTALLA se ve el arte de esta carta.
+     *
+     * <p>Cuenta todo lo que la escala por fuera — la escala de interfaz, el zoom
+     * de la mesa y la del monitor (125%, 150%...) — y no lo que la gira: la
+     * escala sale del modulo de la transformacion, asi que una carta girada en la
+     * mano o tapada pide lo mismo que derecha. La escala de ESTE nodo (el
+     * levantado al pasar el raton, las animaciones) se descuenta: se pide el
+     * tamano EN REPOSO, que es cuando se lee la carta. Se probo a pedirla ya al
+     * tamano de levantada (+8%) y medido en pantalla dejaba el texto mas blando:
+     * esa reduccion del 8% al pintar la vuelve a hacer el bilineal.
+     *
+     * <p>El ancho se redondea al multiplo de 4 de arriba: sin eso cada pixel de
+     * diferencia al encoger la mesa seria una copia nueva.
+     */
+    private int[] wantedPixels() {
+        final javafx.scene.Scene sc = getScene();
+        if (sc == null || sc.getWindow() == null) {
+            return null;
+        }
+        final double fw = art.getFitWidth();
+        final double fh = art.getFitHeight();
+        if (fw <= 0 || fh <= 0) {
+            return null;
+        }
+        final javafx.scene.transform.Transform t = getLocalToSceneTransform();
+        double s = Math.hypot(t.getMxx(), t.getMyx());
+        final double own = Math.hypot(getScaleX(), 0);
+        if (own > 1e-6) {
+            s /= own;
+        }
+        s *= sc.getWindow().getOutputScaleX();
+        int w = (int) Math.ceil(fw * s);
+        w = ((w + 3) / 4) * 4;
+        final int h = (int) Math.round(w * fh / fw);
+        return w < 8 || h < 8 ? null : new int[] {w, h};
+    }
+
+    public void refresh() {
+        if (card == null) {
+            art.setImage(null);
+            fallback.setVisible(true);
+            relicFace.setVisible(false);
+            setFoil(false);
+            refreshKeywords();
+            return;
+        }
+        final CardStateView st = shownState();
+
+        // --- imagen ---
+        //
+        // La rama del "todavia no esta" depende de para que sea este nodo, y la
+        // diferencia importa (ver setBlankWhileLoading): en un nodo que SIEMPRE
+        // ensenya la misma carta, quedarse con lo que ya hay es lo correcto —
+        // es su propio arte, y borrarlo solo hace parpadear la mesa. En uno que
+        // va cambiando de carta, lo que se queda es el arte de OTRA.
+        final String key = st == null ? null : st.getImageKey();
+        if (key == null) {
+            if (blankWhileLoading) {
+                art.setImage(null);
+                shownImageKey = null;
+                fullArt = null;
+            }
+        } else if (!key.equals(shownImageKey)) {
+            final Image img = CardImages.get(key);
+            if (img != null) {
+                art.setImage(img);
+                shownImageKey = key;
+                fullArt = img;
+            } else if (blankWhileLoading) {
+                // Y se olvida de quien era: si no, al volver a la carta de antes
+                // su clave "ya estaba" y se quedaba sin arte (la carta grande al
+                // pasar del comandante a una reliquia y volver, 11-10-2026).
+                art.setImage(null);
+                shownImageKey = null;
+                fullArt = null;
+            }
+        } else {
+            // LA MISMA CLAVE, PERO OTRA IMAGEN. Lo que se pinto era un
+            // RESPALDO -- el arte por nombre de "bajar todo el arte", o la
+            // inglesa mientras llega la traducida -- y CardImages acaba de
+            // poner encima la impresion buena con la misma clave. Mirando
+            // solo la clave la carta se quedaba con el respaldo para siempre,
+            // y solo una carta NUEVA (la ampliada) ensenyaba la buena: Discord,
+            // 09-10-2026, "once you right click it, it changes the image".
+            // peek y no get: si la cache la ha soltado no se pide otra vez
+            // desde aqui, que la pintada sigue valiendo.
+            final Image now = CardImages.peek(key);
+            if (now != null && now != fullArt) {
+                art.setImage(now);
+                fullArt = now;
+            }
+        }
+        sharpenArt();
+        updateSideways();
+        final boolean hasArt = art.getImage() != null;
+        art.setVisible(hasArt);
+
+        // --- si es una carta NUESTRA, su cara dibujada ---
+        //
+        // Las reliquias de Ascenso no existen en Magic: Scryfall no tiene arte
+        // que bajar y nunca lo va a tener, asi que caian en el respaldo
+        // generico de mas abajo y —sin coste y sin P/T— se veian como un
+        // rectangulo oscuro con el nombre arriba. RelicArt les pinta una carta
+        // de verdad, con lo que hacen escrito en su caja de texto.
+        //
+        // La pregunta es barata (un mapa por nombre) y devuelve null mientras
+        // no se haya jugado a Ascenso, que es cuando se registran: fuera del
+        // modo esto no cuesta nada y no cambia nada.
+        final AscentRelic relic = hasArt || st == null
+                ? null : AscentRelics.byCardName(st.getName());
+        if (relic != null) {
+            relicFace.setRelic(relic);
+        }
+        relicFace.setVisible(relic != null);
+        fallback.setVisible(!hasArt && relic == null);
+
+        // --- brillo de foil (la auditoría del motor, apartado D5) ---
+        //
+        // getFoilIndex() SOLO se rellena dentro de una partida de verdad
+        // (Match.preparePlayerZone llama a Card.setRandomFoil() al montar la
+        // biblioteca) y CUBRE hasPaperFoil(): toda carta foil de mazo recibe
+        // ademas un acabado al azar al entrar en juego, asi que mirar el
+        // indice basta ahi. Fuera de una partida (catalogo, mazo, coleccion,
+        // sobres) el indice esta siempre a 0 — CardView.getCardForUi ya deja
+        // hasPaperFoil() puesto desde Card.fromPaperCard, que es lo que se
+        // usa entonces. Solo con arte de verdad: sobre el respaldo procedural
+        // el brillo no tiene nada que iluminar y solo ensuciaria el texto.
+        final boolean foil = hasArt && foilEffect
+                && (FOIL_EVERYTHING
+                    || (st != null && st.getFoilIndex() > 0) || card.hasPaperFoil());
+        setFoil(foil);
+
+        // El rating del draft comparte esquina con la P/T del respaldo
+        // procedural (fbPt): sin arte, esa esquina ya esta ocupada.
+        if (draftRank != null && hasArt) {
+            rankBadge.setText(String.valueOf(draftRank));
+            rankBadge.setVisible(true);
+            rankBadge.pseudoClassStateChanged(RANK_GOOD, draftRank >= 66);
+            rankBadge.pseudoClassStateChanged(RANK_POOR, draftRank < 33);
+        } else {
+            rankBadge.setVisible(false);
+            rankBadge.pseudoClassStateChanged(RANK_GOOD, false);
+            rankBadge.pseudoClassStateChanged(RANK_POOR, false);
+        }
+
+        // --- respaldo procedural ---
+        if (!hasArt && st != null) {
+            fbName.setText(CardText.nameOf(st));
+            // Sin coste, nada: el motor lo escribe "no cost" (ManaCost.NO_COST),
+            // y salia tal cual debajo del nombre (Discord, 10-10-2026).
+            fbCost.setText(st.getManaCost() == null || st.getManaCost().isNoCost()
+                    ? "" : st.getManaCost().toString());
+            fbType.setText(CardText.typeOf(st));
+            fbPt.setText(st.isCreature() ? st.getPower() + " / " + st.getToughness() : "");
+            // Su tipo en grande y su color de fondo (Discord, 07-11-2026).
+            final String iconPath = TypeIcons.pathFor(st.getType());
+            if (iconPath == null) {
+                fbIcon.setVisible(false);
+            } else {
+                if (!iconPath.equals(fbIconPath)) {
+                    fbIcon.setContent(iconPath);
+                    fbIconPath = iconPath;
+                }
+                fbIcon.setVisible(true);
+                fbIcon.setFill(javafx.scene.paint.Color.web(String.format("#%06X",
+                        TypeIcons.colourOf(st.getColors(), forge.neo.NeoSettings.getBool(TypeIcons.COLOURED, true))
+                                & 0xFFFFFF)));
+            }
+            setFallbackColour(colourClass(st.getColors()));
+            // Las legendarias, con su marco dorado (Discord, 07-11-2026).
+            final boolean legend = st.getType() != null && st.getType().isLegendary();
+            if (legend != fallback.getStyleClass().contains("card-fb-legend")) {
+                if (legend) {
+                    fallback.getStyleClass().add("card-fb-legend");
+                } else {
+                    fallback.getStyleClass().remove("card-fb-legend");
+                }
+            }
+            showKeywordCard(st);
+        }
+
+        // --- fuerza / resistencia, que es EL numero de la mesa ---
+        //
+        // st.getPower() ya es la fuerza ACTUAL: el motor devuelve getNetPower(),
+        // o sea con contadores, auras, equipo y efectos hasta el final del turno
+        // ya sumados. No hay que calcular nada; lo que hacia falta era que se
+        // leyera de un vistazo y que se notara cuando NO es la impresa.
+        final int dmg = card.getDamage();
+        if (st != null && st.isCreature() && badgesVisible) {
+            final int pow = st.getPower();
+            final int tou = st.getToughness();
+            final boolean cardStyle = forge.neo.NeoSettings.getBool(PtBoxStyle.CARD_STYLE, false);
+            ptBadge.setVisible(hasArt && cardStyle);
+            ptClassic.setVisible(hasArt && !cardStyle);
+
+            // Cifra a cifra, como en la carta de la maqueta: verde la que esta
+            // por encima de lo impreso, roja la que esta por debajo. Y la caja
+            // entera en rojo cuando el danyo marcado ya la mata: ahi no hay
+            // que hacer ninguna resta de cabeza.
+            final int[] printed = printedPt(st);
+            final int powInk = printed == null || pow == printed[0] ? PtBoxStyle.INK
+                    : pow > printed[0] ? PtBoxStyle.UP : PtBoxStyle.DOWN;
+            final int touInk = printed == null || tou == printed[1] ? PtBoxStyle.INK
+                    : tou > printed[1] ? PtBoxStyle.UP : PtBoxStyle.DOWN;
+            final int lethal = card.getLethalDamage();
+            ptBadge.setValues(pow, tou, powInk, touInk, PtBoxStyle.panel(st.getColors()),
+                    dmg > 0 && lethal <= 0);
+            // La de siempre: el texto entero de un color.
+            ptClassic.setText(pow + "/" + tou);
+            final boolean up = printed != null && (pow > printed[0] || tou > printed[1]);
+            final boolean down = printed != null && (pow < printed[0] || tou < printed[1]);
+            ptClassic.pseudoClassStateChanged(PT_BUFFED, up && !down);
+            ptClassic.pseudoClassStateChanged(PT_WEAKENED, down);
+            ptClassic.pseudoClassStateChanged(PT_LETHAL, dmg > 0 && lethal <= 0);
+        } else {
+            ptBadge.setVisible(false);
+            ptClassic.setVisible(false);
+        }
+
+        // --- daño marcado, pegado a la P/T ---
+        if (dmg > 0 && badgesVisible) {
+            damageBadge.setText("-" + dmg);
+            damageBadge.setVisible(true);
+        } else {
+            damageBadge.setVisible(false);
+        }
+        ptRow.setVisible(ptBadge.isVisible() || ptClassic.isVisible() || damageBadge.isVisible());
+
+        // --- contadores (y la lealtad, que es un contador mas) ---
+        refreshCounters();
+
+        // --- marcadores del motor ---
+        refreshMarkers(st);
+
+        // --- palabras clave de combate ---
+        refreshKeywords();
+
+        // --- provocada ---
+        refreshGoad();
+
+        // --- estado ---
+        // Girar y enderezar CON animacion. setTapped ya se corta solo cuando el
+        // valor no cambia, asi que esto no relanza la transicion en cada aviso
+        // del motor (que llegan decenas por turno): solo cuando de verdad se
+        // tapa o se endereza.
+        //
+        // Pero un nodo NUEVO no se gira: nace como esta. La mesa crea nodos sin
+        // que la carta cambie — al elegir objetivo deshace las pilas de iguales
+        // ("x2") para poder clicar cada una, y al acabar las vuelve a juntar —
+        // y cada nodo nuevo de una tierra girada se enderezaba y se volvia a
+        // girar delante del jugador (itch.io, 10-10-2026, con video: "tapped
+        // permanents will visually untap and re-tap ... repeats if you cancel").
+        // Si la carta SI se ha girado justo cuando su nodo se rehace (una
+        // tierra de una pila de iguales), lo anima la fila: animateTapFrom.
+        setTapped(card.isTapped(), stateShown);
+        stateShown = true;
+        setAdvanced(card.isAttacking() || card.isBlocking());
+        pseudoClassStateChanged(SICK, card.isSick());
+        pseudoClassStateChanged(ATTACKING, card.isAttacking());
+        pseudoClassStateChanged(BLOCKING, card.isBlocking());
+        pseudoClassStateChanged(COMMANDER, card.isCommander());
+        // Desplazada (phasing): sigue en la mesa pero es como si no existiera.
+        // Sin marcarlo ves una criatura que no ataca, no bloquea y no se puede
+        // señalar, y no hay nada en pantalla que explique por que.
+        pseudoClassStateChanged(PHASED, card.isPhasedOut());
+    }
+
+    private static final javafx.css.PseudoClass SICK = javafx.css.PseudoClass.getPseudoClass("sick");
+    private static final javafx.css.PseudoClass ATTACKING = javafx.css.PseudoClass.getPseudoClass("attacking");
+    private static final javafx.css.PseudoClass BLOCKING = javafx.css.PseudoClass.getPseudoClass("blocking");
+    private static final javafx.css.PseudoClass COMMANDER = javafx.css.PseudoClass.getPseudoClass("commander");
+    private static final javafx.css.PseudoClass SELECTABLE = javafx.css.PseudoClass.getPseudoClass("selectable");
+    private static final javafx.css.PseudoClass HIGHLIGHTED = javafx.css.PseudoClass.getPseudoClass("highlighted");
+    private static final javafx.css.PseudoClass DRAGGING = javafx.css.PseudoClass.getPseudoClass("dragging");
+    private static final javafx.css.PseudoClass DROP_TARGET = javafx.css.PseudoClass.getPseudoClass("drop-target");
+    private static final javafx.css.PseudoClass ACTIONABLE =
+            javafx.css.PseudoClass.getPseudoClass("actionable");
+    private static final javafx.css.PseudoClass AUTO_TAP =
+            javafx.css.PseudoClass.getPseudoClass("auto-tap");
+    private static final javafx.css.PseudoClass PHASED =
+            javafx.css.PseudoClass.getPseudoClass("phased");
+
+    public void setSelectable(final boolean on) {
+        selectable = on;
+        pseudoClassStateChanged(SELECTABLE, on);
+        refreshActionTint();
+    }
+
+    /**
+     * Que le pasa a la carta que se elija ahora, o null. Una para toda la
+     * mesa: el motor solo espera una eleccion a la vez. Lo pone
+     * {@code NeoMatchUI.updateButtons} justo antes de marcar las elegibles
+     * (que es lo que repinta cada carta), asi que no hace falta que ninguna
+     * carta escuche este valor: un oyente de cada carta en algo estatico la
+     * dejaria viva para siempre (principio 11).
+     */
+    private static volatile forge.neo.match.ChoiceAction choiceAction;
+
+    /** {@code -Dneo.actionTint.all=true}: el tinte en TODAS las elegibles, sin raton. Para capturarlo. */
+    private static final boolean ACTION_TINT_ALL = Boolean.getBoolean("neo.actionTint.all");
+
+    public static void setChoiceAction(final forge.neo.match.ChoiceAction action) {
+        choiceAction = action;
+    }
+
+    /** Si el tinte de la accion esta puesto. Para las pruebas. */
+    public boolean isActionTintShown() {
+        return actionTint.isVisible();
+    }
+
+    private void refreshActionTint() {
+        final forge.neo.match.ChoiceAction a = choiceAction;
+        final boolean show = a != null && selectable && (isHover() || ACTION_TINT_ALL);
+        if (show) {
+            final int rgb = a.argb & 0xFFFFFF;
+            actionTint.setStyle(String.format(java.util.Locale.ROOT,
+                    "-fx-background-color: rgba(%d,%d,%d,0.3); -fx-border-color: %s;",
+                    (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF, a.hex()));
+            actionLabel.setText(a.label().toUpperCase(java.util.Locale.ROOT));
+            actionTint.requestLayout();
+        }
+        actionTint.setVisible(show);
+    }
+
+    /**
+     * El resaltado <b>debil</b>: "esto lo puedes usar ahora mismo".
+     *
+     * <p>No lo calculamos nosotros, lo dice el motor
+     * ({@code PlayerControllerHuman.getActionableCards} →
+     * {@code Selection.actionable}) y viene con <b>fuerza</b>:
+     *
+     * <ul>
+     *   <li><b>1</b> — puedes jugarla o activarla ahora. Durante un pago de
+     *       mana, son las fuentes de mana que te quedan.</li>
+     *   <li><b>2</b> — ademas es una de las que <b>taparia el boton "Auto"</b>.
+     *       O sea: el plan del motor, antes de pulsarlo.</li>
+     * </ul>
+     *
+     * <p>Es distinto de {@link #setSelectable}, que es "el motor esta
+     * esperando que elijas una de estas": aquello es una obligacion y esto una
+     * sugerencia, asi que se pintan distinto y el fuerte manda sobre el debil.
+     */
+    public void setActionable(final int strength) {
+        this.actionable = strength >= 1;
+        pseudoClassStateChanged(ACTIONABLE, actionable);
+        pseudoClassStateChanged(AUTO_TAP, strength >= 2);
+    }
+
+    /** Si lleva el resaltado de "esto lo puedes usar". Para las pruebas. */
+    public boolean isActionable() {
+        return actionable;
+    }
+
+    private boolean actionable;
+
+    /** Si el motor esta esperando que se cliquen cartas y esta es una de ellas. */
+    public boolean isSelectable() {
+        return selectable;
+    }
+
+    private boolean selectable;
+
+    /**
+     * Resaltado que pide el motor con {@code setHighlighted}.
+     *
+     * <p>Lo usa sobre todo el combate: el defensor actual mientras declaras
+     * atacantes, y el atacante actual mientras declaras bloqueadores. Sin esto
+     * no hay forma de saber sobre que estas trabajando.
+     */
+    public void setHighlighted(final boolean on) {
+        pseudoClassStateChanged(HIGHLIGHTED, on);
+    }
+
+    /**
+     * Objetivo de lo que hay arriba del stack (o de la entrada del stack bajo
+     * el raton): borde rojo. Discord, 20-10-2026: <i>"it's not clear enough to
+     * me which permanents or players are being targeted ... highlight its
+     * targets with a red outline"</i>. Lo pone {@code TableScreen.applyStackTargets}.
+     */
+    public void setStackTarget(final boolean on) {
+        pseudoClassStateChanged(STACK_TARGET, on);
+    }
+
+    private static final javafx.css.PseudoClass STACK_TARGET =
+            javafx.css.PseudoClass.getPseudoClass("stack-target");
+
+    /** La carta que se esta arrastrando ahora mismo. */
+    public void setDragging(final boolean on) {
+        pseudoClassStateChanged(DRAGGING, on);
+    }
+
+    /** Destino valido debajo del raton durante un arrastre. */
+    public void setDropTarget(final boolean on) {
+        pseudoClassStateChanged(DROP_TARGET, on);
+    }
+
+    /**
+     * Hacia donde avanza al entrar en combate. -1 hacia arriba, +1 hacia abajo.
+     * Lo fija quien coloca la carta: el campo propio empuja hacia la linea de
+     * combate y el del rival, hacia abajo.
+     */
+    public void setCombatDirection(final int dir) {
+        if (this.combatDirection != dir) {
+            this.combatDirection = dir;
+            applyAdvance(false);
+        }
+    }
+
+    /**
+     * Avanzar hacia la linea de combate, como en Arena.
+     *
+     * <p>Que la criatura DE UN PASO al atacar cuenta lo que ha pasado mucho
+     * mejor que un icono: se ve el cambio con el rabillo del ojo.
+     */
+    public void setAdvanced(final boolean on) {
+        if (this.advanced == on) {
+            return;
+        }
+        this.advanced = on;
+        applyAdvance(true);
+    }
+
+
+    /** El nombre que le pone el motor ({@code Player.getKeywordCard}). */
+    private static final String KEYWORD_CARD = "Keyword Effects";
+
+    /**
+     * LA CARTA DE "KEYWORD EFFECTS", QUE DIGA LO QUE APUNTA.
+     *
+     * <p>El motor deja en tu zona de mando una carta de efecto con las palabras
+     * clave que tienes <b>tu</b>, el jugador (Pilgrim's Ward de Ascenso: "You
+     * have hexproof"; Teferi's Protection, Leyline of Sanctity...). No tiene
+     * arte, asi que salia el respaldo: el nombre en ingles y un "no cost", y
+     * nada mas (Discord, 10-10-2026: <i>"not sure if this is a placeholder or a
+     * bug"</i>). Lo que apunta se pinta en la linea del tipo, que en un efecto va
+     * vacia, y se lee de {@code PlayerView.getKeywords()}, lo mismo que usa el
+     * propio motor para el detalle del jugador. Las vacias ni salen
+     * ({@code CommandZone.isSilentEffect}).
+     */
+    /** La clase de color del respaldo: una letra, "m" multicolor o "c" incolora. */
+    private static String colourClass(final forge.card.ColorSet colours) {
+        if (colours == null || colours.isColorless()) {
+            return "card-fb-c";
+        }
+        if (colours.isMulticolor()) {
+            return "card-fb-m";
+        }
+        if (colours.hasWhite()) {
+            return "card-fb-w";
+        }
+        if (colours.hasBlue()) {
+            return "card-fb-u";
+        }
+        if (colours.hasBlack()) {
+            return "card-fb-b";
+        }
+        return colours.hasRed() ? "card-fb-r" : "card-fb-g";
+    }
+
+    private void setFallbackColour(final String cls) {
+        if (cls.equals(fbColour)) {
+            return;
+        }
+        if (fbColour != null) {
+            fallback.getStyleClass().remove(fbColour);
+        }
+        fbColour = cls;
+        fallback.getStyleClass().add(cls);
+    }
+
+    private void showKeywordCard(final CardStateView st) {
+        if (card == null || !card.isImmutable() || !KEYWORD_CARD.equals(st.getName())) {
+            return;
+        }
+        fbName.setText(forge.neo.NeoText.get("card.keywordEffects"));
+        final forge.game.player.PlayerView owner = card.getOwner();
+        if (owner == null || owner.getKeywords() == null) {
+            return;
+        }
+        final String keywords = forge.util.Lang.joinHomogenous(
+                owner.getKeywords().getValues(), forge.game.keyword.KeywordView::title);
+        if (keywords != null && !keywords.isBlank()) {
+            fbType.setText(keywords);
+        }
+    }
+
+    /**
+     * La fuerza y resistencia IMPRESAS en la carta, o null si no se sabe.
+     *
+     * <p>El motor publica la actual, no la impresa, asi que la impresa hay que
+     * sacarla de la carta en papel — el mismo camino que ya se usa para las
+     * imagenes ({@code ImageUtil.getPaperCardFromImageKey}). Solo sirve para
+     * decidir el color de la pastilla: si no hay carta en papel (una ficha, por
+     * ejemplo) simplemente no se tinta.
+     *
+     * <p>Se cachea por clave de imagen porque {@code refresh()} se llama muchas
+     * veces por segundo y esta busqueda no es gratis.
+     */
+    private static int[] printedPt(final CardStateView st) {
+        final String key = st == null ? null : st.getImageKey();
+        if (key == null || key.isEmpty()) {
+            return null;
+        }
+        final int[] cached = PRINTED_PT.get(key);
+        if (cached != null) {
+            return cached.length == 0 ? null : cached;
+        }
+        int[] value = NO_PT;
+        try {
+            final forge.item.PaperCard pc = forge.util.ImageUtil.getPaperCardFromImageKey(key);
+            if (pc != null && pc.getRules() != null && pc.getRules().getPower() != null) {
+                value = new int[] {pc.getRules().getIntPower(), pc.getRules().getIntToughness()};
+            }
+        } catch (final RuntimeException ignored) {
+            // Ficha, emblema o clave que no corresponde a una carta en papel.
+        }
+        PRINTED_PT.put(key, value);
+        return value.length == 0 ? null : value;
+    }
+
+    /**
+     * La fuerza y resistencia impresas, para quien las necesite fuera de aqui.
+     *
+     * <p>La usa la carta ampliada: ahi la imagen ensenya la P/T <b>impresa</b>,
+     * asi que sin decir la actual al lado se lee justo lo contrario de lo que
+     * pasa en la mesa — una criatura con contadores y un aura encima pone 0/7
+     * en grande cuando de verdad es un 44/46.
+     *
+     * @return {fuerza, resistencia} o null si no se sabe (una ficha, un emblema)
+     */
+    public static int[] printedPowerToughness(final CardStateView st) {
+        return printedPt(st);
+    }
+
+    private static final int[] NO_PT = new int[0];
+    private static final java.util.Map<String, int[]> PRINTED_PT =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Tamano de letra de las pastillas de contador, en proporcion a la carta. */
+    private double counterFontPx = 10;
+
+    /**
+     * Cuantas pastillas caben antes de que la carta parezca un semaforo.
+     *
+     * <p>Lo que se recorte sigue estando en el panel de detalle, en texto: si
+     * algo se corta, tiene que haber forma de llegar a ello.
+     */
+    private static final int MAX_COUNTER_PILLS = 3;
+
+    /**
+     * Pinta los contadores de la carta.
+     *
+     * <p>Todo sale del motor: {@code CardView.getCounters()} da el recuento por
+     * tipo y el propio {@link CounterType} trae hasta el <b>color</b> con el que
+     * pintarlo ({@code getRed/getGreen/getBlue}). No hay ni una tabla nuestra.
+     *
+     * <p>Solo en el campo de batalla. Fuera de el, la lealtad que devuelve el
+     * motor es la impresa en la carta y repetirla encima del arte solo estorba
+     * (se veria en cada planeswalker del deck builder).
+     */
+    private void refreshCounters() {
+        final Multiset<CounterType> all = card == null ? null : card.getCounters();
+        final boolean inPlay = card != null && ZoneType.Battlefield == card.getZone();
+        if (!inPlay || !countersVisible || all == null || all.isEmpty()) {
+            counters.getChildren().clear();
+            counters.setVisible(false);
+            return;
+        }
+
+        // La lealtad primero: es el numero que se mira. Luego +1/+1 y -1/-1,
+        // que son los que cambian el combate, y despues el resto por nombre.
+        final List<CounterType> types = new ArrayList<>(all.elementSet());
+        types.sort(Comparator.comparingInt(CardNode::counterRank)
+                .thenComparing(CounterType::getName));
+
+        counters.getChildren().clear();
+        // El nombre ("1 Bounty") solo si caben TODAS en una fila. Con dos o tres
+        // pastillas con nombre no cabian y JavaFX las cortaba con puntos:
+        // "1 BOUNT", "1 Dea...", "..." (reportado en r/forgeMTG el 15-09-2026).
+        // Mejor el numero entero con su color que medio nombre.
+        final boolean wide = cardWidth >= 108 && namesFit(types, all);
+        int shown = 0;
+        for (final CounterType t : types) {
+            if (shown == MAX_COUNTER_PILLS && types.size() > MAX_COUNTER_PILLS) {
+                final Label more = pill("+" + (types.size() - shown), Color.rgb(28, 34, 44));
+                counters.getChildren().add(more);
+                break;
+            }
+            final Label pill = pill(counterText(t, all.count(t), wide),
+                    Color.rgb(t.getRed(), t.getGreen(), t.getBlue()));
+            if (t.is(CounterEnumType.LOYALTY) || t.is(CounterEnumType.DEFENSE)) {
+                // La lealtad es LA cifra de un planeswalker, igual que la P/T
+                // lo es de una criatura: va del mismo tamano. Y la DEFENSA es
+                // lo mismo para una Batalla — se mira igual y baja igual.
+                pill.getStyleClass().add("card-counter-loyalty");
+                applyCounterFont(pill);
+            }
+            counters.getChildren().add(pill);
+            shown++;
+        }
+        counters.setVisible(true);
+    }
+
+    /**
+     * {@code -Dneo.kwbadges.all=true}: toda criatura de la mesa con TODOS los
+     * iconos de habilidad de la skin a la vez. Es la unica forma de ver el peor
+     * caso (y cada icono) sin buscar una carta que no existe.
+     */
+    private static final boolean KEYWORDS_ALL_TEST = Boolean.getBoolean("neo.kwbadges.all");
+
+    /**
+     * Por debajo de este ancho de carta no se pintan: el icono saldria de
+     * menos de 7 px y seria una mancha. A ese tamano ya no se lee nada de la
+     * carta y lo que toca es acercar la mesa (Ctrl + rueda).
+     */
+    private static final double KEYWORD_MIN_CARD_WIDTH = 50;
+
+    /**
+     * Los iconos de habilidad (volar, toque mortal, arrollar...), <b>como los
+     * pinta el Forge de siempre</b>: los mismos iconos de su skin, en columna
+     * por el lado derecho y pegados unos a otros. Ver {@link KeywordIcon}.
+     *
+     * <p>La geometria es la de {@code CardPanel} (forge-gui-desktop): lado =
+     * ancho/7, columna empezando en ancho/2 + ancho/3. Lo unico que cambia es
+     * el margen de arriba: alli son 25 px fijos para cartas de ~190 px, y aqui
+     * las cartas de la mesa van de 60 a 200, asi que va en proporcion (el
+     * mismo 13 % de ancho).
+     *
+     * <p>Solo en el campo de batalla y <b>con arte</b>: la carta dibujada de
+     * respaldo lleva el nombre y el tipo a todo lo ancho y se los comeria.
+     *
+     * <p>Se rehacen <b>solo si algo ha cambiado</b> (los iconos o el tamano):
+     * esto corre en cada {@link #refresh()} y la mesa se repinta entera con
+     * cada aviso del motor.
+     */
+    private void refreshGoad() {
+        goadTag.setVisible(card != null && ZoneType.Battlefield == card.getZone() && badgesVisible
+                && !card.isFaceDown() && AffectedBy.isGoaded(card.getId()));
+    }
+
+    private void refreshKeywords() {
+        final boolean inPlay = card != null && ZoneType.Battlefield == card.getZone();
+        final List<forge.localinstance.skin.FSkinProp> icons = inPlay && keywordBadges && badgesVisible
+                && cardWidth >= KEYWORD_MIN_CARD_WIDTH && art.getImage() != null
+                ? (KEYWORDS_ALL_TEST && card.getCurrentState() != null
+                        && card.getCurrentState().isCreature()
+                        ? KeywordIcon.all() : KeywordIcon.of(card))
+                : Collections.<forge.localinstance.skin.FSkinProp>emptyList();
+        final int w = (int) Math.round(cardWidth);
+        final double size = w / 7;
+        final StringBuilder sig = new StringBuilder();
+        for (final forge.localinstance.skin.FSkinProp p : icons) {
+            sig.append(p.name()).append('|');
+        }
+        final String signature = icons.isEmpty() ? "" : sig.append('@').append(w).toString();
+        if (signature.equals(shownKeywords)) {
+            return;
+        }
+        shownKeywords = signature;
+        keywords.getChildren().clear();
+        if (icons.isEmpty()) {
+            keywords.setVisible(false);
+            return;
+        }
+        for (final forge.localinstance.skin.FSkinProp p : icons) {
+            final javafx.scene.image.ImageView v = KeywordIcon.view(p, size);
+            if (v != null) {
+                keywords.getChildren().add(v);
+            }
+        }
+        keywords.setTranslateX(w / 2 + w / 3);
+        placeKeywords();
+        keywords.setVisible(!keywords.getChildren().isEmpty());
+    }
+
+    /**
+     * La altura a la que empieza la columna de iconos: la de Forge (13 % del
+     * ancho) o, si la carta lleva marcadores arriba a la derecha ("Preparada",
+     * nivel de Clase, velocidad...), justo debajo de ellos.
+     *
+     * <p>En el Forge Swing se pisan; aqui no, porque "Preparada" es justo lo
+     * que dice que hay algo que hacer AHORA y un icono encima lo tapaba. No se
+     * van a la izquierda porque ahi viven los contadores: seria cambiar un
+     * solape por otro.
+     *
+     * <p>El alto se pide con {@code prefHeight} y no se lee de los limites: el
+     * {@code StackPane} estira la caja de marcadores al alto entero de la
+     * carta. Y se le da el ancho al que parten linea, o un nombre de
+     * habitacion que baja a dos renglones se mediria como uno.
+     */
+    private void placeKeywords() {
+        double top = Math.round(cardWidth * 0.13);
+        if (markers.isVisible() && !markers.getChildren().isEmpty()) {
+            final double wrap = Math.max(36, cardWidth * 0.68) + 8;
+            double bottom = markers.prefHeight(wrap);
+            // Y en cuanto estan colocados, donde acaba de verdad el ultimo: la
+            // estimacion se queda corta por el borde de la pastilla.
+            for (final javafx.scene.Node n : markers.getChildren()) {
+                bottom = Math.max(bottom, n.getBoundsInParent().getMaxY());
+            }
+            top = Math.max(top, Math.ceil(bottom) + 3);
+        }
+        keywords.setTranslateY(top);
+    }
+
+    /**
+     * Los marcadores que el motor pinta sobre la carta.
+     *
+     * <p>Es lo que hace visibles varias mecanicas modernas que <b>no son
+     * contadores</b> y que sin esto no se ven en ninguna parte:
+     *
+     * <ul>
+     *   <li><b>Velocidad</b> (Aetherdrift). El efecto "Start Your Engines!"
+     *       vive en la zona de mando y el numero va aqui: sin el ves la carta
+     *       pero no si vas a 1 o a 4, que es lo unico que importa.</li>
+     *   <li><b>Nivel de una Clase</b> — el motor lo manda como {@code CL:2}.</li>
+     *   <li><b>Cuanto te ha tentado el Anillo</b> — {@code RL:3}.</li>
+     *   <li><b>En que habitacion estas</b> (las cartas Room de Duskmourn).</li>
+     * </ul>
+     *
+     * <p>Las dos GUIs oficiales lo pintan (`CardPanel.drawMarkersTabs`,
+     * `CardRenderer`); nosotros no, y por eso no se veia. Los prefijos crudos
+     * del motor se traducen aqui: {@code CL:} y {@code RL:} son cripticos hasta
+     * en ingles. El texto de superposicion (la velocidad) ya viene traducido
+     * por el {@code Localizer}, asi que ese se deja tal cual.
+     *
+     * <p><b>La rueda de un Artilugio y las luces de una Atraccion</b> (D1 de
+     * la auditoría del motor) no vienen en {@code getMarkerText()} — son propiedades
+     * sueltas de {@code Card}/{@code CardStateView}, {@code getSprocket()} y
+     * {@code getAttractionLights()} — pero son EXACTAMENTE el mismo problema:
+     * estado que el motor calcula y que sin esto no se ve en ningun sitio (a
+     * que rueda esta enganchado un Artilugio no esta impreso en la carta; las
+     * luces de una Atraccion se sortean al entrar a la feria, tampoco). Un
+     * Vehiculo o una Nave NO llevan marcador: su P/T impreso ya se ve en el
+     * arte, y si estan tripulados ya lo dice la propia pastilla de P/T
+     * (aparece o no aparece), que es la misma senyal que ya usa cualquier
+     * criatura.
+     */
+    private void refreshMarkers(final CardStateView st) {
+        final List<String> raw = card == null ? null : card.getMarkerText();
+        final List<String> lines = raw == null ? new ArrayList<>() : markerLines(raw);
+        // "Preparada" va la PRIMERA, y no viene de getMarkerText(): el motor no
+        // la publica ahi. Ver isPrepared().
+        if (isPrepared()) {
+            lines.add(0, NeoText.get("marker.prepared"));
+        }
+        // El PORTADOR DEL ANILLO (El Senor de los Anillos): el motor lo sabe
+        // (isRingBearer) y no lo pinta nadie, asi que tras elegirlo no habia
+        // forma de saber cual era (Discord, 27-10-2026: "should there be an
+        // indication somewhere showing which creature is the ring bearer?").
+        if (card != null && card.isRingBearer()) {
+            lines.add(0, NeoText.get("marker.ringBearer"));
+        }
+        // UNA COPIA, y de que carta de verdad (Discord, 13-11-2026: Sculpting
+        // Steel, True Polymorph). Se ve igual que la copiada: sin esto, con dos
+        // iguales en la mesa no se sabia cual era cual. Ver CopyOf.
+        final String realName = CopyOf.originalName(card);
+        if (realName != null) {
+            lines.add(0, NeoText.get("marker.copy", realName));
+        }
+        // A quien va, si no es a quien la controla: una maldicion encanta a un
+        // jugador y una batalla la protege otro (Discord, 03-10-2026). Estan
+        // en la mesa de su controlador, como dicen las reglas, y sin esto no
+        // se sabia a quien sin mirar el registro. Ver AttachedToPlayer.
+        final forge.game.player.PlayerView enchanted =
+                forge.neo.match.AttachedToPlayer.enchantedPlayer(card);
+        if (enchanted != null) {
+            lines.add(NeoText.get("marker.enchants", enchanted.getName()));
+        }
+        final forge.game.player.PlayerView protector =
+                forge.neo.match.AttachedToPlayer.protector(card);
+        if (protector != null) {
+            lines.add(NeoText.get("marker.protector", protector.getName()));
+        }
+        if (st != null) {
+            if (st.isContraption() && card.getSprocket() > 0) {
+                lines.add(NeoText.get("marker.sprocket", card.getSprocket()));
+            }
+            if (st.isAttraction() && st.getAttractionLights() != null
+                    && !st.getAttractionLights().isEmpty()) {
+                final List<Integer> lit = new ArrayList<>(st.getAttractionLights());
+                Collections.sort(lit);
+                final StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < lit.size(); i++) {
+                    if (i > 0) {
+                        sb.append(", ");
+                    }
+                    sb.append(lit.get(i));
+                }
+                lines.add(NeoText.get("marker.attractionLights", sb.toString()));
+            }
+        }
+        // LO ELEGIDO para la carta (el tipo de Herald's Horn, el color, la
+        // carta de Pithing Needle...): sin esto habia que acordarse. Discord,
+        // 13-10-2026. Ver forge.neo.card.ChosenValues.
+        final String chosen = forge.neo.card.ChosenValues.badge(card);
+        if (chosen != null) {
+            lines.add(chosen);
+        }
+        // Se apagan con las pastillas, no con los contadores: en la carta
+        // AMPLIADA no aportan nada (el texto se lee entero) y en cambio
+        // tapan el titulo, que es justo donde caen.
+        if (lines.isEmpty() || !countersVisible || !badgesVisible) {
+            markers.getChildren().clear();
+            markers.setVisible(false);
+            placeKeywords();
+            return;
+        }
+        markers.getChildren().clear();
+        for (final String line : lines) {
+            final Label l = new Label(line);
+            l.getStyleClass().add("card-marker");
+            // La de "Preparada" no es un dato mas: es "aqui hay algo que puedes
+            // hacer AHORA". Va en acento, como todo lo accionable, y no en el
+            // ambar de los marcadores informativos.
+            if (line.equals(NeoText.get("marker.prepared"))) {
+                l.getStyleClass().add("card-marker-ready");
+            }
+            l.setStyle("-fx-font-size:" + (counterFontPx * 0.92) + "px;");
+            // Lo que no cabe de ancho baja de linea. Un nombre de habitacion no
+            // cabe en una carta de mesa por corto que sea el texto, y truncarlo
+            // con puntos suspensivos dejaria un marcador que no dice nada.
+            l.setWrapText(true);
+            l.setMaxWidth(Math.max(36, cardWidth * 0.68));
+            l.boundsInParentProperty().addListener((o, a, b) -> placeKeywords());
+            markers.getChildren().add(l);
+        }
+        markers.setVisible(!markers.getChildren().isEmpty());
+        placeKeywords();
+    }
+
+    /**
+     * Si esta criatura esta <b>preparada</b> ahora mismo.
+     *
+     * <p>Cuidado con cual de las dos preguntas se hace, porque se parecen y
+     * significan cosas opuestas:
+     *
+     * <ul>
+     *   <li>{@code hasPreparedSpell()} es <b>estructural</b>: la carta TIENE
+     *       una cara de hechizo. Es cierto para las 54 cartas de la mecanica
+     *       siempre, esten preparadas o no — incluso en la mano.</li>
+     *   <li>{@code getPreparedSpell()} no es null solo cuando <b>lo esta</b>:
+     *       es la copia que el motor ha dejado en el exilio, y desaparece en
+     *       cuanto lanzas el hechizo.</li>
+     * </ul>
+     *
+     * <p>Preguntar la primera pondria la pastilla a una criatura que no puede
+     * hacer nada, que es exactamente el aviso que no hay que dar.
+     */
+    private boolean isPrepared() {
+        return card != null && card.getPreparedSpell() != null
+                && card.getZone() == forge.game.zone.ZoneType.Battlefield;
+    }
+
+    /** Traduce los prefijos del motor y junta "In Room:" con su habitacion. */
+    private static List<String> markerLines(final List<String> raw) {
+        final List<String> out = new ArrayList<>();
+        for (int i = 0; i < raw.size(); i++) {
+            final String s = raw.get(i);
+            if (s == null || s.isBlank()) {
+                continue;
+            }
+            if ("In Room:".equals(s)) {
+                // El nombre de la habitacion viene en el elemento siguiente.
+                final String room = i + 1 < raw.size() ? raw.get(i + 1) : "";
+                out.add(NeoText.get("marker.room", room));
+                i++;
+            } else if (s.startsWith("CL:")) {
+                out.add(NeoText.get("marker.classLevel", s.substring(3)));
+            } else if (s.startsWith("RL:")) {
+                out.add(NeoText.get("marker.ringLevel", s.substring(3)));
+            } else {
+                out.add(s);
+            }
+        }
+        return out;
+    }
+
+    private static int counterRank(final CounterType t) {
+        if (t.is(CounterEnumType.LOYALTY) || t.is(CounterEnumType.DEFENSE)) {
+            return 0;
+        }
+        if (t.is(CounterEnumType.P1P1) || t.is(CounterEnumType.M1M1)) {
+            return 1;
+        }
+        return 2;
+    }
+
+    /**
+     * El texto de una pastilla.
+     *
+     * <p>El numero siempre; el nombre solo si la carta es lo bastante ancha
+     * para que quepa. El color ya distingue el tipo, y el detalle completo esta
+     * en el panel lateral al pasar el raton.
+     */
+    private static String counterText(final CounterType t, final int n, final boolean wide) {
+        if (t.is(CounterEnumType.P1P1)) {
+            return "+" + n;
+        }
+        if (t.is(CounterEnumType.M1M1)) {
+            return "-" + n;
+        }
+        if (t.is(CounterEnumType.LOYALTY) || t.is(CounterEnumType.DEFENSE)) {
+            return String.valueOf(n);
+        }
+        // El nivel (subir de nivel), "L3": "3 LEVEL" se comia media carta
+        // (Discord, 06-11-2026). La carta impresa ya dice LEVEL en su escalera.
+        if (t.is(CounterEnumType.LEVEL)) {
+            return "L" + n;
+        }
+        return wide ? n + " " + t.getCounterOnCardDisplayName() : String.valueOf(n);
+    }
+
+    /**
+     * Si las pastillas con nombre caben en una fila del ancho de la carta.
+     * Es una estimacion (letra en negrita ~0,6 em por caracter mas el relleno
+     * de {@code .card-counter}): se mide antes de crearlas para no pintar dos
+     * veces.
+     */
+    private boolean namesFit(final List<CounterType> types, final Multiset<CounterType> all) {
+        final double em = counterFontPx > 0 ? counterFontPx : Math.max(7, cardWidth * 0.085) * 0.95;
+        double total = 0;
+        int shown = 0;
+        for (final CounterType t : types) {
+            if (shown == MAX_COUNTER_PILLS && types.size() > MAX_COUNTER_PILLS) {
+                total += pillWidth("+" + (types.size() - shown), em) + 3;
+                break;
+            }
+            final double loyal = t.is(CounterEnumType.LOYALTY) || t.is(CounterEnumType.DEFENSE) ? 1.28 : 1;
+            total += pillWidth(counterText(t, all.count(t), true), em * loyal) + (shown > 0 ? 3 : 0);
+            shown++;
+        }
+        return total <= cardWidth * 0.9;
+    }
+
+    private static double pillWidth(final String text, final double em) {
+        return text.length() * em * 0.6 + 10;
+    }
+
+    private Label pill(final String text, final Color bg) {
+        final Label l = new Label(text);
+        l.getStyleClass().add("card-counter");
+        // El color lo pone el motor, asi que va en linea y no en la hoja de
+        // estilos: no hay una lista fija de contadores que podamos escribir.
+        l.setStyle("-fx-background-color:" + toRgba(bg, 0.92) + ";"
+                + "-fx-text-fill:" + (isLight(bg) ? "#0E1218" : "#FFFFFF") + ";");
+        applyCounterFont(l);
+        return l;
+    }
+
+    private void applyCounterFont(final Label l) {
+        final double px = l.getStyleClass().contains("card-counter-loyalty")
+                ? counterFontPx * 1.28 : counterFontPx;
+        final String colours = l.getStyle();
+        l.setStyle(colours.replaceAll("-fx-font-size:[^;]*;", "")
+                + "-fx-font-size:" + px + "px;");
+    }
+
+    private static boolean isLight(final Color c) {
+        return 0.299 * c.getRed() + 0.587 * c.getGreen() + 0.114 * c.getBlue() > 0.62;
+    }
+
+    private static String toRgba(final Color c, final double alpha) {
+        return String.format(java.util.Locale.ROOT, "rgba(%d,%d,%d,%.2f)",
+                (int) Math.round(c.getRed() * 255), (int) Math.round(c.getGreen() * 255),
+                (int) Math.round(c.getBlue() * 255), alpha);
+    }
+
+    private void applyAdvance(final boolean animate) {
+        baseTranslateY = advanced ? combatDirection * cardWidth * 0.20 : 0;
+        if (lifted) {
+            return; // el hover manda mientras la carta este levantada
+        }
+        if (!animate || !animations) {
+            setTranslateY(baseTranslateY);
+            return;
+        }
+        final TranslateTransition t = new TranslateTransition(TAP_TIME, this);
+        t.setToY(baseTranslateY);
+        t.setInterpolator(Interpolator.EASE_OUT);
+        t.play();
+    }
+
+    /**
+     * Marca visualmente la carta como comandante.
+     *
+     * <p>Existe aparte de {@link #refresh()} porque {@code CardView.isCommander()}
+     * solo es cierto dentro de una partida: fuera de ella (banco de pruebas,
+     * editor de mazos) hay que decirlo a mano.
+     */
+    public void setCommanderStyle(final boolean on) {
+        pseudoClassStateChanged(COMMANDER, on);
+    }
+
+    // ---------------------------------------------------------------
+    // Animaciones
+    // ---------------------------------------------------------------
+
+    /**
+     * Girar la carta al taparse. 90 grados como en la mesa de verdad; lo que la
+     * hace sentir moderna es que la rotacion esta ANIMADA, no que el angulo sea
+     * distinto.
+     */
+    public void setTapped(final boolean tapped, final boolean animate) {
+        if (this.tapped == tapped) {
+            return;
+        }
+        this.tapped = tapped;
+        // Tumbada ocupa mas ancho: la fila (BattlefieldPane) le reserva hueco,
+        // asi que tiene que recolocarse cuando cambia.
+        requestParentLayout();
+        if (!rotationEnabled) {
+            // Vista de lectura: la carta se queda derecha aunque este girada.
+            setRotate(0);
+            return;
+        }
+        final double target = tapped ? 90 : 0;
+        if (!animate || !animations) {
+            setRotate(target);
+            return;
+        }
+        final RotateTransition rt = new RotateTransition(TAP_TIME, this);
+        rt.setToAngle(target);
+        rt.setInterpolator(Interpolator.EASE_OUT);
+        rt.play();
+    }
+
+    /**
+     * Anima el giro desde como se veia la carta en el nodo ANTERIOR. Para la
+     * fila, cuando rehace el nodo de una carta que se acaba de girar o
+     * enderezar (ver BattlefieldPane.shownTapped): el nodo nuevo nace ya como
+     * esta y sin esto el cambio no se veria.
+     */
+    public void animateTapFrom(final boolean wasTapped) {
+        if (wasTapped == tapped || !rotationEnabled || !animations) {
+            return;
+        }
+        setRotate(wasTapped ? 90 : 0);
+        final RotateTransition rt = new RotateTransition(TAP_TIME, this);
+        rt.setToAngle(tapped ? 90 : 0);
+        rt.setInterpolator(Interpolator.EASE_OUT);
+        rt.play();
+    }
+
+    public boolean isTapped() {
+        return tapped;
+    }
+
+    public void toggleTap() {
+        setTapped(!tapped, true);
+    }
+
+    public void setHoverEnabled(final boolean on) {
+        this.hoverEnabled = on;
+        if (!on && lifted) {
+            // Apagar el hover con la carta levantada la dejaria arriba para
+            // siempre, y con el vigilante de la escena colgado.
+            hoverOut();
+        }
+    }
+
+    /**
+     * Si la carta gira al taparse.
+     *
+     * <p>Se apaga en las vistas que existen para LEER la carta: la ampliada del
+     * click derecho y el menu de habilidades. Ahi que salga tumbada solo estorba
+     * — el jugador ya sabe que esta girada, la ha visto en la mesa; lo que
+     * quiere es leerla.
+     */
+    public void setRotationEnabled(final boolean on) {
+        this.rotationEnabled = on;
+        if (!on) {
+            setRotate(0);
+        }
+    }
+
+    private boolean rotationEnabled = true;
+
+    /**
+     * Donde se pinta esta carta respecto a sus vecinas cuando el raton no esta
+     * encima. Lo pone quien la coloca; ver {@link #baseViewOrder}.
+     */
+    public void setBaseViewOrder(final double order) {
+        this.baseViewOrder = order;
+        if (!lifted) {
+            setViewOrder(order);
+        }
+    }
+
+    /**
+     * Cuanto hay que subir la pastilla de P/T porque debajo hay algo pintado.
+     *
+     * <p>Lo pide {@code CardStackNode} cuando la criatura lleva equipo o auras:
+     * asoman por el borde de abajo, que es justo donde vive el numero que mas
+     * se mira de la mesa. Subirlo un poco es mas barato que buscarle otra
+     * esquina — sigue estando donde va impreso, solo que despejado.
+     */
+    public void setBottomInset(final double px) {
+        if (Math.abs(px - bottomInset) < 0.5) {
+            return;
+        }
+        this.bottomInset = px;
+        StackPane.setMargin(ptRow, new javafx.geometry.Insets(0, 0, px, 0));
+    }
+
+    private double bottomInset;
+
+    /**
+     * Ensenya u oculta las pastillas de contador.
+     *
+     * <p>Aparte de {@code setBadgesVisible} a proposito: en la carta ampliada
+     * los contadores se enumeran al lado, con su nombre entero y su cuenta, asi
+     * que la pastilla encima del titulo solo tapa. En el reparto de danyo, en
+     * cambio, hacen falta.
+     */
+    public void setCountersVisible(final boolean on) {
+        this.countersVisible = on;
+        refreshCounters();
+    }
+
+    private boolean countersVisible = true;
+
+    /**
+     * Esta carta esta enganchada a otra (aura, equipo, fortificacion).
+     *
+     * <p>Solo cambia como se ve: un borde propio para que se lea como una carta
+     * aparte y no como un trozo de la de debajo.
+     */
+    public void setAttached(final boolean on) {
+        pseudoClassStateChanged(ATTACHED, on);
+    }
+
+    private static final javafx.css.PseudoClass ATTACHED =
+            javafx.css.PseudoClass.getPseudoClass("attached");
+
+    /**
+     * Ensenya u oculta las pastillas de P/T y dano.
+     *
+     * <p>Se apagan en la carta ampliada: a ese tamano la carta ya lleva impresa
+     * su propia fuerza y resistencia, y la pastilla se le pone encima.
+     */
+    public void setBadgesVisible(final boolean on) {
+        badgesVisible = on;
+        refresh();
+    }
+
+    private boolean badgesVisible = true;
+
+    /**
+     * El rating del draft, 0-99 o {@code null} para apagarlo.
+     *
+     * <p>El numero lo calcula quien nos llama ({@code CardRanker.getRawScore},
+     * en {@code forge-gui}) porque es logica de draft, no de presentacion: aqui
+     * solo se pinta. Tres tonos y no una escala continua, para que se lea de un
+     * vistazo y no haya que comparar dos numeros parecidos (principio 3 de
+     * las notas de diseño, "el estado se ve, no se lee").
+     */
+    /**
+     * El impuesto de comandante ({2} por cada vez que se ha lanzado desde la
+     * zona de mando), como pastilla arriba a la derecha; 0 la quita.
+     *
+     * <p>Va DENTRO de la carta y no encima de la zona: hasta la 1.0.27 lo
+     * pintaba {@code CommandZone} en una etiqueta suya, creada antes que las
+     * cartas, y la carta la tapaba entera — asomaban dos pixeles naranjas
+     * (Discord, 18-10-2026: <i>"Add additional commander tax costs ... somewhere
+     * here"</i>, con +8 puesto y sin verse). Aqui crece con el hover como el
+     * resto de la carta.
+     */
+    public void setCommanderTax(final int tax) {
+        final int t = Math.max(0, tax);
+        if (t == commanderTax) {
+            return;
+        }
+        commanderTax = t;
+        taxBadge.setText("+" + t);
+        taxBadge.setVisible(t > 0);
+    }
+
+    /**
+     * <b>Una carta que se puede lanzar desde fuera, ensenyada en la mano</b>
+     * (Discord, 29-10-2026: <i>"cards in the exile zone or graveyard that can
+     * potentially be cast ... a faded informational copy displayed in the hand
+     * area"</i>). Desvaida y con la zona de donde viene ("Cementerio"); null la
+     * devuelve a carta normal. Ver {@code TableScreen.setHandOutside}.
+     */
+    /** El rotulo de "el coste depende de lo que elijas", o null para quitarlo. */
+    public void setCostHint(final String text) {
+        final boolean on = text != null && !text.isEmpty();
+        if (on && !text.equals(hintTag.getText())) {
+            hintTag.setText(text);
+        }
+        hintTag.setVisible(on);
+    }
+
+    public void setOrigin(final String zone) {
+        final boolean on = zone != null && !zone.isEmpty();
+        originTag.setText(on ? zone : "");
+        originTag.setVisible(on);
+        pseudoClassStateChanged(OUTSIDE, on);
+    }
+
+    private static final javafx.css.PseudoClass OUTSIDE = javafx.css.PseudoClass.getPseudoClass("outside");
+
+    public void setDraftRank(final Integer rank) {
+        this.draftRank = rank == null ? null : Math.max(0, Math.min(99, rank));
+        refresh();
+    }
+
+    private Integer draftRank;
+
+    private static final javafx.css.PseudoClass RANK_GOOD =
+            javafx.css.PseudoClass.getPseudoClass("rank-good");
+    private static final javafx.css.PseudoClass RANK_POOR =
+            javafx.css.PseudoClass.getPseudoClass("rank-poor");
+
+    /**
+     * El raton ha salido... o eso parece.
+     *
+     * <p>Aqui vivia un parpadeo reportado jugando: <i>"pongo el raton encima de
+     * una carta y parpadea muchas veces"</i>. La causa es geometrica y no se ve
+     * leyendo el codigo del hover, porque el hover esta bien: el problema es
+     * que <b>la carta se quita de debajo del raton ella sola</b>.
+     *
+     * <p>{@link #hoverIn()} la sube {@code 0,12 x ancho} y la agranda un 8 %.
+     * Crecer baja el borde de abajo {@code 0,04 x alto = 0,056 x ancho}, o sea
+     * menos de lo que sube: el borde inferior acaba <b>0,064 x ancho mas
+     * arriba</b> que en reposo. Si el raton estaba en esa franja de abajo, al
+     * levantarse la carta el raton queda fuera → sale el {@code MOUSE_EXITED} →
+     * la carta vuelve → el raton esta dentro otra vez → {@code MOUSE_ENTERED}...
+     * a la velocidad de los fotogramas. En la mano no se nota porque debajo no
+     * hay nada, pero en una rejilla — el sobre del draft, el catalogo del deck
+     * builder — se cae justo en el hueco entre filas.
+     *
+     * <p>Asi que una salida solo cuenta si el raton esta de verdad fuera del
+     * sitio que la carta ocupa <b>en reposo</b>. Si esta dentro, la salida es
+     * mentira y se ignora; y como entonces ya no llegan mas eventos a esta
+     * carta, se vigila desde la escena hasta que salga de verdad
+     * ({@link #watchRealExit()}).
+     */
+    private void leaving(final javafx.scene.input.MouseEvent e) {
+        final javafx.geometry.Bounds resting = restingBoundsInParent();
+        final javafx.scene.Parent parent = getParent();
+        if (resting == null || parent == null) {
+            hoverOut();
+            return;
+        }
+        // Se mira en coordenadas del PADRE: las locales de la carta ya llevan
+        // puesta la transformacion del hover, que es justo lo que hay que
+        // deshacer.
+        final javafx.geometry.Point2D p = parent.sceneToLocal(e.getSceneX(), e.getSceneY());
+        if (resting.contains(p)) {
+            watchRealExit();
+        } else {
+            hoverOut();
+        }
+    }
+
+    /**
+     * El rectangulo que ocupa la carta SIN el realce del hover.
+     *
+     * <p>Se calcula, no se mide: medir {@code getBoundsInParent()} devolveria
+     * las de ahora, que son precisamente las levantadas. Se tiene en cuenta el
+     * giro de tapar, que ensancha la caja.
+     */
+    private javafx.geometry.Bounds restingBoundsInParent() {
+        final double w = getWidth();
+        final double h = getHeight();
+        if (w <= 0 || h <= 0) {
+            return null;
+        }
+        double bw = w;
+        double bh = h;
+        final double rot = getRotate();
+        if (rot != 0) {
+            final double a = Math.toRadians(rot);
+            final double cos = Math.abs(Math.cos(a));
+            final double sin = Math.abs(Math.sin(a));
+            bw = w * cos + h * sin;
+            bh = w * sin + h * cos;
+        }
+        final double cx = getLayoutX() + w / 2 + getTranslateX();
+        final double cy = getLayoutY() + h / 2 + baseTranslateY;
+        return new javafx.geometry.BoundingBox(cx - bw / 2, cy - bh / 2, bw, bh);
+    }
+
+    /**
+     * Vigila desde la escena hasta que el raton salga DE VERDAD.
+     *
+     * <p>Hace falta porque una vez ignorada la salida falsa esta carta ya no
+     * recibe ningun evento mas: el raton esta encima del hueco que ha dejado,
+     * que pertenece al padre. Un filtro en la escena es el unico sitio desde el
+     * que se puede ver pasar.
+     *
+     * <p>Solo hay uno vivo a la vez y solo mientras una carta esta levantada,
+     * asi que no es un coste que se acumule.
+     */
+    private void watchRealExit() {
+        if (exitWatch != null) {
+            return;
+        }
+        final javafx.scene.Scene sc = getScene();
+        if (sc == null) {
+            hoverOut();
+            return;
+        }
+        watchedScene = sc;
+        exitWatch = ev -> {
+            final javafx.geometry.Bounds resting = restingBoundsInParent();
+            final javafx.scene.Parent parent = getParent();
+            // Si la carta se ha ido de la pantalla (una rejilla que se repinta),
+            // el vigilante se apaga solo: si no, se quedaria colgado de la
+            // escena para siempre.
+            if (parent == null || getScene() == null || resting == null || !isVisible()) {
+                hoverOut();
+                return;
+            }
+            final javafx.geometry.Point2D p =
+                    parent.sceneToLocal(ev.getSceneX(), ev.getSceneY());
+            if (!resting.contains(p)) {
+                hoverOut();
+            }
+        };
+        sc.addEventFilter(javafx.scene.input.MouseEvent.ANY, exitWatch);
+    }
+
+    private javafx.event.EventHandler<javafx.scene.input.MouseEvent> exitWatch;
+    private javafx.scene.Scene watchedScene;
+
+    /**
+     * Si la carta esta levantada por el hover.
+     *
+     * <p>No vale {@code isHover()}: mientras se ignora una salida falsa
+     * ({@link #leaving}) la carta sigue levantada pero JavaFX ya dice que el
+     * raton no esta encima, y el avance del atacante le devolveria el sitio de
+     * reposo a mitad del gesto.
+     */
+    private boolean lifted;
+
+    private final javafx.beans.property.ReadOnlyBooleanWrapper liftedProp =
+            new javafx.beans.property.ReadOnlyBooleanWrapper(false);
+
+    /**
+     * Si la carta esta ampliada por el hover, que NO es lo mismo que
+     * {@code hoverProperty()}: mientras {@link #leaving} ignora una salida
+     * falsa la carta sigue ampliada con el raton en el hueco que ha dejado.
+     * Quien tenga que ponerla delante (la mesa) escucha esto, o la devuelve
+     * detras de sus vecinas justo cuando se ve mas grande.
+     */
+    public javafx.beans.property.ReadOnlyBooleanProperty liftedProperty() {
+        return liftedProp.getReadOnlyProperty();
+    }
+
+    public boolean isLifted() {
+        return lifted;
+    }
+
+    private void stopWatching() {
+        if (exitWatch != null && watchedScene != null) {
+            watchedScene.removeEventFilter(javafx.scene.input.MouseEvent.ANY, exitWatch);
+        }
+        exitWatch = null;
+        watchedScene = null;
+    }
+
+    /**
+     * La ultima carta levantada por el hover. Debil: una carta que se va de
+     * la pantalla levantada no se queda viva por esto (principio 11).
+     */
+    private static java.lang.ref.WeakReference<CardNode> lastLifted;
+
+    /** La carta que ha recibido el raton mientras otra lo retenia. */
+    private static java.lang.ref.WeakReference<CardNode> pendingHover;
+
+    private static CardNode lifted(final java.lang.ref.WeakReference<CardNode> ref) {
+        return ref == null ? null : ref.get();
+    }
+
+    /**
+     * Ha entrado el raton. Solo puede haber UNA carta ampliada.
+     *
+     * <p>En una fila apretada las cartas se solapan. La ampliada sube y deja
+     * libre una franja de su sitio de reposo, y en esa franja asoma la vecina:
+     * {@link #leaving} ya sabe que esa salida es falsa y deja la primera
+     * levantada, pero la vecina recibia la entrada y se levantaba TAMBIEN.
+     * Barriendo la fila se quedaban tres o cuatro ampliadas a la vez, y como
+     * la mesa solo pone delante una, las otras salian tapadas por sus vecinas
+     * (Discord, 30-09-2026: una criatura ampliada detras de unas Llanuras).
+     *
+     * <p>Asi que mientras el raton siga dentro del sitio de reposo de la que
+     * esta ampliada, esa lo retiene y la recien llegada ESPERA; se amplia ella
+     * cuando la primera baja de verdad ({@link #hoverOut}). Bajar la primera
+     * en el acto no valia: al volver a su sitio tapa a la vecina, que vuelve a
+     * soltar el raton en la franja... y parpadean las dos sin parar.
+     */
+    private void entering(final javafx.scene.input.MouseEvent e) {
+        final CardNode holder = lifted(lastLifted);
+        if (holder != null && holder != this && holder.lifted
+                && holder.getScene() == getScene() && holder.holdsPointer(e.getSceneX(), e.getSceneY())) {
+            pendingHover = new java.lang.ref.WeakReference<>(this);
+            holder.watchRealExit();
+            return;
+        }
+        hoverIn();
+    }
+
+    /** Si el punto (de escena) cae en el sitio que la carta ocupa en reposo. */
+    private boolean holdsPointer(final double sceneX, final double sceneY) {
+        final javafx.geometry.Bounds resting = restingBoundsInParent();
+        final javafx.scene.Parent parent = getParent();
+        return resting != null && parent != null && isVisible()
+                && resting.contains(parent.sceneToLocal(sceneX, sceneY));
+    }
+
+    /** Para las capturas, que no tienen raton: ampliarla como al pasar por encima. */
+    public void hoverForTest() {
+        hoverIn();
+    }
+
+    private void hoverIn() {
+        // Red por si otra se quedo levantada sin retener el raton: no puede
+        // haber dos ampliadas (ver entering).
+        final CardNode previous = lifted(lastLifted);
+        if (previous != null && previous != this && previous.lifted) {
+            previous.drop();
+        }
+        if (lifted(pendingHover) == this) {
+            pendingHover = null;
+        }
+        lastLifted = new java.lang.ref.WeakReference<>(this);
+        stopWatching();
+        lifted = true;
+        liftedProp.set(true);
+        // Mientras el raton esta encima, delante de todo: da igual que esta
+        // carta viva por DETRAS de otra (lo enganchado a una criatura), porque
+        // pasar el raton por encima es justo el gesto de "ensenyamela".
+        setViewOrder(Math.min(baseViewOrder, 0) - 1);
+        setEffect(lift);
+        final double zoom = forge.neo.NeoSettings.hoverZoom();
+        final double up = hoverLift(zoom);
+        if (!animations) {
+            setScaleX(zoom);
+            setScaleY(zoom);
+            setTranslateY(baseTranslateY - up);
+            return;
+        }
+        final ScaleTransition s = new ScaleTransition(HOVER_TIME, this);
+        s.setToX(zoom);
+        s.setToY(zoom);
+        s.setInterpolator(Interpolator.EASE_OUT);
+        s.play();
+        final TranslateTransition t = new TranslateTransition(HOVER_TIME, this);
+        t.setToY(baseTranslateY - up);
+        t.setInterpolator(Interpolator.EASE_OUT);
+        t.play();
+    }
+
+    /**
+     * Cuanto se levanta la carta al pasar el raton, para ese aumento.
+     *
+     * <h2>Por que sube MAS cuanto mas crece</h2>
+     *
+     * <p>{@code setScale} agranda desde el centro, asi que la mitad de lo que
+     * crece se va hacia abajo. En la mano — que esta pegada al borde inferior —
+     * eso significa que el trozo nuevo de carta sale por debajo de la ventana:
+     * al ampliar mas, se veria menos carta. Con el aumento de siempre (8 %) da
+     * exactamente el {@code 0,12 x ancho} que habia escrito a mano, asi que
+     * quien no toque el ajuste no nota ninguna diferencia.
+     *
+     * <p>El {@code 0,7} es medio alto de carta en unidades de ancho: la
+     * proporcion es 5:7, o sea alto = 1,4 x ancho.
+     */
+    private double hoverLift(final double zoom) {
+        return hoverLiftFor(zoom, cardWidth);
+    }
+
+    /**
+     * La misma cuenta, sin necesitar una carta. Es lo que deja comprobarla sin
+     * ventana: lo que hay que garantizar es que al aumento de siempre (1,08)
+     * sale <b>exactamente</b> el {@code 0,12 x ancho} que habia escrito a mano,
+     * o sea que quien no toque el ajuste no nota ninguna diferencia.
+     */
+    public static double hoverLiftFor(final double zoom, final double width) {
+        return width * (0.12 + (zoom - 1.08) * 0.7);
+    }
+
+    /**
+     * El sitio que ocupa DE MAS una carta de {@code width} con el raton
+     * encima: crece {@code NeoSettings.hoverZoom()} desde el centro y sube
+     * {@link #hoverLiftFor}. Arriba, lo que sube mas la mitad de lo que crece;
+     * a los lados, la mitad de lo que crece; abajo, lo que crece hacia abajo
+     * menos lo que sube (casi siempre nada).
+     *
+     * <p>Es el margen que necesita una rejilla de cartas dentro de un
+     * {@code ScrollPane}: el visor recorta, y sin el la carta ampliada salia
+     * sin cabeza en la primera fila (itch.io, 30-09-2026). La mesa hace la
+     * misma cuenta en {@code BattlefieldPane.updateClip}.
+     */
+    public static javafx.geometry.Insets hoverRoomFor(final double width) {
+        final double zoom = forge.neo.NeoSettings.hoverZoom();
+        final double lift = hoverLiftFor(zoom, width);
+        final double growW = width * (zoom - 1) / 2;
+        final double growH = width * ASPECT * (zoom - 1) / 2;
+        final double pad = 4;
+        return new javafx.geometry.Insets(Math.ceil(lift + growH + pad), Math.ceil(growW + pad),
+                Math.ceil(Math.max(0, growH - lift) + pad), Math.ceil(growW + pad));
+    }
+
+    private void hoverOut() {
+        final boolean was = lifted;
+        drop();
+        if (lifted(pendingHover) == this) {
+            pendingHover = null;
+        }
+        // Si otra carta estaba esperando el raton (entering) y lo sigue
+        // teniendo, ahora le toca a ella.
+        if (was) {
+            final CardNode next = lifted(pendingHover);
+            pendingHover = null;
+            if (next != null && next != this && next.hoverEnabled && next.isHover()
+                    && next.getScene() != null) {
+                next.hoverIn();
+            }
+        }
+    }
+
+    /** Baja la carta sin pasarle el raton a nadie. */
+    private void drop() {
+        stopWatching();
+        if (lifted(lastLifted) == this) {
+            lastLifted = null;
+        }
+        lifted = false;
+        liftedProp.set(false);
+        setViewOrder(baseViewOrder);
+        setEffect(null);
+        if (!animations) {
+            setScaleX(1);
+            setScaleY(1);
+            setTranslateY(baseTranslateY);
+            return;
+        }
+        final ScaleTransition s = new ScaleTransition(HOVER_TIME, this);
+        s.setToX(1);
+        s.setToY(1);
+        s.setInterpolator(Interpolator.EASE_OUT);
+        s.play();
+        final TranslateTransition t = new TranslateTransition(HOVER_TIME, this);
+        t.setToY(baseTranslateY);
+        t.setInterpolator(Interpolator.EASE_OUT);
+        t.play();
+    }
+}

@@ -1,0 +1,1330 @@
+package forge.neo.ascent;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.Set;
+
+import forge.card.CardRarity;
+import forge.deck.CardPool;
+import forge.deck.Deck;
+import forge.deck.DeckSection;
+import forge.game.GameType;
+import forge.game.player.RegisteredPlayer;
+import forge.item.PaperCard;
+import forge.model.FModel;
+import forge.neo.match.NeoFormat;
+import forge.neo.match.NeoGame;
+import forge.neo.match.NeoMatchUI;
+import forge.neo.match.TableBinder;
+import forge.neo.match.TokenDecks;
+import forge.neo.quest.DuelFace;
+
+/**
+ * El duelo de un nodo: contra quien juegas, con que vida y con que ventajas.
+ *
+ * <p><b>Aqui vive toda la curva de dificultad</b>, y a proposito en un solo
+ * sitio: si estuviera repartida entre la pantalla del mapa, el que lanza la
+ * partida y el que reparte premios, ajustar el modo seria ir a buscarla a tres
+ * ficheros y ninguno diria la verdad entero.
+ *
+ * <h2>Las cinco palancas (el plan de Ascenso)</h2>
+ *
+ * <table>
+ *   <tr><th></th><th>Acto 1</th><th>Acto 2</th><th>Acto 3</th></tr>
+ *   <tr><th>Mazo del rival</th><td>tercio flojo</td><td>tercio medio</td>
+ *       <td>tercio fuerte</td></tr>
+ *   <tr><th>Vida del rival</th><td>20</td><td>25</td><td>30</td></tr>
+ *   <tr><th>Perfil de IA</th><td>Cautious</td><td>Default</td><td>Reckless</td></tr>
+ *   <tr><th>Ventaja de salida</th><td>ninguna</td><td>una tierra en mesa</td>
+ *       <td>dos tierras</td></tr>
+ *   <tr><th>El plano</th><td colspan="3">fase 3</td></tr>
+ * </table>
+ *
+ * <p>Y encima de eso, el nodo: una <b>elite</b> sube un escalon de mazo, lleva
+ * cinco vidas mas y una <b>reliquia suya</b>; el <b>jefe</b> juega de
+ * archienemigo con su mazo de esquemas, 40 vidas y dos reliquias.
+ *
+ * <h2>Ninguna de las cinco es una regla nuestra</h2>
+ *
+ * <p>Los mazos salen de los 505 preconstruidos que trae Forge (y de los 173 de
+ * Commander), la vida es {@code setStartingLife}, el perfil de IA es un fichero
+ * de {@code res/ai}, la ventaja es {@code addExtraCardsOnBattlefield} y los
+ * esquemas son {@code DeckgenUtil.generateSchemePool}. Lo unico nuestro es
+ * <b>que pedir</b>.
+ *
+ * <h2>El rival no se sortea dos veces</h2>
+ *
+ * <p>Contra quien juegas en un nodo sale de la semilla de la run mezclada con
+ * la <b>clave del nodo</b>, no de un {@code Random} suelto. O sea que es el
+ * mismo rival aunque cierres el juego y vuelvas — que es lo que impide mirar
+ * contra quien te toca, salir y volver a entrar hasta que salga uno comodo. Es
+ * la misma razon por la que el mapa se guarda por semilla ({@link AscentRun}).
+ *
+ * <p>Cero JavaFX: {@link AscentCheck} recorre una run entera sin ventana.
+ */
+public final class AscentBattle {
+
+    private AscentBattle() {
+    }
+
+    /**
+     * La vida del rival, en proporcion a la TUYA, del primer nodo al ultimo.
+     *
+     * <p><b>Los primeros rivales tienen que ser un paseo</b>, y esto es lo que
+     * lo consigue. Con 20 de vida arrastrada, el primer nodo enfrenta a alguien
+     * con <b>6</b>: sales con una ventaja enorme, que es exactamente lo que
+     * pasa en <i>Slay the Spire</i> cuando la primera pelea es un bicho al
+     * azar. Un roguelike que te mata en el nodo 1 con el mazo de salida no es
+     * dificil, es injusto — y encima lo que has perdido son cuarenta minutos
+     * que todavia no habias jugado.
+     *
+     * <p>Y por eso es una <b>proporcion</b> y no un numero: en Commander sales
+     * con 40, asi que el primer rival tiene 12 y el ultimo 50. La curva se
+     * siente igual en los dos modos sin escribirla dos veces.
+     */
+    private static final double LIFE_START = 0.35;
+
+    /**
+     * Y al llegar arriba. Por encima de la tuya: para entonces tu mazo es otro.
+     *
+     * <p><b>1,25 y no 1,60</b> (05-09-2026). El 1,60 salio de una cuenta sobre
+     * el papel, no de jugar: reportado en partida, <i>"es muy complicado"</i>
+     * pasar del acto 1 y quedan diez Ascensiones por encima. La curva sigue
+     * subiendo — el ultimo rival tiene mas del triple de vida que el primero,
+     * y eso lo mide {@code ascentcheck} — pero deja de terminar en un rival con
+     * media vida mas que tu <i>ademas</i> de un mazo de acto 3.
+     */
+    private static final double LIFE_END = 1.25;
+
+    /** Ninguno baja de aqui, pase lo que pase. Un rival de 2 vidas no es un duelo. */
+    private static final int MIN_LIFE = 5;
+
+    /**
+     * Lo que multiplica la vida de una elite sobre la del combate de su altura.
+     *
+     * <p>1,25 desde el 05-09-2026 (era 1,4). Lo que hace dura a una elite es su
+     * <b>reliquia</b> y su mazo de mas arriba; el saco de vida solo alarga la
+     * partida.
+     */
+    private static final double ELITE_LIFE = 1.25;
+
+    /**
+     * Y la de un jefe.
+     *
+     * <p>No son 40 fijas. El jefe del acto 1 con 40 mientras los combates de su
+     * alrededor tienen 12 no es "un jefe": es un muro contra el que se estrella
+     * un mazo que todavia no existe. Lo que hace jefe a un jefe son <b>los
+     * esquemas y sus dos reliquias</b>, no el saco de vida — y la vida del
+     * archienemigo (CR 904.5) la pisamos igual con {@code setStartingLife},
+     * asi que no hay ninguna regla que respetar aqui.
+     *
+     * <p><b>1,5 y no 2,0</b> (05-09-2026), reportado jugando: el jefe del acto
+     * 1 en Commander salia con <b>78</b> de vida contra tus 40, o sea que para
+     * ganarle habia que pegarle el doble de lo que el te tenia que pegar a ti
+     * — con un mazo que a esas alturas de la run todavia no existe. Doblar la
+     * vida era, ademas, la palanca menos interesante de las cinco: alarga la
+     * partida sin que pase nada nuevo dentro.
+     */
+    private static final double BOSS_LIFE = 1.5;
+
+    /**
+     * Cuanto sube el jefe en la escalera de mazos, por encima de su altura.
+     *
+     * <p><b>0,15 desde el 05-09-2026</b> (era 0,25), y sigue cumpliendo lo que
+     * se pidio — <i>"un mazo un pelin mejor que el del jugador y el de los
+     * enemigos de ese piso"</i>: en el acto 1 el jefe queda en 0,31 + 0,15 =
+     * 0,46, o sea escalon 1, mientras los combates de su piso siguen en el 0.
+     * Ver {@code tierFor}, que corta en 0,34 y 0,70. Lo que se va con la
+     * bajada es el salto de DOS escalones que 0,25 provocaba en algunos
+     * tramos, que era lo que hacia que el mazo del jefe se sintiera <i>"mucho
+     * mejor que el mio"</i> y no un pelin.
+     */
+    private static final double BOSS_DECK_EDGE = 0.15;
+
+    /**
+     * La vida de cada rival de una <b>mesa de cuatro</b>, sobre la de un
+     * combate de su altura. Son tres y hay que tumbarlos a los tres, pero
+     * tambien se pegan entre ellos: con la vida entera la partida seria
+     * eterna. <b>Numero de partida, sin jugar aun</b>: es la palanca a tocar.
+     */
+    static final double MELEE_LIFE = 0.60;
+
+    /**
+     * Y la de cada uno de los tres jefes de la mesa del final, sobre la de un
+     * jefe 1 contra 1. Llevan sus dos reliquias cada uno — es lo que les hace
+     * jefes —, asi que lo que se recorta es el saco de vida.
+     */
+    static final double FINAL_TABLE_LIFE = 0.60;
+
+    /**
+     * Suelo de vida del jefe que lleva el segundo aliento (Ascension 10) en la
+     * mesa del final: el aliento salta con 36 o menos en Commander
+     * ({@code tyrants_last_stand.txt}), y recortado a {@link #FINAL_TABLE_LIFE}
+     * podria nacer ya por debajo y saltar en su primer mantenimiento.
+     */
+    static final int FINAL_TABLE_PHASE_FLOOR = 48;
+
+    /** Los rivales de una mesa de cuatro: tres, todos contra todos. */
+    public static final int TABLE_RIVALS = 3;
+
+    /**
+     * La vida de cada rival de una mesa de cuatro, a partir de la de un duelo
+     * de su altura. La misma cuenta que {@code tablePlan}: la ficha del mapa
+     * tiene que decir la partida que se juega.
+     */
+    public static int tableLifeAt(final int duelLife) {
+        return Math.max(MIN_LIFE, (int) Math.round(duelLife * MELEE_LIFE));
+    }
+
+    /**
+     * Los caracteres de IA, del mas blando al mas agresivo.
+     *
+     * <p>Son ficheros de {@code forge-gui/res/ai}. Se reparten por <b>altura de
+     * la run</b>, no por acto: un rival del final del acto 1 ya juega distinto
+     * que el del primer nodo.
+     */
+    private static final String[] AI_LADDER = {"Cautious", "Default", "Reckless"};
+
+    // ------------------------------------------------------------------
+    //  El plan
+    // ------------------------------------------------------------------
+
+    /**
+     * Todo lo que hace falta para montar el duelo de un nodo.
+     *
+     * <p>Es un dato, no una accion: se puede calcular, imprimir y comprobar sin
+     * abrir una partida. Eso es lo que permite <b>medir</b> que la curva de
+     * dificultad sube de verdad, en vez de suponerlo.
+     */
+    public static final class Plan {
+        public final AscentNode.Kind kind;
+        public final int act;
+        /** El mazo del rival, tal cual lo trae Forge. */
+        public final Deck opponentDeck;
+        /** Con que carta se presenta. {@code null} si el mazo no da ninguna. */
+        public final PaperCard opponentFace;
+        /** Con cuanta vida sales tu: la que arrastra la run. */
+        public final int yourLife;
+        /** Y el rival. */
+        public final int opponentLife;
+        /** El caracter de la IA, un fichero de {@code res/ai}. */
+        public final String aiProfile;
+        /** Las tierras que el rival tiene ya en la mesa al empezar. */
+        public final List<PaperCard> opponentHeadStart;
+        /** Las reliquias del rival: solo elites y jefes tienen. */
+        public final List<PaperCard> opponentRelics;
+        /** Las tuyas, las que llevas ganadas en la run. */
+        public final List<PaperCard> yourRelics;
+        /** El mazo de esquemas del jefe, o {@code null} si el nodo no es un jefe. */
+        public final CardPool schemes;
+        /** Las variantes que se aplican: la del modo y, en el jefe, Archenemy. */
+        public final EnumSet<GameType> variants;
+        /**
+         * <b>Todos los rivales de la mesa</b>: uno en un duelo, tres en una mesa
+         * de cuatro. El primero es el de los campos de arriba
+         * ({@link #opponentDeck}, {@link #opponentLife}...), que se quedan para
+         * lo que solo sabe de duelos.
+         */
+        public final List<Rival> rivals;
+
+        Plan(final AscentNode.Kind kind, final int act, final Deck opponentDeck,
+             final PaperCard opponentFace, final int yourLife, final int opponentLife,
+             final String aiProfile, final List<PaperCard> opponentHeadStart,
+             final List<PaperCard> opponentRelics, final List<PaperCard> yourRelics,
+             final CardPool schemes, final EnumSet<GameType> variants) {
+            this.kind = kind;
+            this.act = act;
+            this.opponentDeck = opponentDeck;
+            this.opponentFace = opponentFace;
+            this.yourLife = yourLife;
+            this.opponentLife = opponentLife;
+            this.aiProfile = aiProfile;
+            this.opponentHeadStart = Collections.unmodifiableList(opponentHeadStart);
+            this.opponentRelics = Collections.unmodifiableList(opponentRelics);
+            this.yourRelics = Collections.unmodifiableList(yourRelics);
+            this.schemes = schemes;
+            this.variants = variants;
+            this.rivals = List.of(new Rival(opponentDeck, opponentFace, opponentLife,
+                    this.opponentHeadStart, this.opponentRelics));
+        }
+
+        Plan(final AscentNode.Kind kind, final int act, final List<Rival> rivals, final int yourLife,
+             final String aiProfile, final List<PaperCard> yourRelics, final EnumSet<GameType> variants) {
+            final Rival first = rivals.get(0);
+            this.kind = kind;
+            this.act = act;
+            this.opponentDeck = first.deck;
+            this.opponentFace = first.face;
+            this.yourLife = yourLife;
+            this.opponentLife = first.life;
+            this.aiProfile = aiProfile;
+            this.opponentHeadStart = first.headStart;
+            this.opponentRelics = first.relics;
+            this.yourRelics = Collections.unmodifiableList(yourRelics);
+            this.schemes = null;
+            this.variants = variants;
+            this.rivals = List.copyOf(rivals);
+        }
+
+        /** Si se juega a cuatro: una mesa de cuatro o la mesa del final. */
+        public boolean isTable() {
+            return rivals.size() > 1;
+        }
+
+        /** Si el rival juega de archienemigo. */
+        public boolean isBoss() {
+            return kind == AscentNode.Kind.BOSS;
+        }
+
+        @Override
+        public String toString() {
+            if (isTable()) {
+                final StringBuilder sb = new StringBuilder("acto " + act + " " + kind + " A CUATRO | vidas "
+                        + yourLife + " | IA " + aiProfile);
+                for (final Rival r : rivals) {
+                    sb.append(" | ").append(r);
+                }
+                return sb.toString();
+            }
+            return "acto " + act + " " + kind + " | " + name(opponentDeck)
+                    + " | vidas " + yourLife + " vs " + opponentLife
+                    + " | IA " + aiProfile
+                    + (opponentHeadStart.isEmpty() ? "" : " | ventaja " + opponentHeadStart.size())
+                    + (opponentRelics.isEmpty() ? "" : " | reliquias rival " + opponentRelics.size())
+                    + (schemes == null ? "" : " | esquemas " + schemes.countAll());
+        }
+    }
+
+    /** Un rival de la mesa: su mazo, su cara, su vida, su ventaja y sus reliquias. */
+    public static final class Rival {
+        public final Deck deck;
+        /** Con que carta se presenta. {@code null} si el mazo no da ninguna. */
+        public final PaperCard face;
+        public final int life;
+        public final List<PaperCard> headStart;
+        public final List<PaperCard> relics;
+
+        Rival(final Deck deck, final PaperCard face, final int life, final List<PaperCard> headStart,
+              final List<PaperCard> relics) {
+            this.deck = deck;
+            this.face = face;
+            this.life = life;
+            this.headStart = Collections.unmodifiableList(new ArrayList<>(headStart));
+            this.relics = Collections.unmodifiableList(new ArrayList<>(relics));
+        }
+
+        @Override
+        public String toString() {
+            return name(deck) + " " + life + " vidas"
+                    + (headStart.isEmpty() ? "" : ", ventaja " + headStart.size())
+                    + (relics.isEmpty() ? "" : ", reliquias " + relics.size());
+        }
+    }
+
+    /**
+     * Monta el duelo de ese nodo.
+     *
+     * @throws IllegalArgumentException si el nodo no es de pelear
+     */
+    public static Plan plan(final AscentRun run, final AscentNode node) {
+        if (!isBattle(node.getKind())) {
+            throw new IllegalArgumentException("el nodo " + node + " no es un combate");
+        }
+        final int act = clampAct(run.getAct());
+        final Random rnd = rng(run, node);
+        final AscentNode.Kind kind = node.getKind();
+        // Una mesa de cuatro son tres rivales NORMALES de su altura: lo duro es
+        // que sean tres, no que cada uno pegue mas.
+        final boolean tough = kind != AscentNode.Kind.COMBAT && kind != AscentNode.Kind.MELEE;
+
+        // Cuanto has subido en la run entera, de 0 (primer nodo del acto 1) a 1
+        // (el jefe del acto 3). TODA la curva cuelga de aqui, y por eso sube
+        // dentro de cada acto y no solo al cambiar de acto: entre el nodo 1 y
+        // el 12 tu mazo ya ha crecido en once cartas.
+        double climb = progress(act, node.getRow());
+        if (run.getAscension() >= 4 && (kind == AscentNode.Kind.COMBAT || kind == AscentNode.Kind.MELEE)) {
+            // Ascension 4: los rivales normales pelean como los de un acto mas arriba.
+            climb = Math.min(1.0, climb + 1.0 / AscentRun.ACTS);
+        }
+        // Una elite o un jefe se pelean como algo de mas arriba que el sitio
+        // donde estan: es lo que hace que elegirlos sea una apuesta.
+        // El jefe sube MAS que una elite. Lo pidio el jugador al quitarle los
+        // esquemas — "un mazo un pelin mejor que el del jugador y el de los
+        // enemigos de ese piso" — y es lo que le queda para diferenciarse:
+        // sin Archienemigo, un jefe con el mazo de un combate normal solo se
+        // distinguiria por tener el doble de vida, que es aburrido.
+        final double effective = kind == AscentNode.Kind.BOSS
+                ? Math.min(1.0, climb + BOSS_DECK_EDGE)
+                : tough ? Math.min(1.0, climb + 0.15) : climb;
+
+        // Con una run de solo unas expansiones (AscentPool), el rival se
+        // convierte: ningun preconstruido de Forge es de antes de 1995, y un
+        // rival con cartas modernas es justo lo que no queria quien lo pidio.
+        // Mismo rnd, asi que el rival de ese nodo sigue sin sortearse dos veces.
+        final Deck precon = run.getPool().restrict(pickDeck(run.getMode(), tierFor(effective), rnd),
+                run.getMode(), rnd);
+        // En los actos altos de Commander, un mazo GENERADO a bracket 3 o 4
+        // (AscentGenerated): sembrado, el mismo para todos. El preconstruido
+        // se sortea igual, para no mover el resto del azar del nodo.
+        final Deck deck = AscentGenerated.orPrecon(run, node, kind, act, 0, precon,
+                java.util.Collections.emptySet());
+
+        int life = lifeAt(run.getMaxLife(), climb, playerEdge(run));
+        if (kind == AscentNode.Kind.ELITE) {
+            life = (int) Math.round(life * ELITE_LIFE);
+        } else if (kind == AscentNode.Kind.BOSS) {
+            life = (int) Math.round(life * BOSS_LIFE);
+        }
+
+        final String ai = AI_LADDER[Math.min(AI_LADDER.length - 1,
+                (int) (effective * AI_LADDER.length))];
+
+        final EnumSet<GameType> variants = EnumSet.of(
+                run.getMode() == AscentRun.Mode.COMMANDER
+                        ? GameType.Commander : GameType.Constructed);
+        // ⚠️ EL JEFE YA NO ES ARCHIENEMIGO. Ver bossIsNotArchenemy().
+        final CardPool schemes = null;
+
+        int headStartCount = headStartAt(effective);
+        if (kind == AscentNode.Kind.BOSS && run.getAscension() >= 5) {
+            // Ascension 5: no se le puede dar un esquema DE MAS — el robo de
+            // esquema del archienemigo esta escrito a fuego dentro del motor
+            // (PhaseHandler: "if (playerTurn.isArchenemy()) setSchemeInMotion"),
+            // sin gancho de carta ni habilidad — tocarlo seria tocar
+            // forge-game, la regla que no se salta. Mismo espiritu (el jefe
+            // pega mas fuerte nada mas empezar) por un camino que SI es
+            // nuestro: entra con una carta MAS ya en mesa.
+            headStartCount++;
+        }
+
+        // MODO INFINITO: la escalera de mazos ya esta arriba del todo en el acto
+        // 3, asi que cada nivel de mas sube lo que si se puede seguir subiendo:
+        // vida, reliquias y tierras de ventaja. Sin techo de dificultad a
+        // proposito — el jugador lo pidio "even if it's unbalanced", y la gracia
+        // es ver hasta donde llegas —, pero con tope en lo que cuesta TIEMPO
+        // (las reliquias: la IA evalua cada una en cada prioridad).
+        final int endless = run.endlessLevel();
+        if (endless > 0) {
+            life = endlessLife(life, endless);
+            headStartCount += endlessHeadStart(endless);
+        }
+
+        final List<PaperCard> opponentRelics = relicsFor(kind, act, rnd, endlessRelics(kind, endless));
+        if (kind == AscentNode.Kind.BOSS && act == AscentRun.ACTS && run.getAscension() >= 10) {
+            // Ascension 10: el jefe del acto 3 tiene una "segunda fase". No es
+            // una regla de Magic — hay que inventar que significa — y se hace
+            // con el MISMO mecanismo que las otras 35 reliquias: una carta de
+            // verdad en su mando, con un disparo condicionado a su propia vida
+            // (Count$YourLifeTotal). El umbral es literal y por MODO (18 en
+            // Estandar, 36 en Commander: la vida de salida se dobla entre los
+            // dos) y no "la mitad exacta de la suya" — el motor no publica la
+            // vida INICIAL en ningun Count$, solo la actual, asi que una
+            // fraccion exacta pediria registrar un script distinto por
+            // partida. Es una aproximacion a proposito, documentada aqui para
+            // que no parezca un descuido.
+            final PaperCard segundoAliento = AscentRelics.bossPhaseCard(run.getMode());
+            if (segundoAliento != null) {
+                opponentRelics.add(segundoAliento);
+            }
+        }
+
+        // fightLife() y no getLife(): el suelo de la mitad del maximo
+        // (AscentRun.FIGHT_FLOOR). Lo que se APUNTA al salir sigue siendo la
+        // vida con la que acabas, en fight() mas abajo.
+        if (kind == AscentNode.Kind.MELEE || run.isFinalTable(node)) {
+            return tablePlan(run, node, kind, act, effective, deck, life, headStartCount,
+                    opponentRelics, endless, ai, variants);
+        }
+        return new Plan(kind, act, deck, DuelFace.bestCardOf(deck),
+                run.fightLife(), life, ai,
+                headStart(deck, headStartCount),
+                opponentRelics, relicCards(run), schemes, variants);
+    }
+
+    /**
+     * <b>La mesa de cuatro</b> (Ana, 27-10-2026): tres rivales y tu, todos
+     * contra todos, como el Commander de siempre.
+     *
+     * <p>El primer rival es <b>el mismo</b> que tendria ese nodo a 1 contra 1
+     * (mismo azar, mismo orden): en la mesa del final es el jefe de siempre,
+     * con su segundo aliento si toca. Los otros dos salen de un azar aparte
+     * derivado del nodo, sin repetir mazo ni reliquia.
+     *
+     * <ul>
+     *   <li><b>Mesa de cuatro</b>: tres rivales normales de su altura, cada uno
+     *       con {@link #MELEE_LIFE} de la vida y sin reliquias (en infinito,
+     *       las del combate, con tope de dos: la IA evalua cada reliquia en
+     *       cada prioridad, y aqui son tres IA).</li>
+     *   <li><b>Mesa del final</b>: tres jefes, cada uno con sus reliquias de
+     *       jefe y {@link #FINAL_TABLE_LIFE} de la vida de un jefe. El segundo
+     *       aliento de la Ascension 10, solo en el primero: tres a la vez era
+     *       demasiado.</li>
+     * </ul>
+     */
+    private static Plan tablePlan(final AscentRun run, final AscentNode node, final AscentNode.Kind kind,
+                                  final int act, final double effective, final Deck nodeDeck,
+                                  final int life, final int headStartCount,
+                                  final List<PaperCard> firstRelics, final int endless,
+                                  final String ai, final EnumSet<GameType> variants) {
+        final boolean boss = kind == AscentNode.Kind.BOSS;
+        final int eachLife = boss ? Math.max(MIN_LIFE, (int) Math.round(life * FINAL_TABLE_LIFE))
+                : tableLifeAt(life);
+        final List<Rival> rivals = new ArrayList<>();
+        final Set<String> decks = new HashSet<>();
+        final Set<String> relicNames = new HashSet<>();
+
+        final long base = nodeSeed(run, node);
+        // El primero: el rival que tendria el nodo a 1 contra 1 — salvo que sea
+        // un mazo de fichas (TokenDecks, Discord 28-10-2026): a cuatro, una IA
+        // que llena la mesa de fichas hunde la partida, y en la mesa del final
+        // seria la run. Se cambia por otro de su altura, con un azar aparte
+        // para no mover el del resto de la mesa.
+        Deck firstDeck = nodeDeck;
+        if (TokenDecks.isHeavy(firstDeck)) {
+            final Random swap = new Random(base ^ 0x5DEECE66DL);
+            for (int attempt = 0; attempt < 12 && TokenDecks.isHeavy(firstDeck); attempt++) {
+                firstDeck = run.getPool().restrict(pickDeck(run.getMode(), tierFor(effective), swap),
+                        run.getMode(), swap);
+            }
+        }
+        int firstLife = eachLife;
+        final PaperCard phase = AscentRelics.bossPhaseCard(run.getMode());
+        if (phase != null && firstRelics.contains(phase)) {
+            firstLife = Math.max(firstLife, FINAL_TABLE_PHASE_FLOOR);
+        }
+        rivals.add(new Rival(firstDeck, DuelFace.bestCardOf(firstDeck), firstLife,
+                headStart(firstDeck, headStartCount), firstRelics));
+        decks.add(name(firstDeck));
+        for (final PaperCard c : firstRelics) {
+            relicNames.add(c.getName());
+        }
+
+        for (int i = 1; i < TABLE_RIVALS; i++) {
+            final Random rnd = new Random(base ^ (0x9E3779B97F4A7C15L * i));
+            Deck deck = null;
+            // Sin repetir mazo en la mesa: tres veces el mismo precon no es
+            // una partida a cuatro, es un espejo. Y sin mazos de fichas (ver
+            // arriba).
+            for (int attempt = 0; attempt < 12; attempt++) {
+                deck = run.getPool().restrict(pickDeck(run.getMode(), tierFor(effective), rnd),
+                        run.getMode(), rnd);
+                if (deck == null || !decks.contains(name(deck)) && !TokenDecks.isHeavy(deck)) {
+                    break;
+                }
+            }
+            deck = AscentGenerated.orPrecon(run, node, kind, act, i, deck, decks);
+            decks.add(name(deck));
+            final List<PaperCard> relics = relicsFor(kind, act, rnd, endlessRelics(kind, endless), relicNames);
+            for (final PaperCard c : relics) {
+                relicNames.add(c.getName());
+            }
+            rivals.add(new Rival(deck, DuelFace.bestCardOf(deck), eachLife,
+                    headStart(deck, headStartCount), relics));
+        }
+        return new Plan(kind, act, rivals, run.fightLife(), ai, relicCards(run), variants);
+    }
+
+    // ------------------------------------------------------------------
+    //  La curva, en un sitio y medible
+    // ------------------------------------------------------------------
+
+    /**
+     * Cuanto has subido en la run entera: 0 en el primer nodo, 1 en el ultimo.
+     *
+     * <p>Es <b>la altura de la run</b>, no el acto. Esa es la diferencia entre
+     * una curva y tres escalones: con la dificultad atada al acto, los doce
+     * nodos de un acto son identicos entre si y el salto llega de golpe al
+     * cambiar de mapa — cuando lo que ha cambiado durante esos doce nodos es
+     * <b>tu mazo</b>, que ha ganado una carta por combate.
+     */
+    public static double progress(final int act, final int row) {
+        final int total = AscentRun.ACTS * AscentMap.ROWS - 1;
+        final int done = (clampAct(act) - 1) * AscentMap.ROWS
+                + Math.max(0, Math.min(AscentMap.ROWS - 1, row));
+        return Math.max(0.0, Math.min(1.0, (double) done / total));
+    }
+
+    /**
+     * La vida de un rival normal a esa altura, contra la tuya.
+     *
+     * @param yourMaxLife tu vida maxima: 20 en Estandar, 40 en Commander
+     * @param climb       la altura de la run, de 0 a 1
+     * @param edge        lo que has crecido TU, de {@link #playerEdge}
+     */
+    public static int lifeAt(final int yourMaxLife, final double climb, final double edge) {
+        final double ratio = LIFE_START + (LIFE_END - LIFE_START) * climb + edge;
+        return Math.max(MIN_LIFE, (int) Math.round(yourMaxLife * ratio));
+    }
+
+    /**
+     * Techo de lo que puede sumar {@link #playerEdge}.
+     *
+     * <p><b>0,40 desde el 05-09-2026</b>, y no por gusto: lo pidio el
+     * comprobador. Al aplanar la curva ({@link #LIFE_END} de 1,60 a 1,25) el
+     * mismo 0,55 de antes pasa a pesar <b>proporcionalmente mas</b> — en mitad
+     * del acto 2 el rival pasaba de 16 vidas a 27 solo por lo que llevabas
+     * encima, o sea que recuperaba mas ventaja de la que tu habias ganado y
+     * mejorar el mazo dejaba de merecer la pena. Lo cazo la sonda
+     * {@code curvaSigueTuPoder} de {@code ascentcheck}, que exige justo eso:
+     * que el rival se estire contigo, <b>pero menos de lo que te ha dado</b>.
+     */
+    private static final double MAX_EDGE = 0.40;
+
+    /** Lo que suma cada reliquia que llevas puesta. */
+    private static final double RELIC_EDGE = 0.055;
+
+    /**
+     * Y lo que suma tener el mazo lleno de cartas buenas.
+     *
+     * <p><b>0,55 desde el 05-09-2026</b> (era 0,90), y es la palanca correcta
+     * para <i>"no noto que mejoro"</i>. El mismo dia se subio mucho la calidad
+     * del premio (§24.8: suelo en infrecuente, miticas desde el primer nodo,
+     * gamechangers arriba), y con 0,90 el rival se comia buena parte de esa
+     * mejora en cuanto el mazo se llenaba de raras — o sea que mejorar el mazo
+     * se notaba menos <b>justo despues</b> de haber hecho que el premio se
+     * notara mas.
+     *
+     * <p>Sigue reaccionando a lo que llevas, que es la decision del autor del
+     * 02-09-2026 y no se toca: lo que cambia es cuanto. La otra salida —volver
+     * a bajarle vida a los rivales— habria aplanado la curva entera para
+     * arreglar un problema que solo esta en el tramo alto.
+     */
+    private static final double DECK_EDGE = 0.55;
+
+    /**
+     * Cuanto has crecido TU, y por tanto cuanto se estira el rival.
+     *
+     * <h2>Por que existe</h2>
+     *
+     * <p>Decision del autor (02-09-2026): <b>que la curva escale con las pasivas y
+     * las cartas buenas que vas consiguiendo</b>, no solo con el numero de nodo.
+     * Sin esto, una run que engancha dos reliquias de jefe y llena el mazo de
+     * raras se convierte en un paseo por el acto 3, porque la dificultad iba
+     * contando pasos mientras el jugador multiplicaba su potencia. Y al reves:
+     * una run que ha ido mal se estrella contra una curva calculada para la run
+     * que si fue bien.
+     *
+     * <h2>Se mide con lo que ya sabemos medir</h2>
+     *
+     * <ul>
+     *   <li><b>Las reliquias</b>, que son pasivas permanentes: cada una suma.
+     *   <li><b>La calidad del mazo</b>, con la <b>misma</b> puntuacion con la que
+     *       se ordenan los rivales ({@link #power}) y con la que
+     *       {@link AscentSeedDeck} hace flojo el mazo de salida. El mazo semilla
+     *       de Estandar no lleva <b>ni una rara</b>, asi que esto empieza en cero
+     *       y sube solo segun coges premios de los actos altos.
+     * </ul>
+     *
+     * <h2>Y suma MENOS de lo que te ha dado</h2>
+     *
+     * <p>A proposito, y es lo que separa esto de un ajuste que anula el progreso:
+     * el rival recupera parte de tu ventaja, nunca toda. Una reliquia que le da
+     * +2/+2 a todas tus criaturas vale muchisimo mas que las tres vidas de mas
+     * que le pone al rival. Mejorar sigue mereciendo mucho la pena; lo que ya no
+     * pasa es que mejorar te <b>regale</b> el resto de la run.
+     */
+    public static double playerEdge(final AscentRun run) {
+        double edge = run.relics().size() * RELIC_EDGE;
+        final Deck yours = AscentDecks.load(run);
+        if (yours != null) {
+            edge += power(yours, true) * DECK_EDGE;
+        }
+        return Math.min(MAX_EDGE, edge);
+    }
+
+    /** El escalon de mazo que toca a esa altura. */
+    private static int tierFor(final double climb) {
+        return climb < 0.34 ? 0 : climb < 0.70 ? 1 : 2;
+    }
+
+    /**
+     * Cuantas tierras tiene ya puestas el rival a esa altura.
+     *
+     * <p>Cero durante todo el primer tramo, a proposito: la ventaja de salida
+     * es la palanca que mas se nota de las cinco, y ponersela a un rival de los
+     * primeros nodos seria justo lo contrario de lo que se busca.
+     */
+    private static int headStartAt(final double climb) {
+        return climb < 0.40 ? 0 : climb < 0.75 ? 1 : 2;
+    }
+
+    /** Si en ese nodo se juega una partida. */
+    public static boolean isBattle(final AscentNode.Kind kind) {
+        return kind == AscentNode.Kind.COMBAT
+                || kind == AscentNode.Kind.ELITE
+                || kind == AscentNode.Kind.BOSS
+                || kind == AscentNode.Kind.MELEE;
+    }
+
+    // ------------------------------------------------------------------
+    //  Los asientos
+    // ------------------------------------------------------------------
+
+    /**
+     * El asiento del jugador, con su vida arrastrada y sus reliquias puestas.
+     *
+     * <p>⚠️ <b>El orden importa y equivocarse no da ningun error.</b>
+     * {@code forVariants} PISA la vida (pone 40 en Commander y otras 40 en el
+     * archienemigo), asi que {@code setStartingLife} va <b>despues</b>. Es la
+     * trampa que haria que la vida no se arrastrara nunca — el modo entero
+     * colgando de una linea que no se queja. Lo mide la sonda 2 de
+     * {@code ascentcheck}.
+     */
+    public static RegisteredPlayer humanSeat(final Plan plan, final Deck deck, final int seats) {
+        final RegisteredPlayer seat = RegisteredPlayer.forVariants(
+                seats, plan.variants, deck, null, false, null, null);
+        seat.setStartingLife(plan.yourLife);
+        if (!plan.yourRelics.isEmpty()) {
+            seat.addExtraCardsInCommandZone(new ArrayList<>(plan.yourRelics));
+        }
+        return seat;
+    }
+
+    /** El asiento del rival numero {@code i} de la mesa (0 = el de un duelo). */
+    public static RegisteredPlayer opponentSeat(final Plan plan, final int i, final int seats) {
+        if (i <= 0 || i >= plan.rivals.size()) {
+            return opponentSeat(plan, seats);
+        }
+        final Rival r = plan.rivals.get(i);
+        final RegisteredPlayer seat = RegisteredPlayer.forVariants(
+                seats, plan.variants, r.deck, null, false, null, null);
+        seat.setStartingLife(r.life);
+        if (!r.headStart.isEmpty()) {
+            seat.addExtraCardsOnBattlefield(new ArrayList<>(r.headStart));
+        }
+        if (!r.relics.isEmpty()) {
+            seat.addExtraCardsInCommandZone(new ArrayList<>(r.relics));
+        }
+        return seat;
+    }
+
+    /** El asiento del rival: su mazo, su vida, sus esquemas y su ventaja. */
+    public static RegisteredPlayer opponentSeat(final Plan plan, final int seats) {
+        // Los esquemas SOLO entran por aqui: RegisteredPlayer no tiene setter
+        // para ellos, asi que un jefe registrado sin esta llamada se queda en
+        // un rival normal con 40 vidas, y no lo dice.
+        final Deck deck = plan.schemes == null
+                ? plan.opponentDeck : withSchemes(plan.opponentDeck, plan.schemes);
+        final RegisteredPlayer seat = RegisteredPlayer.forVariants(
+                seats, plan.variants, deck,
+                plan.schemes == null ? null : plan.schemes.toFlatList(),
+                plan.schemes != null, null, null);
+        seat.setStartingLife(plan.opponentLife);
+        if (!plan.opponentHeadStart.isEmpty()) {
+            seat.addExtraCardsOnBattlefield(new ArrayList<>(plan.opponentHeadStart));
+        }
+        if (!plan.opponentRelics.isEmpty()) {
+            // ⚠️ Sobre el asiento de la IA, no sobre el tuyo: puestas en el
+            // humano por error, la elite te REGALA su reliquia y el nodo duro
+            // pasa a ser el facil.
+            seat.addExtraCardsInCommandZone(new ArrayList<>(plan.opponentRelics));
+        }
+        return seat;
+    }
+
+    // ------------------------------------------------------------------
+    //  Jugar el nodo
+    // ------------------------------------------------------------------
+
+    /**
+     * Juega el duelo de ese nodo y <b>apunta la vida con la que sales</b>.
+     *
+     * <p>La partida la lanza {@code NeoGame.play} — no un {@code HostedMatch}
+     * propio — porque ahi viven las preferencias del motor, el blindaje de la
+     * IA ({@code SafeAi}), la funda del mazo, la mesa y el menu de pausa. Un
+     * cuarto camino que arranca partidas por su cuenta es justo el fallo del
+     * principio 8 (las notas de diseño): el duelo de la aventura se jugaba con otros
+     * ajustes y se clavaba al buscar en la biblioteca.
+     *
+     * <p>Lo unico que Ascenso pone de su parte son los <b>asientos</b>, que
+     * entran por {@code NeoGame.Seating}: los esquemas del jefe no tienen
+     * setter y la vida hay que ponerla justo despues de {@code forVariants}.
+     *
+     * @param binder la mesa, o {@code null} para jugar sin ventana
+     */
+    public static Outcome fight(final AscentRun run, final AscentNode node,
+                                final NeoMatchUI.Mode mode, final int timeoutSecs,
+                                final TableBinder binder) {
+        final Plan plan = plan(run, node);
+        final Deck yours = AscentDecks.load(run);
+        if (yours == null) {
+            throw new IllegalStateException("la run no tiene mazo guardado: " + run.getDeckName());
+        }
+        // El plan, al registro. Es lo unico que deja saber despues por que un
+        // nodo salio como salio: la vida del rival, su caracter y su ventaja no
+        // se pueden deducir mirando la mesa.
+        // En modo infinito el plan dice "acto 3" (la curva se recorta ahi): se
+        // dice delante el nivel de verdad, que es lo que hace falta al leerlo.
+        System.out.println("[ascenso] " + (run.isEndless() ? "infinito " + run.endlessLevel() + " · " : "")
+                + plan);
+        // Ending.ASCENT: la pantalla de fin de partida de un nodo ofrece UN
+        // boton, "continuar Ascenso". Los dos de una partida suelta mentian los
+        // dos — "otra partida" se leia como dejar el duelo a medias y borraba
+        // la run, y "volver al menu" no volvia a ningun menu.
+        //
+        // El pago de mana, EL DEL JUGADOR. Aqui iba un `true` fijo, asi que en
+        // Ascenso el ajuste no valia: apagarlo en Ajustes servia para ese
+        // combate y el siguiente volvia a pagar solo (Discord, 23-09-2026).
+        // Sin jugador (reliccheck, ascentcheck) sigue encendido, que es como
+        // se han medido siempre.
+        final boolean autoMana = mode != NeoMatchUI.Mode.HUMAN
+                || forge.neo.NeoSettings.autoPayMana() || Boolean.getBoolean("neo.autoPay");
+        final List<Deck> decks = new ArrayList<>();
+        for (final Rival r : plan.rivals) {
+            decks.add(r.deck);
+        }
+        final NeoGame.Result result = NeoGame.play(yours, plan.rivals.size(), mode, timeoutSecs, false,
+                binder, plan.aiProfile, autoMana,
+                run.getMode() == AscentRun.Mode.COMMANDER ? NeoFormat.COMMANDER : NeoFormat.ESTANDAR,
+                decks, 1, seating(plan), NeoMatchUI.Ending.ASCENT);
+
+        // ⚠️ GANAR y SOBREVIVIR no son lo mismo, y confundirlos rompe el modo
+        // en las dos direcciones. Se puede perder una partida de Magic con
+        // vidas de sobra (te quedas sin biblioteca, o el rival te saca de otra
+        // forma), y entonces mirar solo la vida daria la run por viva despues
+        // de haberla perdido. Asi que manda quien gano; la vida solo decide
+        // con cuanta llegas al nodo siguiente.
+        final boolean won = won(result);
+        // Si no se pudo leer la vida (partida colgada, o cerrada a lo bruto) se
+        // deja la que habia: dar una run por perdida porque no se leyo un
+        // numero seria el peor fallo posible en un modo donde perder es final.
+        final boolean alive = run.recordLife(result.yourLife < 0 ? run.getLife() : result.yourLife);
+        if (won && alive) {
+            // Una mesa de cuatro ganada cura un poco (AscentRun.TABLE_HEAL).
+            final int healed = run.healAfterWin(node);
+            if (healed > 0) {
+                System.out.println("[ascenso] mesa ganada: +" + healed + " vidas");
+            }
+        }
+        if (!(won && alive) && shieldSaves(run, node, result)) {
+            final int life = breakShield(run);
+            System.out.println("[ascenso] el escudo se rompe: sigues con " + life + " vidas");
+            return new Outcome(false, true, result.exit, true);
+        }
+        return new Outcome(won, won && alive, result.exit);
+    }
+
+    /**
+     * Si <b>el escudo</b> ({@link AscentRelics#SHIELD}) te salva de esta
+     * derrota. Las cuatro condiciones, y cada una cierra una trampa:
+     *
+     * <ul>
+     *   <li><b>Lo llevas.</b></li>
+     *   <li><b>No es el jefe de un piso</b> (Ana, al proponerlo): el jefe es
+     *       la prueba del piso, y saltarselo seria pasar de piso sin pasarla.</li>
+     *   <li><b>La partida acabo de verdad</b> ({@code completed}): una colgada
+     *       o cerrada no es una derrota que salvar, y el juego ya la trata
+     *       aparte.</li>
+     *   <li><b>No te rendiste</b> ({@code youConceded}): si no, rendirse ante
+     *       un rival dificil seria saltarse el nodo gratis.</li>
+     * </ul>
+     */
+    static boolean shieldSaves(final AscentRun run, final AscentNode node, final NeoGame.Result result) {
+        return result != null && result.exit != NeoMatchUI.Exit.RESTART
+                && shieldSaves(run, node, result.completed, result.youConceded);
+    }
+
+    /**
+     * Lo mismo con los datos sueltos: Android no juega por {@link #fight} (ver
+     * su {@code AscentMatch}) y lee el resultado por su cuenta.
+     */
+    public static boolean shieldSaves(final AscentRun run, final AscentNode node,
+                                      final boolean completed, final boolean conceded) {
+        if (run == null || node == null || node.getKind() == AscentNode.Kind.BOSS
+                || !completed || conceded) {
+            return false;
+        }
+        for (final AscentRelic r : run.relics()) {
+            if (AscentRelics.isShield(r)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Rompe el escudo: fuera de tus reliquias, apuntado como ido (no se te
+     * vuelve a ofrecer en esta run) y la vida a la mitad del maximo.
+     *
+     * @return con cuanta vida sigues
+     */
+    public static int breakShield(final AscentRun run) {
+        final AscentRelic shield = AscentRelics.byId(AscentRelics.SHIELD);
+        run.removeRelic(shield);
+        run.noteRelicGone(AscentRelics.SHIELD);
+        run.noteShieldBroke();
+        run.recordLife((int) Math.ceil(run.getMaxLife() / 2.0));
+        return run.getLife();
+    }
+
+    /** Como acabo el nodo. */
+    public static final class Outcome {
+        /** Si ganaste el duelo. */
+        public final boolean won;
+        /** Si la run sigue: hay que <b>ganar</b> Y salir con vidas. */
+        public final boolean alive;
+        /** Que pidio el jugador al salir (volver al menu, reiniciar...). */
+        public final NeoMatchUI.Exit exit;
+        /**
+         * Perdiste, pero <b>el escudo te ha salvado</b> y se ha roto
+         * ({@link AscentRelics#SHIELD}): el nodo cuenta como pasado y SIN
+         * premio. {@code alive} es {@code true} y {@code won}, {@code false}.
+         */
+        public final boolean shieldBroke;
+
+        Outcome(final boolean won, final boolean alive, final NeoMatchUI.Exit exit) {
+            this(won, alive, exit, false);
+        }
+
+        Outcome(final boolean won, final boolean alive, final NeoMatchUI.Exit exit, final boolean shieldBroke) {
+            this.won = won;
+            this.alive = alive;
+            this.exit = exit;
+            this.shieldBroke = shieldBroke;
+        }
+    }
+
+    /**
+     * Si el ganador de la partida eres tu.
+     *
+     * <p>Se compara por nombre porque es lo que publica el motor
+     * ({@code GameView.getWinningPlayerName}), y el nombre del humano sale del
+     * mismo sitio del que salio al sentarlo. Sin ganador —partida colgada o
+     * cerrada— se da por <b>no ganada</b>: en un modo donde perder es final,
+     * lo unico que no se puede hacer es regalar una victoria que no paso.
+     */
+    private static boolean won(final NeoGame.Result result) {
+        if (result.winner == null || result.winner.isBlank()) {
+            return false;
+        }
+        return result.winner.equals(forge.neo.look.NeoPlayers.human().getName());
+    }
+
+    /** Los asientos de ese duelo, para {@code NeoGame}. */
+    public static NeoGame.Seating seating(final Plan plan) {
+        return new NeoGame.Seating() {
+            @Override
+            public EnumSet<GameType> variants() {
+                return plan.variants;
+            }
+
+            @Override
+            public RegisteredPlayer human(final Deck deck, final int seats) {
+                return humanSeat(plan, deck, seats);
+            }
+
+            @Override
+            public RegisteredPlayer opponent(final int i, final Deck deck, final int seats) {
+                return opponentSeat(plan, i, seats);
+            }
+
+            // Un rival distinto en cada duelo: nombre y cara al azar, sin
+            // tocar tus rivales de Personalizar (Discord, 10-10-2026: siempre
+            // contra "Dolly", que era el rival 1 guardado).
+            @Override
+            public forge.LobbyPlayer player(final int i, final String aiProfile) {
+                return forge.neo.look.NeoPlayers.passingAi(aiProfile);
+            }
+        };
+    }
+
+    // ------------------------------------------------------------------
+    //  De donde salen los mazos de los rivales
+    // ------------------------------------------------------------------
+
+    /**
+     * El pozo de rivales de un modo, ordenado de flojo a fuerte.
+     *
+     * <p>En Estandar son los preconstruidos de Forge; en Commander, los 173 de
+     * {@code commanderprecons}. Se calcula una vez y se guarda: son cientos de
+     * mazos, y puntuarlos en cada nodo seria recorrerlos todos para elegir uno.
+     */
+    public static synchronized List<Deck> pool(final AscentRun.Mode mode) {
+        final List<Deck> cached = mode == AscentRun.Mode.COMMANDER ? commanderPool : standardPool;
+        if (cached != null) {
+            return cached;
+        }
+        final List<Deck> decks = new ArrayList<>();
+        if (mode == AscentRun.Mode.COMMANDER) {
+            FModel.getDecks().getCommanderPrecons().forEach(decks::add);
+        } else {
+            decks.addAll(NeoFormat.precons());
+        }
+        // Un "mazo" de veinte cartas en la carpeta de preconstruidos no es un
+        // rival: es un mazo de muestra. Y con la vida del acto puesta seria un
+        // nodo que se gana solo.
+        decks.removeIf(d -> d == null || d.getMain().countAll() < 40);
+        decks.sort(Comparator.comparingDouble((Deck d) -> power(d)).thenComparing(Deck::getName));
+        if (mode == AscentRun.Mode.COMMANDER) {
+            commanderPool = decks;
+        } else {
+            standardPool = decks;
+        }
+        return decks;
+    }
+
+    private static volatile List<Deck> standardPool;
+    private static volatile List<Deck> commanderPool;
+
+    /**
+     * Cuanto pega un mazo, en una escala que sirve <b>solo para ordenarlos</b>.
+     *
+     * <p>No es "el poder de un mazo" —eso no lo sabe nadie sin jugarlo— sino la
+     * proporcion de cartas de rareza alta que lleva, que es exactamente el
+     * criterio con el que {@link AscentSeedDeck} hace <i>flojo</i> el mazo de
+     * salida. Usar el mismo en los dos sitios es lo que da sentido a la
+     * escalera: el jugador empieza sin una sola rara y el acto 3 le pone
+     * enfrente mazos llenos de ellas.
+     *
+     * <p>Las tierras no cuentan: casi todas son comunes, y contarlas solo
+     * premiaria a los mazos que llevan pocas.
+     */
+    public static double power(final Deck deck) {
+        return power(deck, false);
+    }
+
+    /**
+     * Si esta carta es rara o mitica COMO CARTA: la impresion lo es y no tiene
+     * ninguna comun ni infrecuente. Tu arte favorito entra en tu mazo sea de la
+     * rareza que sea (Discord, 30-10-2026; {@code AscentArt.forDeck}): una
+     * Reassembling Skeleton de Secret Lair sigue siendo la infrecuente de M19 con
+     * otro dibujo, no una rara colada. Juzgar la impresion ponia en rojo
+     * {@code ascentcheck} de tarde en tarde, solo en el ordenador con esos
+     * favoritos (la bateria copia {@code card.preferences}): 28-10, 31-10 y
+     * 03-11-2026.
+     */
+    public static boolean rareCard(final PaperCard card) {
+        final forge.card.CardRarity r = card.getRarity();
+        if (r != forge.card.CardRarity.Rare && r != forge.card.CardRarity.MythicRare) {
+            return false;
+        }
+        for (final PaperCard p : forge.model.FModel.getMagicDb().getCommonCards().getAllCards(card.getName())) {
+            if (p.getRarity() == forge.card.CardRarity.Common || p.getRarity() == forge.card.CardRarity.Uncommon) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Con {@code byCard}, una rara cuenta solo si lo es como CARTA
+     * ({@link #rareCard}): es como se mide TU mazo. Tu arte favorito
+     * entra sea de la rareza que sea (Discord, 30-10-2026), y una Reassembling
+     * Skeleton de Secret Lair hacia mas duro al rival solo por el dibujo. Los
+     * rivales se siguen ordenando por la impresion: cambiarlo cambiaria que
+     * rival sale con cada semilla.
+     */
+    static double power(final Deck deck, final boolean byCard) {
+        int spells = 0;
+        int score = 0;
+        for (final Map.Entry<PaperCard, Integer> e : deck.getMain()) {
+            if (e.getKey().getRules().getType().isLand()) {
+                continue;
+            }
+            spells += e.getValue();
+            if (byCard && !rareCard(e.getKey())) {
+                continue;
+            }
+            if (e.getKey().getRarity() == CardRarity.MythicRare) {
+                score += 2 * e.getValue();
+            } else if (e.getKey().getRarity() == CardRarity.Rare) {
+                score += e.getValue();
+            }
+        }
+        return spells == 0 ? 0 : (double) score / spells;
+    }
+
+    /**
+     * Donde empieza y acaba cada escalon, en tanto por ciento del pozo.
+     *
+     * <p><b>No son tres tercios, y eso se midio.</b> Con el pozo partido en
+     * tres partes iguales, la potencia media de los rivales de Estandar salia
+     * <b>0,05 - 0,06 - 0,18</b>: entre el acto 1 y el 2 el mazo del rival no
+     * cambiaba nada, porque dos tercios de los 440 preconstruidos de Forge son
+     * mazos de iniciacion casi sin raras y el reparto esta muy cargado abajo.
+     *
+     * <p>Partiendo por 55% / 85% cada escalon coge un trozo de verdad distinto.
+     * Lo comprueba {@code ascentcheck}, que ademas <b>exige un salto minimo</b>
+     * entre escalones: sin eso, la comprobacion pasaba con una diferencia de
+     * una centesima y el acto 2 se sentia igual que el 1 sin que nada fallara.
+     */
+    private static final double[] TIER_EDGES = {0.0, 0.55, 0.85, 1.0};
+
+    /** Un mazo del escalon que toque: 0 el flojo, 1 el medio, 2 el fuerte. */
+    private static Deck pickDeck(final AscentRun.Mode mode, final int tier, final Random rnd) {
+        final List<Deck> all = pool(mode);
+        if (all.isEmpty()) {
+            return null;
+        }
+        final int[] range = tierRange(all.size(), tier);
+        return all.get(range[0] + rnd.nextInt(range[1] - range[0]));
+    }
+
+    /** Que trozo del pozo es ese escalon: {@code [desde, hasta)}. */
+    public static int[] tierRange(final int size, final int tier) {
+        final int from = (int) (size * TIER_EDGES[tier]);
+        final int to = Math.min(size, Math.max(from + 1, (int) (size * TIER_EDGES[tier + 1])));
+        return new int[]{from, to};
+    }
+
+    /** El nombre de un mazo, aguantando el {@code null}. */
+    public static String name(final Deck deck) {
+        return deck == null ? "(sin mazo)" : deck.getName();
+    }
+
+    // ------------------------------------------------------------------
+    //  Ventajas y reliquias
+    // ------------------------------------------------------------------
+
+    /**
+     * Las tierras con las que el rival empieza ya puestas.
+     *
+     * <p>Salen <b>de su propio mazo</b>, no de una lista nuestra: darle un
+     * Bosque a un mazo azul-negro seria darle una tierra que no sabe usar, o
+     * sea ninguna ventaja. Y salen por copia, asi que su mazo se queda como
+     * estaba: {@code addExtraCardsOnBattlefield} anyade cartas, no mueve las
+     * suyas.
+     */
+    private static List<PaperCard> headStart(final Deck deck, final int howMany) {
+        final List<PaperCard> out = new ArrayList<>();
+        if (deck == null || howMany <= 0) {
+            return out;
+        }
+        PaperCard land = null;
+        for (final Map.Entry<PaperCard, Integer> e : deck.getMain()) {
+            final PaperCard c = e.getKey();
+            if (!c.getRules().getType().isLand()) {
+                continue;
+            }
+            // Una basica antes que una tierra rara con condiciones: lo que se
+            // le esta dando es mana, no una carta buena.
+            if (land == null || (!land.getRules().getType().isBasicLand()
+                    && c.getRules().getType().isBasicLand())) {
+                land = c;
+            }
+        }
+        for (int i = 0; land != null && i < howMany; i++) {
+            out.add(land);
+        }
+        return out;
+    }
+
+    /** Cuanto sube la vida del rival por cada nivel infinito: +15%. */
+    static final double ENDLESS_LIFE = 0.15;
+
+    /** Las reliquias, como mucho, que lleva un rival en modo infinito. */
+    static final int ENDLESS_MAX_RELICS = 8;
+
+    /** Las tierras de ventaja de mas, como mucho, en modo infinito. */
+    static final int ENDLESS_MAX_HEAD_START = 4;
+
+    /** La vida de un rival en ese nivel infinito. */
+    static int endlessLife(final int life, final int level) {
+        return (int) Math.round(life * (1.0 + ENDLESS_LIFE * Math.max(0, level)));
+    }
+
+    /** Las tierras de ventaja de mas: una cada dos niveles. */
+    static int endlessHeadStart(final int level) {
+        return Math.min(ENDLESS_MAX_HEAD_START, Math.max(0, level) / 2);
+    }
+
+    /**
+     * Las reliquias de mas en ese nivel infinito: un combate normal una cada
+     * dos niveles (empieza a llevar desde el primero), una elite y un jefe una
+     * por nivel.
+     */
+    static int endlessRelics(final AscentNode.Kind kind, final int level) {
+        if (level <= 0) {
+            return 0;
+        }
+        if (kind == AscentNode.Kind.MELEE) {
+            // Tres IA en la mesa: con tope, por el tiempo que cuesta cada una.
+            return Math.min(2, (level + 1) / 2);
+        }
+        return kind == AscentNode.Kind.COMBAT ? (level + 1) / 2 : level;
+    }
+
+    /** Las reliquias que le tocan al rival de ese nodo. */
+    private static List<PaperCard> relicsFor(final AscentNode.Kind kind, final int act,
+                                             final Random rnd, final int extra) {
+        return relicsFor(kind, act, rnd, extra, Set.of());
+    }
+
+    /** Igual, sin las que ya lleva otro rival de la misma mesa ({@code taken}, por nombre). */
+    private static List<PaperCard> relicsFor(final AscentNode.Kind kind, final int act,
+                                             final Random rnd, final int extra, final Set<String> taken) {
+        final int howMany = Math.min(ENDLESS_MAX_RELICS, extra + (kind == AscentNode.Kind.ELITE ? 1
+                : kind == AscentNode.Kind.BOSS ? bossRelics(act) : 0));
+        final List<PaperCard> out = new ArrayList<>();
+        if (howMany == 0) {
+            return out;
+        }
+        final List<AscentRelic> pool = new ArrayList<>();
+        for (final AscentRelic relic : AscentRelics.all()) {
+            // ⚠️ A la IA no se le dan reliquias que le LLENEN LA MANO, y no es
+            // por potencia: es por tiempo. Forge evalua cada carta jugable en
+            // cada prioridad, asi que tres cartas de mas en su mano son muchas
+            // mas ramas que recorrer cada turno.
+            //
+            // Medido el 05-09-2026 con -Dneo.ai.relics sobre partidas de 70 s:
+            // 17-18 turnos sin reliquias, 12-13 con Hourglass of Kings. La
+            // mitad de ritmo — y eso, jugando, es la espera larga en el turno
+            // del rival que se reporto como "la pelea contra el boss se
+            // lagueaba". No era la interfaz: la mesa llena va a 63 fps y en 95
+            // segundos de partida solo hay 7 frames por encima de 50 ms.
+            //
+            // Para TI siguen estando: son de las mejores que hay, y en tu
+            // asiento no cuestan nada porque las decisiones las tomas tu.
+            //
+            // Y desde el 22-09-2026, tampoco las que piden COLOR. No es por
+            // equilibrio: es que aqui no se sabe de que colores es el mazo del
+            // rival. Sale de los 505 preconstruidos y se elige por rareza, asi
+            // que darle una reliquia que anyade {B}{B}{B} a un rival mono-rojo
+            // seria darle una reliquia que no hace nada — o sea un jefe que
+            // parece llevar dos y lleva una, sin que nada falle ni se vea.
+            // Para TI si estan: ahi si se sabe (AscentRewards.colorsOf).
+            //
+            // Y desde el 05-11-2026, tampoco las MALDITAS: son un trato que
+            // eliges tu (mas fuerza a cambio de vida), no un premio para el
+            // rival. Ver AscentRelic#isCursed.
+            // Ni el ESCUDO: actua en tu run, no en la partida (AscentRelics#SHIELD).
+            if (!AscentRelics.growsHand(relic) && relic.getColors() == AscentRelics.COLOURLESS
+                    && !relic.isCursed() && !AscentRelics.isShield(relic)) {
+                pool.add(relic);
+            }
+        }
+        Collections.shuffle(pool, rnd);
+        for (final AscentRelic relic : pool) {
+            if (out.size() >= howMany) {
+                break;
+            }
+            final PaperCard card = AscentRelics.cardOf(relic);
+            if (card != null && !taken.contains(card.getName())) {
+                out.add(card);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Cuantas reliquias lleva el jefe de ese acto: <b>una en el acto 1</b>, dos
+     * despues.
+     *
+     * <h2>Por que el primero lleva una</h2>
+     *
+     * <p>Reportado jugando (05-09-2026): <i>"me destrozo, le toco una reliquia
+     * que le daba 3 manas incoloros al inicio y me hizo mucho snowball... el
+     * primer boss vamos a dejarle en una reliquia"</i>.
+     *
+     * <p>Y el motivo no es que dos sean muchas, es <b>cuando</b> caen. Las
+     * reliquias se sortean del catalogo entero sin mirar el acto, asi que al
+     * jefe del acto 1 le puede tocar una que multiplica su salida — y en el
+     * acto 1 el jugador todavia no tiene con que responder: lleva un mazo de
+     * once nodos y como mucho una reliquia propia. Dos tiradas son <b>el doble
+     * de probabilidad</b> de que salga justo la que decide la partida en el
+     * turno tres.
+     *
+     * <p>El jefe sigue siendo un jefe por lo demas: vez y media de vida, la
+     * ventaja de salida y un mazo un escalon por encima de su piso.
+     */
+    private static int bossRelics(final int act) {
+        return act <= 1 ? 1 : 2;
+    }
+
+    /** Las reliquias que lleva el jugador, ya como cartas. */
+    private static List<PaperCard> relicCards(final AscentRun run) {
+        final List<PaperCard> out = new ArrayList<>();
+        for (final AscentRelic relic : run.relics()) {
+            final PaperCard card = AscentRelics.cardOf(relic);
+            if (card != null) {
+                out.add(card);
+            }
+        }
+        return out;
+    }
+
+    /** El mismo mazo, mas su seccion de esquemas. */
+    private static Deck withSchemes(final Deck base, final CardPool schemes) {
+        final Deck copy = new Deck(base, base.getName());
+        copy.putSection(DeckSection.Schemes, schemes);
+        return copy;
+    }
+
+    // ------------------------------------------------------------------
+
+    private static int clampAct(final int act) {
+        return Math.max(1, Math.min(AscentRun.ACTS, act));
+    }
+
+    /**
+     * El sorteo de un nodo: la semilla de la run mezclada con la clave del nodo.
+     *
+     * <p>Sembrado a proposito. Con un {@code Random} suelto, salir del juego
+     * antes de entrar en el nodo y volver daria <b>otro</b> rival — o sea,
+     * tirar los dados hasta que salga uno comodo, que es justo lo que un
+     * roguelike no puede permitir.
+     */
+    private static Random rng(final AscentRun run, final AscentNode node) {
+        return new Random(nodeSeed(run, node));
+    }
+
+    /** El numero del que sale {@link #rng}: semilla, acto y clave del nodo. */
+    static long nodeSeed(final AscentRun run, final AscentNode node) {
+        long h = run.getSeed() * 31L + run.getAct();
+        for (final char c : node.key().toCharArray()) {
+            h = h * 31L + c;
+        }
+        return h;
+    }
+
+    /**
+     * Por que el jefe NO lleva esquemas de archienemigo.
+     *
+     * <h2>Los llevo tres dias y se quitaron el 03-09-2026</h2>
+     *
+     * <p>Reportado jugando, y sin medias tintas: <i>"el boss me ha reventado
+     * en turno 3, 0 chances... es imposible ganar a un boss"</i>. Y la razon
+     * de fondo la dio el propio jugador, que es la que hace que esto no sea
+     * una cuestion de afinar un numero: <b>Archienemigo esta disenyado para
+     * 3 contra 1</b>. Sus esquemas estan calibrados para partirse entre tres
+     * rivales que ademas tienen tres turnos por cada uno del archienemigo. En
+     * un 1c1 esa misma carta cae entera sobre una sola persona, y encima cada
+     * turno. No es un jefe dificil: es una partida que no se juega.
+     *
+     * <p>Bajarles la potencia no era una opcion — los esquemas son cartas del
+     * motor, no un parametro nuestro — y elegir "los suaves" habria sido
+     * inventar una lista a mano y mantenerla.
+     *
+     * <h2>Que hace jefe a un jefe ahora</h2>
+     *
+     * <p>Lo que ya tenia y no dependia de Archienemigo: el <b>doble de vida</b>
+     * ({@link #BOSS_LIFE}), <b>dos reliquias</b> —una sola en el acto 1, ver
+     * {@link #bossRelics}— en vez de una o ninguna
+     * ({@code relicsFor}), la <b>ventaja de salida</b> y —a partir de la
+     * Ascension 10— el <b>segundo aliento</b>. Y a eso se le anyade lo que
+     * pidio el jugador: un mazo <b>un escalon por encima</b> del que juegan los
+     * combates normales de su mismo piso ({@link #BOSS_DECK_EDGE}).
+     *
+     * <h2>Y de regalo, se fue un cuelgue</h2>
+     *
+     * <p>Sin esquemas no hay {@code SetInMotionEffect}, y por tanto no hay el
+     * fallo del motor que estaba tirando la partida a mitad del combate contra
+     * el jefe: {@code Player.setSchemeInMotion} pide el primer esquema del mazo
+     * <b>sin comprobar que quede alguno</b> y {@code GameAction.moveTo} revienta
+     * con el {@code null}. Se veia como <i>"en medio de la batalla con el boss
+     * me saca de la partida y me deja en el mapa"</i>. La red por si algo
+     * parecido vuelve por otro lado sigue puesta, y es {@code SafeAi}.
+     *
+     * <p>Se deja escrito y no se borra sin mas para que no se le ocurra a nadie
+     * volver a ponerlos: <b>el problema no era el ajuste, era el formato</b>.
+     */
+    private static void bossIsNotArchenemy() {
+        // Solo documentacion. Ver el javadoc.
+    }
+}

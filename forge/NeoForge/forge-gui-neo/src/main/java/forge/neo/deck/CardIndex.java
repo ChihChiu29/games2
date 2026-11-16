@@ -1,0 +1,211 @@
+package forge.neo.deck;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+
+import forge.item.PaperCard;
+import forge.model.FModel;
+import forge.neo.ascent.AscentRelics;
+
+/**
+ * El catalogo de cartas preparado para buscar deprisa.
+ *
+ * <p>Buscar sobre las cartas tal cual obliga a construir, <b>por cada tecla que
+ * se pulsa</b>, el nombre en minusculas y el texto de tipos de 33.000 cartas.
+ * Son decenas de miles de cadenas nuevas que se tiran acto seguido, y es lo que
+ * hace que un buscador de cartas se sienta pastoso.
+ *
+ * <p>Aqui eso se hace <b>una sola vez</b>: dos arrays paralelos con el nombre y
+ * el tipo ya en minusculas. A partir de ahi cada busqueda es recorrer arrays y
+ * hacer {@code contains}, sin reservar memoria.
+ *
+ * <p>Se trabaja sobre {@code getUniqueCards()} — una impresion por carta — y no
+ * sobre las 95.218 impresiones. Para montar un mazo da igual de que edicion sale
+ * el Sol Ring; cuando importa de verdad (cambiar el arte de una carta que ya
+ * llevas) se piden las impresiones de <i>esa</i> carta y solo de esa, que es
+ * instantaneo.
+ */
+final class CardIndex {
+
+    private static CardIndex instance;
+
+    private final PaperCard[] cards;
+    private final String[] names;
+    private final String[] types;
+
+    /**
+     * El nombre y el tipo TRADUCIDOS, o null si se juega en ingles.
+     *
+     * <p>Sin esto, jugando en castellano se busca "Anillo solar" y no sale
+     * nada: el indice solo tenia el nombre ingles, que es justamente el que ya
+     * no se ve en pantalla. Se construye solo cuando hay traduccion cargada, o
+     * sea que en ingles no cuesta ni memoria ni tiempo.
+     */
+    private final String[] translated;
+
+    /**
+     * La linea de tipo en ingles y traducida (null en ingles): lo unico que
+     * mira {@code t:} (SearchTerms). Hecho aqui para no reservar en cada tecla.
+     */
+    private final String[][] typeLines;
+
+    private CardIndex(final Collection<PaperCard> source) {
+        cards = withoutOurCustomCards(source);
+        names = new String[cards.length];
+        types = new String[cards.length];
+        final boolean localized =
+                !forge.neo.NeoLanguage.DEFAULT.equals(forge.neo.NeoLanguage.current());
+        translated = localized ? new String[cards.length] : null;
+        typeLines = new String[cards.length][];
+        for (int i = 0; i < cards.length; i++) {
+            names[i] = cards[i].getName().toLowerCase(Locale.ROOT);
+            types[i] = cards[i].getRules().getType().toString().toLowerCase(Locale.ROOT);
+            String typeShown = null;
+            if (localized) {
+                typeShown = forge.neo.card.CardText.typeOf(cards[i]).toLowerCase(Locale.ROOT);
+                translated[i] = forge.neo.card.CardText.nameOf(cards[i]).toLowerCase(Locale.ROOT)
+                        + " " + typeShown;
+            }
+            typeLines[i] = new String[] {types[i], typeShown};
+        }
+    }
+
+    /**
+     * Las cartas de {@code getUniqueCards()} sin las nuestras: las reliquias
+     * de Ascenso y el segundo aliento del jefe.
+     *
+     * <p><b>Hace falta de verdad, no es paranoia.</b> {@code AscentRelics}
+     * las registra con {@code AI:RemoveDeck:All}, que solo evita que un mazo
+     * ALEATORIO las incluya — no las saca de {@code getUniqueCards()}, que es
+     * de donde tira este catalogo. Nada mas registrarlas no aparecen, pero
+     * <b>si</b> en cuanto el motor reindexa la base entera: hasta Forge #11763
+     * pasaba en la primera partida, y hoy NeoForge no lo dispara, pero el
+     * proximo rebase puede (ver {@code AscentRelics.exposeInUniqueCardsForTest}).
+     * Sin este filtro, quien abriera el deck builder despues podria buscar
+     * "Crown of the Eternal" y metersela en un mazo de Commander de verdad.
+     */
+    private static PaperCard[] withoutOurCustomCards(final Collection<PaperCard> source) {
+        final Set<String> ours = AscentRelics.allCardNames();
+        if (ours.isEmpty()) {
+            return source.toArray(new PaperCard[0]);
+        }
+        final List<PaperCard> out = new ArrayList<>(source.size());
+        for (final PaperCard c : source) {
+            if (!ours.contains(c.getName())) {
+                out.add(c);
+            }
+        }
+        return out.toArray(new PaperCard[0]);
+    }
+
+    /**
+     * El indice, construido la primera vez que se pide.
+     *
+     * <p>Se construye tarde a proposito: arrancar una partida no tiene por que
+     * pagar el coste de preparar el deck builder.
+     */
+    /** Se tira: la impresion por defecto de las cartas ha cambiado (ver CardLibrary.invalidate). */
+    static synchronized void invalidate() {
+        instance = null;
+    }
+
+    static synchronized CardIndex get() {
+        if (instance == null) {
+            // Y las Atracciones y Contraptions, que el motor guarda con las
+            // cartas "variantes" (planos, esquemas...) y no en la base comun:
+            // sin ellas no se podia montar su mazo aparte (Discord, 07-11-2026,
+            // Myra the Magnificent). Los planos y los esquemas no: no van en un
+            // mazo que se monte aqui.
+            final List<PaperCard> all = new ArrayList<>(FModel.getMagicDb().getCommonCards().getUniqueCards());
+            for (final PaperCard c : FModel.getMagicDb().getVariantCards().getUniqueCards()) {
+                if (DeckEditor.extraSectionOf(c) != null) {
+                    all.add(c);
+                }
+            }
+            instance = new CardIndex(all);
+        }
+        return instance;
+    }
+
+    /**
+     * Un indice sobre un pool concreto: tu coleccion de la aventura.
+     *
+     * <p>No se cachea, y no hace falta: son unos cientos de cartas y el indice
+     * se construye en microsegundos. Ademas la coleccion CRECE — cada sobre que
+     * abres — asi que un indice cacheado se quedaria viejo justo despues del
+     * momento en el que mas ganas tienes de mirarla.
+     */
+    static CardIndex of(final Collection<PaperCard> cards) {
+        return new CardIndex(cards);
+    }
+
+    int size() {
+        return cards.length;
+    }
+
+    PaperCard cardAt(final int i) {
+        return cards[i];
+    }
+
+    /**
+     * Si la carta numero {@code i} encaja con lo buscado.
+     *
+     * <p>Se mira el nombre y tambien el tipo, que es como se busca cuando no
+     * recuerdas el nombre exacto: "elfo", "instant", "equipment".
+     */
+    boolean matches(final int i, final String lowerQuery) {
+        // Cada palabra, en cualquier orden y en cualquiera de los campos
+        // (SearchTerms): "elf warrior" encuentra el tipo entero.
+        return lowerQuery.isEmpty() || SearchTerms.matchesTyped(lowerQuery, typeLines[i],
+                names[i], types[i], translated == null ? null : translated[i]);
+    }
+
+    /** Si el nombre EMPIEZA por lo buscado, para poner esas primero. */
+    boolean startsWith(final int i, final String lowerQuery) {
+        return names[i].startsWith(lowerQuery)
+                || (translated != null && translated[i].startsWith(lowerQuery));
+    }
+
+    /**
+     * Igual que {@link #matches} pero mirando tambien el TEXTO DE REGLAS.
+     *
+     * <p>Es como se busca cuando no sabes el nombre de nada: "sacrifice",
+     * "flying", "draw a card". Buscar asi encuentra las cartas que HACEN algo,
+     * que es lo que se pregunta al montar un mazo.
+     */
+    boolean matchesText(final int i, final String lowerQuery) {
+        if (lowerQuery.isEmpty()) {
+            return true;
+        }
+        // "flying, vigilance" encuentra lo que tenga las dos, en el orden que
+        // sea y aunque haya mas cosas en medio (SearchTerms, 16-10-2026).
+        return SearchTerms.matchesTyped(lowerQuery, typeLines[i], names[i], types[i],
+                translated == null ? null : translated[i], rulesText()[i]);
+    }
+
+    /**
+     * El texto de reglas de todas las cartas, en minusculas.
+     *
+     * <p>Se construye la PRIMERA VEZ que alguien busca por texto y no antes:
+     * son 33.000 cadenas largas, bastante mas caras que los nombres, y la
+     * mayoria de las busquedas no lo necesitan. Quien no encienda el filtro no
+     * paga nada.
+     */
+    private synchronized String[] rulesText() {
+        if (texts == null) {
+            final String[] built = new String[cards.length];
+            for (int i = 0; i < cards.length; i++) {
+                final String oracle = cards[i].getRules() == null ? ""
+                        : cards[i].getRules().getOracleText();
+                built[i] = oracle == null ? "" : oracle.toLowerCase(Locale.ROOT);
+            }
+            texts = built;
+        }
+        return texts;
+    }
+
+    private String[] texts;
+}

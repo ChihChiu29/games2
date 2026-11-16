@@ -1,0 +1,6192 @@
+package forge.neo.ui;
+
+import forge.neo.NeoText;
+import forge.neo.card.CardText;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+
+import forge.game.card.CardView;
+import forge.game.phase.PhaseType;
+import forge.game.player.PlayerView;
+import forge.game.spellability.StackItemView;
+import forge.neo.card.CardNode;
+import forge.neo.tutorial.Gesture;
+import javafx.geometry.Bounds;
+import javafx.geometry.Insets;
+import javafx.geometry.Point2D;
+import javafx.geometry.Pos;
+import javafx.scene.Node;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
+import javafx.scene.control.ScrollPane;
+import javafx.scene.input.MouseEvent;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Pane;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
+import javafx.scene.shape.Line;
+
+/**
+ * La mesa de juego, con la disposicion de Arena.
+ *
+ * <pre>
+ *   +-----------------------------------------------+---------+
+ *   | barra del oponente (vida, zonas, mana)        |         |
+ *   |   apoyo del oponente (tierras, artefactos...) |  fases  |
+ *   |   criaturas del oponente                      |         |
+ *   |  =========== linea de combate ==============  |  stack  |
+ *   |   tus criaturas                               |         |
+ *   |   tu apoyo                                    | prompt  |
+ *   | tu barra                                      |         |
+ *   |   tu mano en abanico                          | detalle |
+ *   +-----------------------------------------------+---------+
+ * </pre>
+ *
+ * <p>El reparto vertical se hace a mano en {@link #layoutChildren()} en vez de
+ * con un VBox. Con contenedores automaticos, el alto que piden las cartas hace
+ * que las zonas de abajo (barra y mano) acaben fuera de la ventana. Aqui se
+ * reparte un presupuesto de alto fijo: barras y mano cogen lo suyo y el resto
+ * se parte entre los dos campos. Asi es imposible que se desborde, sea cual sea
+ * la resolucion o el numero de permanentes.
+ */
+public class TableScreen extends Pane {
+
+    private static final double LINE_H = 14;
+    private static final double PAD = 10;
+
+    private final double cardWidth;
+    private final double sideWidth;
+
+    private final OpponentTabs opponentTabs = new OpponentTabs();
+    private final PlayerBar opponentBar = new PlayerBar(true);
+    private final PlayerBar selfBar = new PlayerBar(false);
+    private final PlayerField opponentField;
+    private final PlayerField selfField;
+
+    /**
+     * Los asientos de rival que se ven a la vez.
+     *
+     * <p>El asiento 0 es SIEMPRE {@link #opponentBar} / {@link #opponentField},
+     * los de toda la vida. Con un solo asiento — que es el modo pestanyas de
+     * siempre — estas listas tienen un elemento y todo el codigo recorre
+     * exactamente lo que recorria antes: el modo nuevo no puede romper el
+     * viejo porque no cambia su camino, solo anyade asientos al lado.
+     *
+     * <p>Los crea y los destruye {@link #setOpponentSeats(int)}.
+     */
+    private final List<PlayerBar> oppBars = new ArrayList<>();
+    private final List<PlayerField> oppFields = new ArrayList<>();
+
+    /** Separadores entre mesas de rival. Solo con mas de un asiento. */
+    private final List<Line> seatDividers = new ArrayList<>();
+
+    /**
+     * Cuanto del alto libre se lleva la fila de rivales cuando hay varios.
+     *
+     * <p>Con un solo rival el reparto es mitad y mitad, que es lo natural
+     * cuando enfrente hay una sola mesa. Con tres, la fila de arriba lleva tres
+     * mesas y la de abajo una, asi que se le da un poco mas — pero solo un
+     * poco: medido, esas mesas quedan limitadas por el ANCHO y no por el alto,
+     * asi que darles mas altura no agranda ni un pixel las cartas y en cambio
+     * se lo quita a la tuya, que si lo aprovecha.
+     */
+    private static final double MULTI_OPP_SHARE = 0.52;
+
+    /** Hueco entre dos mesas de rival contiguas. */
+    private static final double SEAT_GAP = 10;
+    private final HandFan hand;
+    /** La carta de la mano que se esta mirando con el dedo. Ver {@link #installDragGestures}. */
+    private final CardNode handPeek;
+    private final CommandZone commandZone;
+    private final PhaseRail phaseRail = new PhaseRail();
+    private final CardDetailPanel detail;
+    /** El hueco que empuja los botones al fondo de la columna. El panel de detalle ocupa su sitio. */
+    private final Region sideSpace = new Region();
+    private final VBox stackBox = new VBox(6);
+    private final ActionBar actionBar = new ActionBar();
+    private final CombatOverlay combatOverlay = new CombatOverlay();
+    /** Los destellos de "esto acaba de recibir". Ver {@link ImpactLayer}. */
+    private final ImpactLayer impactLayer = new ImpactLayer();
+    private final Overlay overlay = new Overlay();
+    private final PromptBanner promptBanner;
+    private final TurnBanner turnBanner;
+    /** La moneda del sorteo y de las cartas que lanzan monedas. Ver CoinFlip. */
+    private final CoinFlip coinFlip = new CoinFlip();
+    /** Los dados de las cartas que los tiran. Ver DiceRoll. */
+    private final DiceRoll diceRoll = new DiceRoll();
+
+    /**
+     * El boton del registro.
+     *
+     * <p>Discreto y en una esquina a proposito: se consulta de vez en cuando y
+     * no puede robarle sitio a la mesa. Lleva un punto cuando ha pasado algo que
+     * te afecta y todavia no lo has abierto.
+     */
+    private final Button logButton = new Button(NeoText.get("table.log"));
+
+    /**
+     * El panel «Turno» (lo que lleva cada jugador este turno), justo encima
+     * del registro: la misma esquina muerta y la misma clase de consulta.
+     * Apagado hasta que NeoMatchUI lo conecta, que es quien tiene la partida.
+     * Ver {@link TurnStatsView}.
+     */
+    private final Button turnButton = new Button(NeoText.get("turnStats.button"));
+
+    /**
+     * Ver UN rival o TODOS, sin ir a Ajustes (Discord, 13-11-2026: «a quick
+     * button to switch 1v1 and all players view»). El mismo ajuste
+     * ({@code NeoSettings.ALL_BOARDS}); solo sale con dos o mas rivales en pie
+     * (lo enciende {@code TableBinder}), en la columna de la esquina muerta
+     * de abajo a la izquierda: no le quita sitio a nada.
+     */
+    private final Button viewButton = new Button();
+    private Runnable onViewToggled = () -> { };
+
+    /** Lo llama el binder en cada repintado: si se ofrece el boton y que dice. */
+    public void setViewToggle(final boolean available, final boolean allNow, final Runnable afterToggle) {
+        onViewToggled = afterToggle == null ? () -> { } : afterToggle;
+        viewButton.setText(NeoText.get(allNow ? "table.view.one" : "table.view.all"));
+        if (viewButton.isVisible() != available) {
+            viewButton.setVisible(available);
+            requestLayout();
+        }
+    }
+
+    /**
+     * El boton de la pausa, <b>apagado de fabrica</b>.
+     *
+     * <p>En una partida normal no sale: Escape abre la pausa y eso lo ensenya
+     * el tutorial, que es por donde entra todo el mundo la primera vez. Lo
+     * enciende quien no tiene esa puerta — la <b>Aventura</b>, que arranca en
+     * su propio proceso y a la que se llega desde el mapa de Forge sin haber
+     * pasado por ningun tutorial nuestro.
+     *
+     * <p>Reportado en Reddit el 22-09-2026: <i>"I don't seem to find a concede
+     * button in the battle screen for adventure mode"</i>. Estaba — en Escape —
+     * pero un control que hay que adivinar es un control que no existe.
+     *
+     * <p>Va en la misma esquina muerta que el registro y no toca la barra de
+     * acciones: esto no actua sobre la partida, abre una capa (principio 1).
+     */
+    private final Button menuButton = new Button(NeoText.get("table.menu"));
+
+    /**
+     * Grabar y repetir una macro con el raton, como en el Forge de siempre.
+     * Pedido por quien pidio las macros: con solo teclas no llego a usarlas.
+     * Encima del registro, en la misma esquina muerta.
+     */
+    private final Button macroRecordButton = new Button(NeoText.get("macro.record"));
+    private final Button macroPlayButton = new Button(NeoText.get("macro.play"));
+
+    /** "Scryfall nos ha limitado, vuelve en Ns." Ver {@link ImageCooldownBadge}. */
+    private final ImageCooldownBadge cooldownBadge = new ImageCooldownBadge();
+
+    /**
+     * Capa aparte para el menu de pausa.
+     *
+     * <p>El motor puede estar bloqueado esperando una respuesta justo cuando se
+     * pulsa Escape. Con una sola capa, abrir el menu se llevaria por delante ese
+     * dialogo y la partida se quedaria colgada para siempre.
+     */
+    private final Overlay menuOverlay = new Overlay();
+
+    /**
+     * La carta ampliada del click derecho.
+     *
+     * <p>Capa propia y por encima de todo: se abre y se cierra constantemente
+     * mientras lees la mesa, y no puede interferir con lo que el motor este
+     * esperando ni con el menu de pausa.
+     */
+    private final Overlay zoomOverlay = new Overlay();
+
+    /** Cuando se paso de carta con la rueda: un giro del trackpad son decenas de avisos. */
+    private long lastZoomStep;
+
+    /**
+     * <b>La cortina del hot seat</b>: varias personas en el mismo aparato, y al
+     * pasar el turno de decidir a otra se tapa la mesa entera hasta que esa
+     * persona dice que esta delante. Sin ella, al girar la mesa se veia un
+     * instante la mano del otro. Por encima de TODO, tambien de los dialogos
+     * del motor: la pregunta se queda debajo esperando, no se pierde.
+     */
+    private final Overlay curtain = new Overlay();
+    private volatile boolean curtainUp;
+
+    /** Tapa la mesa: "Le toca a X". Se quita con su boton (o Intro / Espacio). */
+    public void showCurtain(final String who) {
+        final javafx.scene.control.Label title = new javafx.scene.control.Label(
+                forge.neo.NeoText.get("hotseat.curtain.title", who));
+        title.getStyleClass().add("hotseat-curtain-title");
+        title.setWrapText(true);
+        final javafx.scene.control.Label hint = new javafx.scene.control.Label(
+                forge.neo.NeoText.get("hotseat.curtain.hint", who));
+        hint.getStyleClass().add("hotseat-curtain-hint");
+        hint.setWrapText(true);
+        final javafx.scene.control.Button go = new javafx.scene.control.Button(
+                forge.neo.NeoText.get("hotseat.curtain.go", who));
+        go.getStyleClass().addAll("btn-primary", "btn-play");
+        go.setOnAction(e -> hideCurtain());
+        final javafx.scene.layout.VBox box = new javafx.scene.layout.VBox(18, title, hint, go);
+        box.setAlignment(javafx.geometry.Pos.CENTER);
+        box.setMaxWidth(forge.neo.ui.UiScale.px(720));
+        curtain.show(box);
+        curtainUp = true;
+        javafx.application.Platform.runLater(go::requestFocus);
+        // Solo pruebas: -Dneo.hotseat.autoReveal=ms la quita sola, para poder
+        // capturar lo que hay detras sin clicar (y jugar con --autopilot).
+        final int auto = Integer.getInteger("neo.hotseat.autoReveal", 0);
+        if (auto > 0) {
+            final javafx.animation.PauseTransition later =
+                    new javafx.animation.PauseTransition(javafx.util.Duration.millis(auto));
+            later.setOnFinished(e -> {
+                if (curtain.getChildren().contains(box)) {
+                    hideCurtain();
+                }
+            });
+            later.play();
+        }
+    }
+
+    public void hideCurtain() {
+        curtainUp = false;
+        curtain.hide();
+    }
+
+    /** Si la cortina esta puesta: el teclado de la partida no actua debajo. */
+    public boolean isCurtainUp() {
+        return curtainUp;
+    }
+
+    /**
+     * El tapete, detras de todo.
+     *
+     * <p>Y encima, un velo oscuro. No es decoracion: la mesa tiene que ser
+     * oscura para que el arte de las cartas destaque (seccion 6 de las notas de diseño),
+     * y una foto a pleno color compite con las cartas justo en lo unico que no
+     * puede competir. Con el velo, el tapete se nota y las cartas siguen
+     * mandando.
+     *
+     * <p>Los dos son transparentes al raton: la mesa se clica constantemente
+     * para responder al motor y un fondo que se coma los clicks colgaria la
+     * partida.
+     */
+    /**
+     * El estado del jugador, al pasar el raton por su barra.
+     *
+     * <p>Lo compone el motor entero y traducido ({@code PlayerView.getDetails}
+     * mas {@code getPlayerCommanderInfo}): vidas, veneno, cartas en mano y tu
+     * maximo, tierras jugadas, robadas este turno, turnos extra, el impuesto de
+     * cada comandante y el desglose del dano de comandante.
+     *
+     * <p>Al pasar el raton y NO al clicar: el click de una barra ya significa
+     * "elijo a este jugador" y el motor lo necesita — quien empieza, a quien
+     * atacas, a quien apunta un hechizo. Y transparente al raton, para no
+     * robarle el hover a la propia barra.
+     */
+    private final Label playerDetails = new Label();
+
+    private final javafx.scene.image.ImageView playmat = new javafx.scene.image.ImageView();
+    private final javafx.scene.shape.Rectangle playmatVeil = new javafx.scene.shape.Rectangle();
+
+    private final ArenaBackdrop arenaBackdrop = new ArenaBackdrop();
+    private final VBox side;
+
+    // ---------------------------------------------------------------
+    // La columna de la derecha, plegada (itch.io, 04-10-2026)
+    // ---------------------------------------------------------------
+    //
+    // "is there a way for the stack column on the right dont use that much
+    // space? ... so little space to check whenever playing 4 people". Plegada,
+    // la mesa se queda con TODO el ancho, como en Arena: el texto y los botones
+    // pasan a la barra del jugador (que tiene sitio de sobra a la derecha) y el
+    // stack a una chapa a su lado que se despliega al clicarla. Los botones
+    // siguen en UN solo sitio (principio 1): se mueven, no se duplican. SOLO
+    // desde Ajustes y apagado de fabrica (NeoSettings.SIDE_FOLDED): sin el
+    // ajuste la mesa es exactamente la de siempre, sin un boton nuevo.
+    private boolean folded;
+    private boolean slimBars;
+    private final Button stackChip = new Button();
+    /** Plegada: el stack entero, desplegado encima de la barra. */
+    private boolean stackPeek;
+    private final Line combatLine = new Line();
+
+    private final List<CardNode> extraNodes = new ArrayList<>();
+    private Consumer<CardNode> onCardHover;
+
+    // ---------------------------------------------------------------
+    // Tutorial: la banda de arriba y el cerco que senyala donde mirar
+    // ---------------------------------------------------------------
+
+    /**
+     * La banda del tutorial. Null salvo mientras se juega una leccion.
+     *
+     * <p>Ocupa sitio de verdad en el reparto de alto (no flota sobre la mesa)
+     * porque casi todo lo que el tutorial pide se contesta clicando cartas.
+     * Ver {@link CoachPanel}.
+     */
+    private CoachPanel coach;
+
+    /**
+     * El cerco que rodea la parte de la que se esta hablando.
+     *
+     * <p>Transparente al raton, siempre: el paso suele consistir en clicar
+     * justo lo que hay dentro del cerco.
+     */
+    private final javafx.scene.shape.Rectangle spotlight =
+            new javafx.scene.shape.Rectangle();
+
+    private String spotName;
+
+    /** Quien se entera de los gestos de la interfaz. Solo lo usa el tutorial. */
+    private Consumer<String> gestureSpy;
+
+    public TableScreen(final double cardWidth, final double sideWidth) {
+        // Arabe (de derecha a izquierda): la MESA no se espeja, es geometria
+        // de juego. Ver Rtl.
+        Rtl.keepLtr(this);
+        this.cardWidth = cardWidth;
+        // La IA pensando: la mesa que se ve es la que atiende el aviso del
+        // motor, y al salir de la escena se para (principio 11).
+        sceneProperty().addListener((o, was, is) -> {
+            if (is != null) {
+                live = new java.lang.ref.WeakReference<>(this);
+            } else {
+                aiThinking.stop();
+            }
+        });
+        this.sideWidth = sideWidth;
+        this.hand = new HandFan(cardWidth * 1.12);
+        this.handPeek = new CardNode(cardWidth * 2.4);
+        handPeek.setHoverEnabled(false);
+        handPeek.setRotationEnabled(false);
+        // Va cambiando de carta: mientras llega la imagen de la nueva, mejor
+        // su cara dibujada que el arte de la anterior (ver bigCard).
+        handPeek.setBlankWhileLoading(true);
+        handPeek.setMouseTransparent(true);
+        handPeek.setManaged(false);
+        handPeek.setVisible(false);
+        handPeek.getStyleClass().add("hand-peek");
+        this.commandZone = new CommandZone(cardWidth * 1.12);
+        this.detail = new CardDetailPanel(sideWidth - 52);
+        this.opponentField = new PlayerField(cardWidth * 0.92, true);
+        this.selfField = new PlayerField(cardWidth, false);
+
+        getStyleClass().add("table-root");
+
+        opponentField.setOnCardHover(this::hovered);
+        selfField.setOnCardHover(this::hovered);
+        opponentField.setOnCardClick(this::cardClicked);
+        selfField.setOnCardClick(this::cardClicked);
+        opponentField.setOnStackCountClick(this::stackCountClicked);
+        selfField.setOnStackCountClick(this::stackCountClicked);
+        opponentField.setOnAttachPeek((host, carried) -> showAttached(host, carried, false));
+        selfField.setOnAttachPeek((host, carried) -> showAttached(host, carried, true));
+
+        // El asiento 0 son los de siempre. Ver oppBars/oppFields.
+        oppBars.add(opponentBar);
+        oppFields.add(opponentField);
+
+        combatLine.getStyleClass().add("combat-line");
+        hand.getStyleClass().add("hand-area");
+
+        final Label stackTitle = new Label(NeoText.get("table.stack"));
+        stackTitle.getStyleClass().add("caption");
+        stackBox.getStyleClass().add("stack-box");
+        stackBox.setPadding(new Insets(8, 10, 8, 10));
+        final Label stackEmpty = new Label(NeoText.get("table.stack.empty"));
+        stackEmpty.getStyleClass().add("hud-sub");
+        stackBox.getChildren().addAll(stackTitle, stackEmpty);
+
+        // La columna: fases, stack y botones. El panel de detalle NO esta.
+        //
+        // Ocupaba un tercio de la columna para ensenyar una carta que ya se ve
+        // en la mesa, y se la robaba al stack — que es de lo mas importante de
+        // una partida de Magic. Para leer una carta esta el click derecho, que
+        // funciona en cualquier sitio y no le quita sitio a nada.
+        //
+        // El objeto sigue existiendo (lo usan showDetail y las maquetas), pero
+        // no esta en la escena: no ocupa, no pinta y no decodifica imagenes.
+        VBox.setVgrow(sideSpace, Priority.ALWAYS);
+        side = new VBox(10, stackBox, sideSpace, actionBar);
+        side.getStyleClass().add("arena-sidebar");
+        side.setPadding(new Insets(PAD));
+        applyDetailSetting();
+
+        stackChip.getStyleClass().add("stack-chip");
+        stackChip.setFocusTraversable(false);
+        stackChip.setVisible(false);
+        stackChip.setOnAction(e -> {
+            stackPeek = !stackPeek;
+            requestLayout();
+        });
+
+        commandZone.setOnCardHover(this::hovered);
+        // Un click en el comandante lo lanza, como una carta de la mano.
+        // CommandZone tenia su setOnCardClick desde el principio, pero nadie lo
+        // conectaba: solo se podia lanzar ARRASTRANDOLO (itch.io, 28-09-2026).
+        commandZone.setOnCardClick(this::cardClicked);
+
+        promptBanner = new PromptBanner(cardWidth * 1.55);
+        turnBanner = new TurnBanner();
+        logButton.getStyleClass().add("log-button");
+        for (final Button b : List.of(macroRecordButton, macroPlayButton)) {
+            b.getStyleClass().addAll("log-button", "macro-button");
+            // Sin foco: el Espacio siguiente es un atajo de partida, no "pulsar esto".
+            b.setFocusTraversable(false);
+        }
+        // Solo sale cuando hay una persona jugando (lo enciende NeoMatchUI al
+        // conectarlo): en una partida vista o una maqueta no haria nada.
+        macroRecordButton.setVisible(false);
+        macroPlayButton.setVisible(false);
+        // El chat, solo en red: lo enciende enableChat.
+        chatButton.getStyleClass().add("log-button");
+        turnButton.getStyleClass().add("log-button");
+        turnButton.setFocusTraversable(false);
+        turnButton.setVisible(false);
+        viewButton.getStyleClass().add("log-button");
+        viewButton.setFocusTraversable(false);
+        viewButton.setVisible(false);
+        viewButton.setTooltip(new javafx.scene.control.Tooltip(NeoText.get("table.view.tip")));
+        viewButton.setOnAction(e -> {
+            forge.neo.NeoSettings.setBool(forge.neo.NeoSettings.ALL_BOARDS,
+                    !forge.neo.NeoSettings.getBool(forge.neo.NeoSettings.ALL_BOARDS, false));
+            forge.neo.NeoSettings.save();
+            onViewToggled.run();
+        });
+        chatButton.setFocusTraversable(false);
+        chatButton.setVisible(false);
+        chatButton.setOnAction(e -> openChat());
+        // La pausa, solo donde no hay tutorial que ensenye Escape: la enciende
+        // enablePauseButton. Sin foco, como los demas de la esquina: el
+        // Espacio siguiente es un atajo de partida, no "pulsar esto".
+        menuButton.getStyleClass().add("log-button");
+        menuButton.setFocusTraversable(false);
+        menuButton.setVisible(false);
+
+        playerDetails.getStyleClass().add("player-details");
+        playerDetails.setWrapText(true);
+        playerDetails.setMouseTransparent(true);
+        playerDetails.setVisible(false);
+        playerDetails.setManaged(false);
+        playerDetails.setMaxWidth(UiScale.px(420));
+        playerDetails.setMinHeight(Region.USE_PREF_SIZE);
+        hoverDetails(opponentBar, true);
+        hoverDetails(selfBar, false);
+        // -Dneo.playerDetails.hover=N: a los 10 s el raton "entra" en la barra
+        // del rival N (0 = el primero), para capturar su estado con las mesas
+        // en fila sin raton.
+        final Integer hoverAt = Integer.getInteger("neo.playerDetails.hover");
+        if (hoverAt != null) {
+            final javafx.animation.PauseTransition later =
+                    new javafx.animation.PauseTransition(javafx.util.Duration.seconds(10));
+            later.setOnFinished(e -> {
+                if (hoverAt >= 0 && hoverAt < oppBars.size()
+                        && oppBars.get(hoverAt).getOnMouseEntered() != null) {
+                    oppBars.get(hoverAt).getOnMouseEntered().handle(null);
+                    System.out.println("[detalles] raton sobre el rival " + hoverAt + ": "
+                            + (playerDetails.isVisible() ? "sale" : "NO sale"));
+                }
+            });
+            later.play();
+        }
+
+        playmat.setPreserveRatio(false);
+        playmat.setMouseTransparent(true);
+        playmatVeil.setMouseTransparent(true);
+        playmatVeil.setFill(javafx.scene.paint.Color.web("#0B0E13", 0.62));
+        getChildren().addAll(arenaBackdrop, playmat, playmatVeil);
+        applyPlaymat();
+
+        // El area de juego va dentro de un visor que se puede acercar y
+        // arrastrar. Son DOS nodos y hacen falta los dos: el recorte tiene que
+        // vivir en un nodo SIN transformar (en JavaFX el clip se transforma con
+        // el nodo, asi que un recorte en el mismo sitio que la escala crece con
+        // ella y deja de recortar) y la escala en el de dentro.
+        board.getChildren().addAll(opponentField, combatLine, selfField);
+        viewport.getChildren().add(board);
+        viewport.setClip(viewportClip);
+        viewport.setPickOnBounds(false);
+        board.setPickOnBounds(false);
+
+        spotlight.getStyleClass().add("coach-spot");
+        spotlight.setMouseTransparent(true);
+        spotlight.setVisible(false);
+        spotlight.setManaged(false);
+        spotlight.setArcWidth(14);
+        spotlight.setArcHeight(14);
+        spotlight.setFill(javafx.scene.paint.Color.TRANSPARENT);
+
+        getChildren().addAll(opponentTabs, opponentBar, viewport,
+                selfBar, hand, commandZone, phaseRail, side, combatOverlay, impactLayer, logButton, turnButton, viewButton, menuButton, chatButton, macroRecordButton, macroPlayButton, cooldownBadge,
+                stackChip, promptBanner, notices, turnBanner, coinFlip, diceRoll, playerDetails, zoomBadge, macroBadge, spotlight,
+                handPeek, overlay, menuOverlay, zoomOverlay, curtain);
+        curtain.getStyleClass().add("hotseat-curtain");
+
+        // Se cierra con un click en cualquier sitio, como en Arena.
+        //
+        // Y con un FILTRO, no solo con el click de fondo. El hueco que rodea a
+        // la carta dentro de la capa lo ocupa un contenedor sin fondo, y un
+        // Region sin fondo no se puede clicar: ahi el click no llegaba ni a la
+        // carta ni al fondo de la capa, asi que parecia que solo cerraba
+        // clicando la carta. Un filtro en la capa entera lo caza pase lo que
+        // pase, y no hace falta acertar con la geometria.
+        zoomOverlay.setOnBackgroundClick(this::hideZoom);
+        // Las dos capas que el jugador abre A PROPOSITO para dejar de mirar la
+        // mesa: la carta ampliada y el menu de pausa. Mientras alguna este
+        // puesta, el motor se para (NeoMatchUI.holdWhileReading lee esto desde
+        // SU hilo, de ahi el volatile).
+        //
+        // El espejo cuelga de visibleProperty y NO se pone a mano en showZoom
+        // y hideZoom, que es lo obvio y lo que se rompe: si un dia algo mas
+        // oculta la capa por otro camino, la bandera se quedaria encendida y
+        // eso es la partida congelada para siempre. Colgada de la propiedad,
+        // cualquier camino que la oculte la apaga.
+        final javafx.beans.value.ChangeListener<Boolean> watchPause =
+                (o, was, is) -> playerReading =
+                        zoomOverlay.isShowing() || menuOverlay.isShowing();
+        zoomOverlay.visibleProperty().addListener(watchPause);
+        menuOverlay.visibleProperty().addListener(watchPause);
+        // La carta grande tambien en lo que se abre encima (Discord, 25-10-2026:
+        // "activated also when there are pop outs, e.g. when looking at the
+        // graveyard or when scrying"): las cartas de los dialogos y de las
+        // zonas no pasan por hovered(), asi que se mira aqui, en sus dos capas.
+        final javafx.event.EventHandler<MouseEvent> popOutHover = e -> {
+            final CardNode n = cardNodeAt(e.getTarget(), (Node) e.getSource());
+            if (n != null) {
+                showBigCard(n);
+            }
+        };
+        overlay.addEventFilter(MouseEvent.MOUSE_ENTERED_TARGET, popOutHover);
+        menuOverlay.addEventFilter(MouseEvent.MOUSE_ENTERED_TARGET, popOutHover);
+        // Los dialogos de la partida se pueden apartar para mirar la mesa: lo
+        // que eliges con un tutor depende de lo que hay en ella. Ver Overlay.
+        overlay.setPeekable(forge.neo.NeoText.get("overlay.peek"),
+                forge.neo.NeoText.get("overlay.back"));
+        // Mirar, no jugar: mientras el dialogo esta apartado, el click
+        // izquierdo sobre una carta, un jugador o el boton de OK le llegaria
+        // al motor como respuesta, y el motor espera la del dialogo. Solo
+        // pasa lo que ensenya: abrir zonas, el registro, las pestanyas de
+        // rival y la pastilla de volver. El derecho (ampliar) no se toca.
+        final javafx.event.EventHandler<MouseEvent> peekGuard = e -> {
+            if (!overlay.isPeeking() || e.getButton() == javafx.scene.input.MouseButton.SECONDARY) {
+                return;
+            }
+            final Object t = e.getTarget();
+            if (isInside(t, overlay) || isInside(t, menuOverlay) || isInside(t, zoomOverlay)
+                    || isInside(t, logButton) || isInside(t, turnButton) || isInside(t, viewButton) || isInside(t, menuButton)
+                    || isInside(t, chatButton) || isInside(t, opponentTabs)
+                    || isZoneOpener(t)) {
+                return;
+            }
+            e.consume();
+        };
+        addEventFilter(MouseEvent.MOUSE_PRESSED, peekGuard);
+        addEventFilter(MouseEvent.MOUSE_RELEASED, peekGuard);
+        addEventFilter(MouseEvent.MOUSE_CLICKED, peekGuard);
+        // EXCEPTO sobre un control de verdad: el "Ver el texto actual" de
+        // Deadpool (y el resto del panel de estado que compone CardZoom) vive
+        // DENTRO de esta capa, y un filtro que se traga todo se adelanta a su
+        // propio boton. Ver CardZoom.isInteractiveTarget.
+        zoomOverlay.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> {
+            if (CardZoom.isInteractiveTarget(e.getTarget())) {
+                return;
+            }
+            e.consume();
+            hideZoom();
+        });
+        // Con serie (una carta de un dialogo o un visor de zona), la rueda y
+        // las flechas pasan a la de al lado. Ver showZoom(List, int).
+        zoomOverlay.addEventFilter(javafx.scene.input.ScrollEvent.SCROLL, e -> {
+            if (zoomRing.size() <= 1 || e.getDeltaY() == 0) {
+                return;
+            }
+            e.consume();
+            final long now = System.currentTimeMillis();
+            if (now - lastZoomStep < 90) {
+                return;
+            }
+            lastZoomStep = now;
+            stepZoom(e.getDeltaY() < 0 ? 1 : -1);
+        });
+        addEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, e -> {
+            if (!zoomOverlay.isShowing() || zoomRing.size() <= 1) {
+                return;
+            }
+            switch (e.getCode()) {
+                case RIGHT, DOWN -> {
+                    e.consume();
+                    stepZoom(1);
+                }
+                case LEFT, UP -> {
+                    e.consume();
+                    stepZoom(-1);
+                }
+                default -> {
+                }
+            }
+        });
+
+        combatOverlay.setLocator(this::boundsOf);
+        impactLayer.setLocator(this::impactBoundsOf);
+        // Se coloca a mano en layoutChildren; sin esto, cada fotograma de un
+        // destello pediria recolocar la mesa entera.
+        impactLayer.setManaged(false);
+        opponentBar.setOnZoneClicked(this::showZone);
+        opponentBar.setOnCommanderHover(this::hovered);
+        selfBar.setOnZoneClicked(this::showZone);
+        // Las pilas grandes de la mesa abren el mismo visor que el contador
+        // pequenyo de la barra. Son lo que de verdad se mira — estan en el campo
+        // de batalla y son grandes — asi que tienen que responder igual.
+        opponentField.setOnZoneClicked(this::showZone);
+        selfField.setOnZoneClicked(this::showZone);
+        // Antes que los gestos de carta: un arrastre de mesa se traga el
+        // evento, y asi no empieza ademas a arrastrar la carta de debajo.
+        installBoardZoom();
+        installDragGestures();
+    }
+
+    // ---------------------------------------------------------------
+    // Layout: presupuesto de alto explicito
+    // ---------------------------------------------------------------
+
+    /**
+     * Pliega o despliega la columna de la derecha. Plegada, el stack y la barra
+     * de botones salen de la columna y van a la mesa (ver el campo
+     * {@code folded}); desplegada, vuelven exactamente donde estaban.
+     */
+    private void setFolded(final boolean on) {
+        folded = on;
+        stackPeek = false;
+        if (on) {
+            side.getChildren().removeAll(stackBox, actionBar);
+            final int at = getChildren().indexOf(promptBanner);
+            getChildren().addAll(at < 0 ? getChildren().size() : at, List.of(stackBox, actionBar));
+            stackBox.getStyleClass().add("stack-floating");
+            actionBar.setInline(true);
+            side.setVisible(false);
+            stackChip.setVisible(true);
+        } else {
+            getChildren().removeAll(stackBox, actionBar);
+            stackBox.getStyleClass().remove("stack-floating");
+            stackBox.setVisible(true);
+            side.getChildren().add(0, stackBox);
+            side.getChildren().add(actionBar);
+            actionBar.setInline(false);
+            side.setVisible(true);
+            stackChip.setVisible(false);
+            selfBar.setRightReserve(0);
+        }
+        refreshStackChip();
+    }
+
+    /** "STACK · 2" en la chapa, encendida mientras hay algo que resolver. */
+    private void refreshStackChip() {
+        stackChip.setText(stackSize == 0 ? NeoText.get("table.stack")
+                : NeoText.get("table.stack.count", stackSize));
+        stackChip.pseudoClassStateChanged(ACTIVE_STACK, stackSize > 0);
+        if (stackSize == 0) {
+            stackPeek = false;
+        }
+    }
+
+    private static final javafx.css.PseudoClass ACTIVE_STACK =
+            javafx.css.PseudoClass.getPseudoClass("active");
+
+    /**
+     * Los dos ajustes de sitio (columna plegada y barras compactas), leidos en
+     * cada reparto: asi se notan en el acto al cambiarlos en Ajustes, sin
+     * referencias a esta mesa desde fuera. Solo se toca algo si han cambiado.
+     */
+    private void syncSpaceSettings() {
+        final boolean wantFold = forge.neo.NeoSettings.getBool(forge.neo.NeoSettings.SIDE_FOLDED, false);
+        if (wantFold != folded) {
+            setFolded(wantFold);
+        }
+        slimBars = forge.neo.NeoSettings.getBool(forge.neo.NeoSettings.SLIM_BARS, false);
+        barBesideHand = !folded && (Boolean.getBoolean("neo.table.barBesideHand")
+                || forge.neo.NeoSettings.getBool(forge.neo.NeoSettings.SELF_BAR_BESIDE_HAND, false));
+        // La ficha es la barra en su forma compacta, la de los rivales en fila:
+        // vida junto al nombre y el resto apilado debajo, sin perder un dato.
+        selfBar.setCompact(barBesideHand);
+        selfBar.setSlim(slimBars);
+        opponentBar.setSlim(slimBars);
+        for (final PlayerBar b : oppBars) {
+            b.setSlim(slimBars);
+        }
+    }
+
+    /**
+     * Tu barra en una ficha a la izquierda de la mano, en vez de en su franja
+     * a todo el ancho (ajuste {@code SELF_BAR_BESIDE_HAND}, Discord 28-10-2026).
+     * La mesa se queda la franja; la mano empieza despues de la ficha. Con la
+     * columna plegada no: esa franja lleva los botones.
+     */
+    private boolean barBesideHand;
+
+    @Override
+    protected void layoutChildren() {
+        syncSpaceSettings();
+        final double w = getWidth();
+        final double h = getHeight();
+        final double panelW = Math.max(230, Math.min(UiScale.sideWidthNow(sideWidth), w * 0.145));
+        final double railW = folded ? 0 : panelW;
+        final double contentW = Math.max(200, w - railW);
+        arenaBackdrop.resizeRelocate(0, 0, contentW, h);
+
+        if (!folded) {
+            side.resizeRelocate(contentW, 0, railW, h);
+        }
+        // Plegada: la barra de botones, en una fila, a la derecha de la barra
+        // del jugador; su alto manda sobre el de esa barra si es mayor.
+        double abW = 0;
+        double abH = 0;
+        double chipW = 0;
+        if (folded) {
+            abW = Math.min(UiScale.px(620), Math.max(UiScale.px(400), contentW * 0.40));
+            abH = actionBar.prefHeight(abW);
+            chipW = stackChip.prefWidth(-1);
+            selfBar.setRightReserve(abW + chipW + PAD * 3);
+        }
+
+        // El estado del jugador, pegado a su barra y hacia el centro de la
+        // mesa: fuera de la pantalla no sirve, y sobre la mano taparia cartas.
+        if (playerDetails.isVisible()) {
+            final double pw = Math.min(420, contentW - 2 * PAD);
+            final double ph = playerDetails.prefHeight(pw);
+            // Debajo de la barra que tiene el raton: con las mesas en fila, la
+            // del segundo o el tercer rival no esta a la izquierda.
+            final PlayerBar anchor = detailsAnchor != null && detailsAnchor.getParent() == this
+                    ? detailsAnchor : (detailsBelow ? opponentBar : selfBar);
+            final javafx.geometry.Bounds ab = anchor.getBoundsInParent();
+            final double py = detailsBelow ? ab.getMaxY() + 6 : ab.getMinY() - ph - 6;
+            final double px = Math.max(PAD, Math.min(ab.getMinX() + PAD, contentW - pw - PAD));
+            playerDetails.resizeRelocate(px, Math.max(PAD, py), pw, ph);
+        }
+
+        // El tapete cubre la mesa entera, incluida la columna: un fondo que se
+        // corta a mitad de pantalla se ve peor que no tenerlo.
+        playmat.setFitWidth(w);
+        playmat.setFitHeight(h);
+        playmatVeil.setWidth(w);
+        playmatVeil.setHeight(h);
+
+        // El boton del registro, en la esquina de abajo a la izquierda: es la
+        // zona mas muerta de la mesa (la mano empieza mas a la derecha).
+        final double lbW = logButton.prefWidth(-1);
+        final double lbH = logButton.prefHeight(lbW);
+        logButton.resizeRelocate(PAD, h - lbH - PAD, lbW, lbH);
+        // Las macros, apiladas encima y del mismo ancho: una columna se lee
+        // como un grupo, y a lo ancho se meterian en la mano.
+        double cornerTop = h - lbH - PAD;
+        double mbW = Math.max(Math.max(lbW, chatButton.prefWidth(-1)),
+                Math.max(macroRecordButton.prefWidth(-1), macroPlayButton.prefWidth(-1)));
+        if (turnButton.isVisible()) {
+            mbW = Math.max(mbW, turnButton.prefWidth(-1));
+        }
+        if (viewButton.isVisible()) {
+            mbW = Math.max(mbW, viewButton.prefWidth(-1));
+        }
+        // El de la pausa solo cuenta si esta puesto: si no, su texto ensancharia
+        // la columna en los modos donde ni siquiera sale.
+        if (menuButton.isVisible()) {
+            mbW = Math.max(mbW, menuButton.prefWidth(-1));
+        }
+        for (final Button b : List.of(turnButton, viewButton, menuButton, chatButton, macroRecordButton, macroPlayButton)) {
+            if (b.isVisible()) {
+                final double bh = b.prefHeight(mbW);
+                cornerTop -= bh + 4;
+                b.resizeRelocate(PAD, cornerTop, mbW, bh);
+            }
+        }
+        combatOverlay.resizeRelocate(0, 0, w, h);
+        impactLayer.resizeRelocate(0, 0, w, h);
+
+        // Encima del boton del registro: la misma esquina muerta, y solo
+        // aparece cuando hace falta.
+        if (cooldownBadge.isVisible()) {
+            final double cbW = cooldownBadge.prefWidth(-1);
+            final double cbH = cooldownBadge.prefHeight(cbW);
+            cooldownBadge.resizeRelocate(PAD, cornerTop - cbH - 6, cbW, cbH);
+        }
+
+        // El cartel de turno, centrado y ARRIBA del todo del area de juego: en
+        // el centro exacto taparia las criaturas justo cuando hay que mirarlas.
+        if (turnBanner.isVisible()) {
+            final double bw = Math.min(UiScale.px(TurnBanner.MAX_WIDTH),
+                    Math.max(turnBanner.bannerWidth(), contentW * 0.42));
+            final double bh = turnBanner.bannerHeight(bw);
+            turnBanner.resizeRelocate((contentW - bw) / 2, h * 0.13, bw, bh);
+        }
+        // La moneda, en el centro de la mesa: dura un segundo y medio y no se
+        // puede clicar, asi que no estorba aunque caiga encima de las cartas.
+        if (coinFlip.isVisible()) {
+            final double cw = coinFlip.prefWidth(-1);
+            final double ch = coinFlip.prefHeight(cw);
+            coinFlip.resizeRelocate((contentW - cw) / 2, (h - ch) / 2, cw, ch);
+        }
+        // Los dados, en el mismo sitio y con las mismas reglas.
+        if (diceRoll.isVisible()) {
+            final double dw = diceRoll.prefWidth(-1);
+            final double dh = diceRoll.prefHeight(dw);
+            diceRoll.resizeRelocate((contentW - dw) / 2, (h - dh) / 2, dw, dh);
+        }
+        overlay.resizeRelocate(0, 0, w, h);
+        menuOverlay.resizeRelocate(0, 0, w, h);
+        zoomOverlay.resizeRelocate(0, 0, w, h);
+        curtain.resizeRelocate(0, 0, w, h);
+
+        // La banda del tutorial, si la hay, se cobra su alto ANTES de repartir:
+        // asi la mesa se encoge un poco y no queda nada tapado. Ver CoachPanel.
+        double coachH = 0;
+        if (coach != null && coach.isVisible()) {
+            coachH = coach.prefHeight(contentW);
+            coach.resizeRelocate(0, 0, contentW, coachH);
+        }
+
+        // Con varias mesas a la vez las pestanyas sobran: estan para elegir a
+        // que rival miras, y los estas mirando a todos.
+        final boolean multi = isMultiBoard();
+        final double seatW = multi
+                ? (contentW - SEAT_GAP * (oppFields.size() - 1)) / oppFields.size()
+                : contentW;
+
+        final double tabsH = multi ? 0 : opponentTabs.barHeight();
+        // La fila de barras de rival mide lo que la mas alta: a 1/3 de ancho,
+        // PlayerBar envuelve su contenido y crece.
+        double oppBarH = 0;
+        for (final PlayerBar b : oppBars) {
+            oppBarH = Math.max(oppBarH, b.prefHeight(seatW));
+        }
+        // Junto a la mano: la ficha va despues de la columna de botones de la
+        // esquina (registro, turno, pausa...), que es de donde empieza la mano.
+        final double cardX = PAD + mbW + PAD;
+        // Lo que pide su contenido (crece con la escala de la letra), con un
+        // techo: lo que se lleva la ficha se le quita a la mano.
+        final double cardW = barBesideHand
+                ? Math.min(contentW * 0.36, Math.max(UiScale.px(300), selfBar.prefWidth(-1) + 4))
+                : 0;
+        final double cardH = barBesideHand ? selfBar.prefHeight(cardW) : 0;
+        final double selfBarH = barBesideHand ? 0 : Math.max(selfBar.prefHeight(contentW), abH);
+        double handH = Math.min(hand.prefHeight(contentW), h * 0.205);
+        // La ficha cabe entera en la fila de la mano: si es mas alta, la fila crece.
+        handH = Math.max(handH, cardH);
+
+        // Si la ventana es baja, la mano cede altura antes que los campos:
+        // es mejor ver la mesa entera con la mano un poco recortada que al
+        // reves.
+        final double fixed = coachH + phaseRail.arenaHeight(contentW) + tabsH + oppBarH + selfBarH + LINE_H;
+        final double minFields = cardWidth * 1.2;
+        if (fixed + handH + minFields > h) {
+            handH = Math.max(cardWidth * 0.7, h - fixed - minFields);
+        }
+
+        final double fieldsH = Math.max(0, h - fixed - handH);
+        // Con un rival, mitad y mitad. Con varios, la fila de arriba lleva
+        // varias mesas: ver MULTI_OPP_SHARE.
+        final double oppH = multi ? fieldsH * MULTI_OPP_SHARE : fieldsH / 2.0;
+        final double selfH = fieldsH - oppH;
+
+        final double phaseH = phaseRail.arenaHeight(contentW);
+        phaseRail.resizeRelocate(0, coachH, contentW, phaseH);
+        double y = coachH + phaseH;
+        if (tabsH > 0) {
+            opponentTabs.resizeRelocate(0, y, contentW, tabsH);
+            y += tabsH;
+        }
+        for (int i = 0; i < oppBars.size(); i++) {
+            oppBars.get(i).resizeRelocate(i * (seatW + SEAT_GAP), y, seatW, oppBarH);
+        }
+        y += oppBarH;
+
+        // Desde aqui y hasta la barra de abajo, todo va dentro del visor, o
+        // sea en SUS coordenadas: se le resta el origen.
+        final double boardTop = y;
+        final double boardH = oppH + selfH + LINE_H;
+        viewport.resizeRelocate(0, boardTop, contentW, boardH);
+        viewportClip.setWidth(contentW);
+        viewportClip.setHeight(boardH);
+        board.resizeRelocate(0, 0, contentW, boardH);
+        applyBoardTransform();
+
+        for (int i = 0; i < oppFields.size(); i++) {
+            oppFields.get(i).resizeRelocate(i * (seatW + SEAT_GAP), 0, seatW, oppH);
+        }
+        // En coordenadas del VISOR, o sea las mismas que las mesas: asi se
+        // acercan y se arrastran con ellas y no dejan de separar al hacer zoom.
+        // Y llegan hasta la linea de combate, no solo hasta el final de la
+        // mesa: el hueco entre dos rivales tambien es de ellos.
+        for (int i = 0; i < seatDividers.size(); i++) {
+            final double x = (i + 1) * (seatW + SEAT_GAP) - SEAT_GAP / 2;
+            final Line d = seatDividers.get(i);
+            d.setStartX(x);
+            d.setEndX(x);
+            d.setStartY(0);
+            d.setEndY(oppH);
+        }
+        y += oppH;
+
+        combatLine.setStartX(PAD * 3);
+        combatLine.setEndX(contentW - PAD * 3);
+        combatLine.setStartY(y - boardTop + LINE_H / 2);
+        combatLine.setEndY(y - boardTop + LINE_H / 2);
+
+        // El aviso central va justo sobre la linea de combate: es la franja mas
+        // vacia de la mesa, y esta a la altura donde ya estas mirando.
+        if (promptBanner.isVisible()) {
+            final double bw = Math.min(contentW - PAD * 4, promptBanner.prefWidth(-1));
+            final double bh = promptBanner.prefHeight(bw);
+            promptBanner.resizeRelocate((contentW - bw) / 2, y + LINE_H / 2 - bh / 2, bw, bh);
+            // Y de ahi, a donde lo haya arrastrado el jugador (sin salirse).
+            promptBanner.fitInto(contentW, getHeight());
+        }
+
+        y += LINE_H;
+
+        selfField.resizeRelocate(0, y - boardTop, contentW, selfH);
+        y += selfH;
+
+        // El aviso de "estas mirando de cerca", en la esquina del visor. Es la
+        // unica forma de volver sin adivinar: se clica y se deshace.
+        if (zoomBadge.isVisible()) {
+            final double bw = zoomBadge.prefWidth(-1);
+            final double bh = zoomBadge.prefHeight(bw);
+            zoomBadge.resizeRelocate(PAD, boardTop + PAD, bw, bh);
+        }
+
+        if (macroBadge.isVisible()) {
+            final double mw = macroBadge.prefWidth(-1);
+            final double mh = macroBadge.prefHeight(mw);
+            final double my = boardTop + PAD
+                    + (zoomBadge.isVisible() ? zoomBadge.prefHeight(-1) + 6 : 0);
+            macroBadge.resizeRelocate(PAD, my, mw, mh);
+        }
+
+        // "Esto te acaba de pasar", arriba a la derecha de la mesa, como en el
+        // Forge de siempre. Ver NoticeStack.
+        if (notices.hasNotices()) {
+            final double nw = Math.min(380, Math.max(220, contentW * 0.34));
+            final double nh = Math.min(boardH - PAD * 2, notices.prefHeight(nw));
+            notices.resizeRelocate(contentW - PAD - nw, boardTop + PAD, nw, nh);
+        }
+
+        if (!barBesideHand) {
+            selfBar.resizeRelocate(0, y, contentW, selfBarH);
+        }
+        if (folded) {
+            actionBar.resizeRelocate(w - abW - PAD, y + (selfBarH - abH) / 2, abW, abH);
+            final double chipH = stackChip.prefHeight(chipW);
+            stackChip.resizeRelocate(w - abW - PAD - 8 - chipW, y + (selfBarH - chipH) / 2, chipW, chipH);
+            // El stack entero, encima de la barra, solo mientras se mira.
+            // -Dneo.table.stackPeek=true lo deja abierto (capturas).
+            if (Boolean.getBoolean("neo.table.stackPeek")) {
+                stackPeek = true;
+            }
+            stackBox.setVisible(stackPeek);
+            if (stackPeek) {
+                final double room = Math.max(UiScale.px(120), y - boardTop - PAD);
+                final double sh = Math.min(stackBox.prefHeight(panelW), room);
+                stackBox.resizeRelocate(w - panelW - PAD, y - sh - 6, panelW, sh);
+            }
+        }
+        y += selfBarH;
+
+        // La zona de mando va a la derecha de la mano, a su misma altura:
+        // el comandante no esta en tu mano, pero lo tienes siempre a la vista.
+        final double handArea = Math.max(0, h - y);
+        // Con techo: este ancho se le quita a la mano, asi que por muchos
+        // emblemas o efectos que haya en la zona de mando no puede llevarse
+        // media mesa. Reportado jugando: once efectos identicos y la mano
+        // fuera de la pantalla.
+        final double cmdPref = commandZone.preferredWidth();
+        final double cmdW = cmdPref <= 0 ? 0 : Math.min(contentW * 0.34, cmdPref + 16);
+        if (barBesideHand) {
+            // La ficha, pegada abajo como la mano, y la mano a su derecha.
+            final double cy = y + Math.max(0, handArea - cardH - PAD);
+            selfBar.resizeRelocate(cardX, cy, cardW, Math.min(cardH, handArea));
+            final double handX = cardX + cardW + PAD;
+            hand.resizeRelocate(handX, y, Math.max(120, contentW - cmdW - handX), handArea);
+        } else {
+            hand.resizeRelocate(0, y, Math.max(120, contentW - cmdW), handArea);
+        }
+        commandZone.resizeRelocate(contentW - cmdW, y, cmdW, handArea);
+
+        // El cerco va el ULTIMO: se calcula sobre las posiciones que se acaban
+        // de repartir, no sobre las del layout anterior.
+        layoutSpotlight();
+    }
+
+    // ---------------------------------------------------------------
+    // Tutorial
+    // ---------------------------------------------------------------
+
+    /**
+     * Pone (o quita, con null) la banda del tutorial.
+     *
+     * <p>Se anyade delante del resto para que quede por debajo de las capas de
+     * dialogo: si el motor levanta una pregunta, manda la pregunta.
+     */
+    public void setCoach(final CoachPanel panel) {
+        if (coach != null) {
+            getChildren().remove(coach);
+        }
+        coach = panel;
+        if (coach != null) {
+            getChildren().add(getChildren().indexOf(spotlight), coach);
+        }
+        requestLayout();
+    }
+
+    public CoachPanel getCoach() {
+        return coach;
+    }
+
+    /**
+     * Rodea con un cerco la parte de la mesa de la que se esta hablando.
+     *
+     * <p>Los nombres son los de {@code TutorialStep.Spot}. Un nombre que no se
+     * reconozca — o {@code null} — simplemente quita el cerco: senyalar el sitio
+     * equivocado seria peor que no senyalar nada.
+     */
+    public void spotlight(final String name) {
+        this.spotName = name;
+        requestLayout();
+    }
+
+    private void layoutSpotlight() {
+        final Region target = spotTarget(spotName);
+        if (target == null || target.getWidth() <= 1 || target.getHeight() <= 1) {
+            spotlight.setVisible(false);
+            return;
+        }
+        // De coordenadas del nodo a las nuestras. Se pasa por la escena a
+        // proposito: el campo de batalla vive dentro del visor, que puede estar
+        // escalado y desplazado, y localToScene aplica esas transformaciones.
+        final Bounds b = sceneToLocal(target.localToScene(target.getBoundsInLocal()));
+        final double pad = 5;
+        // Recortado a la ventana: la mano llega hasta el borde de abajo, y un
+        // cerco que se sale deja el lado inferior fuera de la pantalla — o sea
+        // que justo lo que hay que mirar parece no tener marco.
+        final double x0 = Math.max(1, b.getMinX() - pad);
+        final double y0 = Math.max(1, b.getMinY() - pad);
+        final double x1 = Math.min(getWidth() - 1, b.getMaxX() + pad);
+        final double y1 = Math.min(getHeight() - 1, b.getMaxY() + pad);
+        if (x1 <= x0 || y1 <= y0) {
+            spotlight.setVisible(false);
+            return;
+        }
+        spotlight.setX(x0);
+        spotlight.setY(y0);
+        spotlight.setWidth(x1 - x0);
+        spotlight.setHeight(y1 - y0);
+        spotlight.setVisible(true);
+    }
+
+    private Region spotTarget(final String name) {
+        if (name == null) {
+            return null;
+        }
+        return switch (name) {
+            case "HAND" -> hand;
+            case "BOARD_SELF" -> selfField;
+            case "BOARD_OPP" -> opponentField;
+            case "SIDE" -> actionBar;
+            case "PHASES" -> phaseRail;
+            case "STACK" -> stackBox;
+            case "SELF_BAR" -> selfBar;
+            case "OPP_BAR" -> opponentBar;
+            case "COMMAND" -> commandZone;
+            case "LOG" -> logButton;
+            default -> null;
+        };
+    }
+
+    /**
+     * Quien se entera de los gestos que el motor NO ve.
+     *
+     * <p>Ampliar una carta, acercar la mesa, abrir una zona, poner una parada
+     * de fase: nada de eso llega al motor, asi que el tutorial no puede
+     * enterarse preguntandole a el. Se cuenta desde aqui, que es donde pasan.
+     */
+    public void setGestureSpy(final Consumer<String> spy) {
+        this.gestureSpy = spy;
+    }
+
+    /**
+     * Cuenta un gesto. Publico porque no todos pasan por la mesa: el menu de
+     * pausa y los Ajustes viven en la capa de encima y avisan desde alli.
+     */
+    public void gesture(final String what) {
+        final Consumer<String> spy = gestureSpy;
+        if (spy != null) {
+            spy.accept(what);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Acercar y arrastrar la mesa
+    // ---------------------------------------------------------------
+
+    /**
+     * El visor: el area de juego, que se puede acercar y mover.
+     *
+     * <p>Existe porque con la mesa llena las cartas se encogen hasta que no se
+     * leen — y encoger es lo correcto, porque lo que no cabe no cabe. Lo que
+     * faltaba era poder <b>acercarse</b> a mirar sin que la mesa deje de estar
+     * donde estaba: Ctrl + rueda para acercar, arrastrar para moverse.
+     *
+     * <p>Solo se transforma el area de juego. Las barras, la mano, la columna y
+     * los dialogos se quedan como estan: son los controles, y un control que se
+     * va de la pantalla al acercarte no sirve para nada.
+     */
+    private final Pane viewport = new Pane() {
+        @Override
+        protected void layoutChildren() {
+            // Lo coloca TableScreen.layoutChildren, en coordenadas explicitas.
+        }
+    };
+
+    private final Pane board = new Pane() {
+        @Override
+        protected void layoutChildren() {
+            // Idem: aqui no manda un contenedor automatico.
+        }
+    };
+
+    private final javafx.scene.shape.Rectangle viewportClip =
+            new javafx.scene.shape.Rectangle();
+
+    /** Cuanto se acerca la mesa: 1 es el tamano normal. */
+    private double zoom = 1;
+    private double panX;
+    private double panY;
+
+    private static final double ZOOM_MIN = 1;
+    private static final double ZOOM_MAX = 3;
+    private static final double ZOOM_STEP = 1.12;
+
+    private boolean panning;
+    private double panPressX;
+    private double panPressY;
+    private double panFromX;
+    private double panFromY;
+
+    private final javafx.scene.control.Label zoomBadge = new javafx.scene.control.Label();
+
+    /** Los avisos de la esquina. Ver {@link NoticeStack}. */
+    private final NoticeStack notices = new NoticeStack();
+
+    /**
+     * "● REC" mientras se graba una macro. Grabar sin saberlo es la forma de
+     * repetir luego algo que no querias, asi que se ve mientras dura.
+     */
+    private final javafx.scene.control.Label macroBadge = macroBadge();
+
+    private static javafx.scene.control.Label macroBadge() {
+        final javafx.scene.control.Label l = new javafx.scene.control.Label(NeoText.get("macro.badge"));
+        l.getStyleClass().add("macro-badge");
+        l.setMouseTransparent(true);
+        l.setVisible(false);
+        l.setManaged(false);
+        return l;
+    }
+
+    public void setMacroRecording(final boolean on) {
+        setMacroState(on, macroPlayButton.isVisible() || on);
+    }
+
+    /**
+     * Grabando o no, y si hay una macro que repetir. El boton de grabar cambia
+     * de nombre ("Parar") mientras graba, y el de repetir solo esta cuando hay
+     * algo que repetir y no se esta grabando.
+     */
+    public void setMacroState(final boolean recording, final boolean hasMacro) {
+        macroBadge.setVisible(recording);
+        macroRecordButton.setText(NeoText.get(recording ? "macro.stop" : "macro.record"));
+        macroRecordButton.pseudoClassStateChanged(RECORDING, recording);
+        macroPlayButton.setVisible(hasMacro && !recording);
+        requestLayout();
+    }
+
+    public Button getMacroRecordButton() {
+        return macroRecordButton;
+    }
+
+    public Button getMacroPlayButton() {
+        return macroPlayButton;
+    }
+
+    private static final javafx.css.PseudoClass RECORDING =
+            javafx.css.PseudoClass.getPseudoClass("recording");
+
+    /** "Esto te acaba de pasar", sin parar la partida. */
+    public void showNotice(final String text) {
+        notices.push(text);
+        requestLayout();
+    }
+
+    public NoticeStack getNotices() {
+        return notices;
+    }
+
+    private void installBoardZoom() {
+        zoomBadge.getStyleClass().add("zoom-badge");
+        UiScale.fixedFont(zoomBadge, 12);
+        zoomBadge.setVisible(false);
+        zoomBadge.setManaged(false);
+        zoomBadge.setOnMouseClicked(e -> {
+            e.consume();
+            resetBoardZoom();
+        });
+
+        addEventFilter(javafx.scene.input.ScrollEvent.SCROLL, e -> {
+            if (!forge.neo.platform.NeoOs.ctrl(e) || isViewBlocked()) {
+                return;
+            }
+            // Un trackpad de Mac manda decenas de eventos por gesto, y encima
+            // la inercia sigue mandando al soltar: a una muesca por evento la
+            // mesa saltaria al tope. La inercia y lo que no se mueve en vertical
+            // se ignoran; el gesto de verdad en un Mac es pellizcar (abajo).
+            if (forge.neo.platform.NeoOs.MAC && (e.isInertia() || e.getDeltaY() == 0)) {
+                e.consume();
+                return;
+            }
+            final Point2D m = viewport.sceneToLocal(e.getSceneX(), e.getSceneY());
+            zoomAt(zoom * (e.getDeltaY() >= 0 ? ZOOM_STEP : 1 / ZOOM_STEP),
+                    m.getX(), m.getY());
+            e.consume();
+        });
+
+        // Pellizcar en el trackpad acerca y aleja, en un Mac. En Windows no se
+        // engancha: alli el pellizco ya llega convertido en Ctrl+rueda.
+        if (forge.neo.platform.NeoOs.MAC) {
+            addEventFilter(javafx.scene.input.ZoomEvent.ZOOM, e -> {
+                if (isViewBlocked()) {
+                    return;
+                }
+                final Point2D m = viewport.sceneToLocal(e.getSceneX(), e.getSceneY());
+                zoomAt(zoom * e.getZoomFactor(), m.getX(), m.getY());
+                e.consume();
+            });
+        }
+
+        addEventFilter(MouseEvent.MOUSE_PRESSED, e -> {
+            if (isViewBlocked() || !isPanGesture(e)) {
+                return;
+            }
+            panning = true;
+            panClick = true;
+            panPressX = e.getSceneX();
+            panPressY = e.getSceneY();
+            panFromX = panX;
+            panFromY = panY;
+            setCursor(javafx.scene.Cursor.CLOSED_HAND);
+            e.consume();
+        });
+
+        addEventFilter(MouseEvent.MOUSE_DRAGGED, e -> {
+            if (!panning) {
+                return;
+            }
+            panX = panFromX + (e.getSceneX() - panPressX);
+            panY = panFromY + (e.getSceneY() - panPressY);
+            applyBoardTransform();
+            gesture(Gesture.BOARD_PAN);
+            e.consume();
+        });
+
+        addEventFilter(MouseEvent.MOUSE_RELEASED, e -> {
+            if (!panning) {
+                return;
+            }
+            panning = false;
+            setCursor(null);
+            e.consume();
+        });
+
+        // Y el click que viene detras del arrastre no vale como click.
+        //
+        // JavaFX manda MOUSE_CLICKED al soltar aunque el PRESSED se haya
+        // consumido, asi que sin esto un Ctrl+click sobre una carta movia la
+        // mesa Y ADEMAS activaba la carta.
+        addEventFilter(MouseEvent.MOUSE_CLICKED, e -> {
+            if (panClick) {
+                panClick = false;
+                e.consume();
+            }
+        });
+    }
+
+    private boolean panClick;
+
+    /**
+     * Que gesto mueve la mesa.
+     *
+     * <p>El boton izquierdo a secas ya significa otra cosa — arrastrar una
+     * carta para jugarla o para atacar — asi que mover la mesa pide el boton
+     * central, o Ctrl con el izquierdo, que es el mismo Ctrl con el que se
+     * acerca (Cmd en un Mac, donde Ctrl+clic es el clic derecho). Y solo
+     * cuando hay algo que mover: sin acercar, no.
+     */
+    private boolean isPanGesture(final MouseEvent e) {
+        return zoom > 1.001
+                && (e.getButton() == javafx.scene.input.MouseButton.MIDDLE
+                    || (e.getButton() == javafx.scene.input.MouseButton.PRIMARY
+                        && forge.neo.platform.NeoOs.panModifier(e)));
+    }
+
+    /**
+     * Acerca o aleja dejando quieto el punto que hay bajo el raton.
+     *
+     * <p>Es lo que hace que acercarse se sienta natural: te acercas a donde
+     * estas mirando, no al centro de la pantalla.
+     */
+    private void zoomAt(final double wanted, final double mx, final double my) {
+        final double next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, wanted));
+        if (Math.abs(next - zoom) < 0.0001) {
+            return;
+        }
+        // La escala pivota en el centro del propio nodo, asi que el punto fijo
+        // se mantiene corrigiendo el desplazamiento.
+        final double cx = board.getWidth() / 2;
+        final double cy = board.getHeight() / 2;
+        panX = mx - cx - (next / zoom) * (mx - cx - panX);
+        panY = my - cy - (next / zoom) * (my - cy - panY);
+        zoom = next;
+        applyBoardTransform();
+        gesture(Gesture.BOARD_ZOOM);
+    }
+
+    /** Vuelve a la mesa entera. */
+    public void resetBoardZoom() {
+        zoom = 1;
+        panX = 0;
+        panY = 0;
+        applyBoardTransform();
+    }
+
+    private void applyBoardTransform() {
+        // El desplazamiento se limita a lo que de verdad sobra: sin esto se
+        // puede arrastrar la mesa fuera de la pantalla y quedarse mirando el
+        // tapete sin saber como volver.
+        final double maxX = Math.max(0, (zoom - 1) * board.getWidth() / 2);
+        final double maxY = Math.max(0, (zoom - 1) * board.getHeight() / 2);
+        panX = Math.max(-maxX, Math.min(maxX, panX));
+        panY = Math.max(-maxY, Math.min(maxY, panY));
+
+        board.setScaleX(zoom);
+        board.setScaleY(zoom);
+        board.setTranslateX(panX);
+        board.setTranslateY(panY);
+
+        // El arte se pide al tamano en pixeles al que se ve (CardNode.sharpenArt):
+        // al acercar, ese tamano cambia. Se vuelve a pedir cuando la rueda para,
+        // no en cada muesca, que serian decenas de repintados de la mesa entera.
+        sharpenAfterZoom.playFromStart();
+
+        final boolean on = zoom > 1.001;
+        zoomBadge.setText(NeoText.get("table.zoom", String.format("%.1f", zoom)));
+        if (zoomBadge.isVisible() != on) {
+            // -Dneo.board.noBadge=true: sin la pastilla (para grabar video).
+            zoomBadge.setVisible(on && !Boolean.getBoolean("neo.board.noBadge"));
+            requestLayout();
+        }
+        if (!on) {
+            setCursor(null);
+        }
+    }
+
+    /** Ver applyBoardTransform: repedir el arte cuando el zoom se queda quieto. */
+    private final javafx.animation.PauseTransition sharpenAfterZoom = createSharpenAfterZoom();
+
+    private javafx.animation.PauseTransition createSharpenAfterZoom() {
+        final javafx.animation.PauseTransition p =
+                new javafx.animation.PauseTransition(javafx.util.Duration.millis(180));
+        p.setOnFinished(e -> CardNode.refreshAllIn(board));
+        return p;
+    }
+
+    /** Cuanto esta acercada la mesa. Solo para comprobar con capturas. */
+    public double boardZoom() {
+        return zoom;
+    }
+
+    // ---------------------------------------------------------------
+    // Alimentar la mesa
+    // ---------------------------------------------------------------
+
+    /**
+     * Los permanentes de cada lado.
+     *
+     * <p>Se guardan los dos y se repintan los dos, aunque solo cambie uno.
+     * Hace falta porque <b>lo enganchado cruza de lado</b>: un aura del rival
+     * sobre una criatura tuya se pinta debajo de TU criatura, y para saber eso
+     * hay que tener las dos listas a la vez. Ver {@code PlayerField.setCards}.
+     */
+    public void setOpponentBattlefield(final List<CardView> cards) {
+        setOpponentBattlefield(0, cards);
+    }
+
+    /** Los permanentes del rival que se sienta en ese asiento. */
+    public void setOpponentBattlefield(final int seat, final List<CardView> cards) {
+        while (oppCards.size() < oppFields.size()) {
+            oppCards.add(List.of());
+        }
+        if (seat < 0 || seat >= oppCards.size()) {
+            return;
+        }
+        oppCards.set(seat, cards == null ? List.of() : cards);
+        repaintFields();
+    }
+
+    public void setSelfBattlefield(final List<CardView> cards) {
+        selfCards = cards == null ? List.of() : cards;
+        repaintFields();
+    }
+
+    /** Los permanentes de cada asiento de rival, en el orden de {@link #oppFields}. */
+    private final List<List<CardView>> oppCards = new ArrayList<>(List.of(List.of()));
+    private List<CardView> selfCards = List.of();
+
+    private void repaintFields() {
+        // "everywhere" tiene que traer los permanentes de TODA la mesa, no solo
+        // los de los dos lados que se estan pintando: es lo que hace que un
+        // aura del rival sobre una criatura tuya se pinte debajo de tu
+        // criatura. Con varias mesas a la vez eso deja de ser un detalle y pasa
+        // a ser lo normal — a cuatro, la mayoria de lo enganchado cruza de
+        // mesa. Ver PlayerField.setCards.
+        final List<CardView> everywhere = new ArrayList<>(selfCards);
+        for (final List<CardView> board : oppCards) {
+            everywhere.addAll(board);
+        }
+        for (int i = 0; i < oppFields.size(); i++) {
+            oppFields.get(i).setCards(
+                    i < oppCards.size() ? oppCards.get(i) : List.of(), everywhere);
+        }
+        selfField.setCards(selfCards, everywhere);
+        reindex();
+    }
+
+    /** Contadores de cementerio y exilio que se ven en la propia mesa. */
+    public void setOpponentZonePiles(final int graveyard, final int exile) {
+        setOpponentZonePiles(graveyard, exile, false, false);
+    }
+
+    public void setOpponentZonePiles(final int graveyard, final int exile,
+                                     final boolean gravePlayable, final boolean exilePlayable) {
+        setOpponentZonePiles(0, graveyard, exile, gravePlayable, exilePlayable);
+    }
+
+    public void setOpponentZonePiles(final int seat, final int graveyard, final int exile,
+                                     final boolean gravePlayable, final boolean exilePlayable) {
+        if (seat < 0 || seat >= oppFields.size()) {
+            return;
+        }
+        oppFields.get(seat).setZoneOwner(oppBars.get(seat).getPlayer());
+        oppFields.get(seat).setZoneCounts(graveyard, exile, gravePlayable, exilePlayable);
+    }
+
+    /** La zona de mando de ese rival, en su campo. Ver {@code PlayerField.setCommand}. */
+    public void setOpponentCommand(final int seat, final List<CardView> cards) {
+        if (seat < 0 || seat >= oppFields.size()) {
+            return;
+        }
+        oppFields.get(seat).setCommand(cards);
+        if (seat < oppBars.size()) {
+            oppBars.get(seat).setCommanders(cards);
+        }
+    }
+
+    /** La barra de ese asiento de rival. */
+    public PlayerBar opponentBar(final int seat) {
+        return oppBars.get(Math.max(0, Math.min(seat, oppBars.size() - 1)));
+    }
+
+    /** El campo de ese asiento de rival. */
+    public PlayerField opponentField(final int seat) {
+        return oppFields.get(Math.max(0, Math.min(seat, oppFields.size() - 1)));
+    }
+
+    public void setSelfZonePiles(final int graveyard, final int exile) {
+        setSelfZonePiles(graveyard, exile, false, false);
+    }
+
+    public void setSelfZonePiles(final int graveyard, final int exile,
+                                 final boolean gravePlayable, final boolean exilePlayable) {
+        selfField.setZoneOwner(selfBar.getPlayer());
+        selfField.setZoneCounts(graveyard, exile, gravePlayable, exilePlayable);
+    }
+
+    /**
+     * <b>Tu mazo en la mesa</b>, y la primera carta si el motor te deja verla.
+     *
+     * <p>El filtro va AQUI porque el {@code mayView} del motor lo tiene la
+     * mesa: el campo no sabe nada de permisos, solo pinta lo que le llega. Con
+     * eso, destapar la de arriba deja de ser una decision nuestra — la toma el
+     * motor, carta a carta, igual que en el visor de la biblioteca.
+     *
+     * <p>Reportado en Reddit el 20-09-2026: con Bolas's Citadel <i>"no
+     * encuentro la interfaz del mazo"</i>. Mirar y jugar esa carta ya
+     * funcionaba; lo que no habia era forma de saberlo sin clicar un contador
+     * que no parecia clicable. Ver {@code ZonePile.setTopCard} y
+     * {@code run.cmd topcheck}.
+     */
+    public void setSelfLibraryPile(final int size, final CardView top) {
+        selfField.setLibrary(size, top != null && mayView.test(top) ? top : null);
+    }
+
+    /** La ultima mano que llego, para volver a pintarla al cambiar el ajuste. */
+    private List<CardView> lastHand = List.of();
+
+    /** La mano ordenada por el ajuste. Ver {@link forge.neo.card.HandOrder}. */
+    private static List<CardView> orderedHand(final List<CardView> cards) {
+        return forge.neo.card.HandOrder.sorted(cards);
+    }
+
+    /**
+     * Vuelve a pintar la mano de las mesas que haya debajo de {@code root}: los
+     * ajustes se cambian con la partida detras, y un ajuste que no se nota
+     * hasta el siguiente aviso del motor parece que no funciona.
+     */
+    public static void reorderHandsIn(final javafx.scene.Node root) {
+        if (root instanceof TableScreen t) {
+            t.setHand(t.lastHand);
+            return;
+        }
+        if (root instanceof javafx.scene.Parent parent) {
+            for (final javafx.scene.Node child : parent.getChildrenUnmodifiable()) {
+                reorderHandsIn(child);
+            }
+        }
+    }
+
+    /**
+     * La mano, <b>reutilizando el nodo de cada carta</b> (por id).
+     *
+     * <p>Se llama en CADA refresco de la mesa, y la mesa se refresca con cada
+     * aviso del motor. Hasta el 11-10-2026 aqui se tiraban y se volvian a crear
+     * todas las cartas de la mano cada vez, y JavaFX solo da el clic si la
+     * carta que soltaste es la MISMA que pulsaste: un refresco entre pulsar y
+     * soltar se comia el clic sin decir nada. Con una mesa grande a media
+     * partida los refrescos no paran y casi ningun clic llegaba (Discord,
+     * 10-10-2026: <i>"left click on cards in my hand wouldn't generate the
+     * prompt to pay mana"</i>, con el clic derecho, las tierras y pasar turno
+     * funcionando — esos nodos ya se reutilizaban). Es la regla de rendimiento
+     * de las notas de diseño: no reconstruir nodos en cada actualizacion.
+     */
+    public void setHand(final List<CardView> cards) {
+        lastHand = cards == null ? List.of() : List.copyOf(cards);
+        final List<CardView> sorted = forge.neo.NeoSettings.orderHand() ? orderedHand(lastHand) : lastHand;
+        // Y detras, desvaido, lo que se puede lanzar desde el cementerio o el
+        // exilio (ver setHandOutside). Sin ordenar: va siempre al final.
+        final List<CardView> order;
+        if (handOutside.isEmpty()) {
+            order = sorted;
+        } else {
+            order = new java.util.ArrayList<>(sorted);
+            order.addAll(handOutside);
+        }
+        // Las mismas cartas en el mismo orden: solo se repintan, sin tocar el
+        // abanico.
+        if (sameHand(order)) {
+            for (int i = 0; i < order.size(); i++) {
+                showInHand(extraNodes.get(i), order.get(i));
+            }
+            reindex();
+            return;
+        }
+        final java.util.Map<Integer, CardNode> old = new java.util.HashMap<>();
+        for (final CardNode n : extraNodes) {
+            if (n.getCard() != null && n.getCard().getId() >= 0) {
+                old.put(n.getCard().getId(), n);
+            }
+        }
+        hand.clearCards();
+        extraNodes.clear();
+        for (final CardView cv : order) {
+            CardNode n = cv != null && cv.getId() >= 0 ? old.remove(cv.getId()) : null;
+            if (n == null) {
+                n = newHandNode();
+            }
+            showInHand(n, cv);
+            extraNodes.add(n);
+            hand.add(n);
+        }
+        reindex();
+    }
+
+    /** Si la mano a pintar son exactamente las cartas (por id) que ya hay, en ese orden. */
+    private boolean sameHand(final List<CardView> order) {
+        if (order.size() != extraNodes.size()) {
+            return false;
+        }
+        for (int i = 0; i < order.size(); i++) {
+            final CardView now = order.get(i);
+            final CardView was = extraNodes.get(i).getCard();
+            if (now == null || was == null || now.getId() < 0 || now.getId() != was.getId()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** La misma vista se repinta; otra (o la misma carta con vista nueva) se pone. */
+    private static void showInHand(final CardNode n, final CardView cv) {
+        if (n.getCard() == cv) {
+            n.refresh();
+        } else {
+            n.setCard(cv);
+        }
+        n.setOrigin(originLabel(cv));
+    }
+
+    /** "Cementerio" o "Exilio" para una carta que no es de la mano; null si lo es. */
+    private static String originLabel(final CardView cv) {
+        final forge.game.zone.ZoneType z = cv == null ? null : cv.getZone();
+        if (z == null || z == forge.game.zone.ZoneType.Hand) {
+            return null;
+        }
+        return NeoText.get(z == forge.game.zone.ZoneType.Graveyard ? "hand.from.graveyard"
+                : z == forge.game.zone.ZoneType.Exile ? "hand.from.exile" : "hand.from.other");
+    }
+
+    /** Lo que se ensenya en la mano sin estar en ella. Ver {@link #setHandOutside}. */
+    private List<CardView> handOutside = List.of();
+
+    /**
+     * <b>Lo que puedes lanzar desde el cementerio o el exilio, en la mano</b>
+     * (Discord, 29-10-2026). Una copia desvaida al final del abanico, con su
+     * zona debajo: el flashback o la carta exiliada "que puedes jugar este
+     * turno" se olvidan en su pila, y la mano es donde se buscan. La carta es
+     * la de verdad, asi que clicarla o arrastrarla a la mesa la lanza por el
+     * mismo {@code selectCard} que desde el visor de la zona. Lo calcula
+     * {@code TableBinder.castableOutsideForHand}; el ajuste lo apaga.
+     */
+    /**
+     * El rotulo "el coste depende de lo que elijas" en la carta {@code cardId} de
+     * la mano, y en ninguna otra; -1 lo quita (ver {@code TapPreview.Kind}).
+     */
+    public void setHandCostHint(final int cardId) {
+        final String text = forge.neo.NeoText.get("hand.costDepends");
+        for (final CardNode n : extraNodes) {
+            n.setCostHint(n.getCard() != null && n.getCard().getId() == cardId ? text : null);
+        }
+    }
+
+    public void setHandOutside(final List<CardView> cards) {
+        final List<CardView> now = cards == null ? List.of() : List.copyOf(cards);
+        if (sameIds(now, handOutside)) {
+            handOutside = now;
+            return;
+        }
+        handOutside = now;
+        setHand(lastHand);
+    }
+
+    private static boolean sameIds(final List<CardView> a, final List<CardView> b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (int i = 0; i < a.size(); i++) {
+            if (a.get(i).getId() != b.get(i).getId()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Solo pruebas: como si el raton entrara en la carta de la mano con ese nombre. */
+    public boolean hoverHandForTest(final String name) {
+        for (final CardNode n : extraNodes) {
+            if (n.getCard() != null && n.getCard().getCurrentState() != null
+                    && name.equals(n.getCard().getCurrentState().getName())) {
+                hovered(n);
+                if (onHandHover != null) {
+                    onHandHover.accept(n.getCard());
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private CardNode newHandNode() {
+        final CardNode n = new CardNode(cardWidth * 1.12);
+        n.hoverProperty().addListener((o, was, is) -> {
+            if (is) {
+                hovered(n);
+            }
+            if (onHandHover != null) {
+                onHandHover.accept(is ? n.getCard() : null);
+            }
+        });
+        n.setOnMouseClicked(e -> {
+            if (e.getButton() == javafx.scene.input.MouseButton.PRIMARY) {
+                cardClicked(n);
+            }
+        });
+        return n;
+    }
+
+    // ---------------------------------------------------------------
+    // Los asientos de rival
+    // ---------------------------------------------------------------
+
+    /**
+     * Cuantas mesas de rival se ven a la vez.
+     *
+     * <p>1 es el modo de siempre: una mesa y las pestanyas para cambiar de
+     * rival. Mas de 1 es el modo "todas las mesas", que se enciende en Ajustes.
+     *
+     * <p>Los asientos que sobran se DESTRUYEN, no se esconden. Un campo oculto
+     * sigue teniendo sus {@code CardNode}, y esos nodos los recorren
+     * {@link #everyNode()}, {@link #setHighlighted} y {@link #boundsOf}: una
+     * flecha podria acabar apuntando a una carta que no se ve, y el resaltado
+     * del motor repartirse entre nodos invisibles.
+     *
+     * <p>El asiento 0 no se toca nunca: es {@link #opponentField}, que existe
+     * desde siempre y del que cuelgan las pruebas y las maquetas.
+     */
+    public void setOpponentSeats(final int seats) {
+        final int want = Math.max(1, seats);
+        if (want == oppFields.size()) {
+            return;
+        }
+
+        while (oppFields.size() > want) {
+            final PlayerField f = oppFields.remove(oppFields.size() - 1);
+            final PlayerBar b = oppBars.remove(oppBars.size() - 1);
+            board.getChildren().remove(f);
+            getChildren().remove(b);
+        }
+
+        while (oppFields.size() < want) {
+            final PlayerField f = new PlayerField(cardWidth * 0.92, true);
+            f.setOnCardHover(this::hovered);
+            f.setOnCardClick(this::cardClicked);
+            f.setOnStackCountClick(this::stackCountClicked);
+            f.setOnZoneClicked(this::showZone);
+            // Con varias mesas en fila, el cementerio y el exilio se quedan en
+            // el contador de la barra: esa tira cuesta 173 px de ancho y a
+            // 1/3 de pantalla es el 36% de lo que le toca a cada rival.
+            // Medido: quitarla sube la carta de 28 px a 33.
+            f.setPilesOnBoard(false);
+            oppFields.add(f);
+
+            final PlayerBar b = new PlayerBar(true);
+            b.setOnZoneClicked(this::showZone);
+            b.setOnCommanderHover(this::hovered);
+            b.setOnPlayerClicked(onPlayerClicked);
+            b.setSelectable(playersSelectable);
+            // Su estado al pasar el raton, como la primera (Discord,
+            // 19-10-2026: con las mesas en fila solo salia el de la primera).
+            hoverDetails(b, true);
+            oppBars.add(b);
+
+            // El campo va DENTRO del visor (se acerca y se arrastra con el
+            // resto de la mesa); la barra, fuera (es un control).
+            board.getChildren().add(board.getChildren().indexOf(combatLine), f);
+            getChildren().add(getChildren().indexOf(viewport), b);
+        }
+
+        // Un separador menos que asientos.
+        //
+        // Se quitan de board, que es donde se meten (mas abajo). Quitarlos de
+        // getChildren() — donde vivian en la primera version — no hacia nada:
+        // la linea salia de la lista pero se quedaba en la mesa, congelada en
+        // su ultima posicion, porque ya nadie la recolocaba. Reportado jugando:
+        // apagar "ver todas las mesas" a mitad de partida volvia bien a las
+        // pestanyas, pero los separadores seguian cruzando la mesa del rival.
+        while (seatDividers.size() > want - 1) {
+            board.getChildren().remove(seatDividers.remove(seatDividers.size() - 1));
+        }
+        while (seatDividers.size() < want - 1) {
+            final Line d = new Line();
+            // Sin setOpacity aqui: lo pone el CSS (.seat-divider). Un
+            // setOpacity programatico GANA a la hoja de estilos en JavaFX, asi
+            // que dejarlo puesto haria que retocar el CSS no sirviera de nada.
+            d.getStyleClass().add("seat-divider");
+            d.setMouseTransparent(true);
+            seatDividers.add(d);
+            // DENTRO del visor, con las mesas.
+            //
+            // La primera version los puso fuera, en coordenadas de pantalla,
+            // razonando que asi no se acercarian con el zoom. Era al reves: lo
+            // que delimitan son las mesas, y las mesas SI se acercan y se
+            // arrastran — o sea que un separador quieto deja de separar nada en
+            // cuanto tocas Ctrl+rueda. Reportado jugando: "al hacer zoom los
+            // limitadores ya no valen porque no se mueven".
+            //
+            // Van los PRIMEROS del visor para quedar por detras de las cartas:
+            // una linea cruzando por encima de un permanente se lee como que la
+            // carta esta partida.
+            board.getChildren().add(0, d);
+        }
+
+        // Los permanentes de los asientos que se han ido, FUERA.
+        //
+        // No es limpieza: esas listas siguen entrando en el "everywhere" de
+        // repaintFields, que es lo que decide debajo de que criatura se pinta
+        // cada aura y cada equipo. Dejarlas ahi engancharia cosas a cartas de
+        // un rival que ya no se pinta — y como el enganche cruza de lado a
+        // proposito, el sintoma seria un aura huerfana en TU mesa.
+        while (oppCards.size() > want) {
+            oppCards.remove(oppCards.size() - 1);
+        }
+        while (oppCards.size() < want) {
+            oppCards.add(List.of());
+        }
+
+        // El asiento 0 recupera su tira al volver a modo pestanyas, donde tiene
+        // el ancho entero para ella. Y las barras se ponen (o se quitan) en
+        // dos filas: con varias en fila no hay ancho para una sola. Ver
+        // PlayerBar.setCompact.
+        opponentField.setPilesOnBoard(want == 1);
+        for (final PlayerBar b : oppBars) {
+            b.setCompact(want > 1);
+        }
+        requestLayout();
+    }
+
+    /** Cuantas mesas de rival se estan viendo. 1 es el modo pestanyas. */
+    public int opponentSeats() {
+        return oppFields.size();
+    }
+
+    /** Lo que mide una barra compacta. Se calcula una vez. */
+    private double compactBarWidth;
+
+    /**
+     * Cuantas mesas de rival CABEN de verdad con el ancho de ahora.
+     *
+     * <p>El limite no lo pone la mesa, que encoge las cartas y encima se puede
+     * acercar con Ctrl+rueda: lo pone <b>la barra del jugador</b>, que no
+     * encoge. Lleva avatar, nombre, los cinco contadores de zona, la reserva de
+     * mana y la vida, y por debajo de su ancho natural no se reordena — se
+     * <b>recorta</b>. Visto en una captura a 1024 de ancho con tres rivales:
+     * desaparecia la VIDA de los tres, que es justo el numero por el que
+     * decides a quien atacas.
+     *
+     * <p>Asi que el ajuste no manda solo: pide el modo, y aqui se le contesta
+     * cuantos asientos caben. Si no cabe ninguno de mas, se juega con pestanyas
+     * como siempre — antes eso que una barra que miente.
+     *
+     * <p>Antes del primer reparto {@code getWidth()} es 0. Ahi se contesta 1,
+     * o sea el modo de siempre: cuando se duda, lo que ya funciona.
+     */
+    public int maxOpponentSeats() {
+        final double w = getWidth();
+        if (w <= 0) {
+            return 1;
+        }
+        final double railW = folded ? 0 : Math.max(230, Math.min(UiScale.sideWidthNow(sideWidth), w * 0.145));
+        final double contentW = Math.max(200, w - railW);
+
+
+        // Lo que la barra pide para ella sola, sin recortar nada, EN SU VERSION
+        // DE DOS FILAS, que es la que se usa cuando hay varias. Se mide de
+        // verdad en vez de escribir un numero: el dia que la barra gane una
+        // pastilla mas, este limite se entera solo.
+        //
+        // Se mide sobre una barra de usar y tirar y no sobre opponentBar: esa
+        // esta en la escena, y ponerla y quitarla en compacto para preguntarle
+        // el ancho la haria parpadear en cada repintado.
+        if (compactBarWidth <= 0) {
+            final PlayerBar probe = new PlayerBar(true);
+            probe.setCompact(true);
+            probe.applyCss();
+            compactBarWidth = Math.max(200, probe.prefWidth(-1));
+        }
+        return Math.max(1, (int) Math.floor((contentW + SEAT_GAP) / (compactBarWidth + SEAT_GAP)));
+    }
+
+    /** true si se estan viendo todas las mesas a la vez. */
+    public boolean isMultiBoard() {
+        return oppFields.size() > 1;
+    }
+
+    /** Pestanyas de rival, para partidas de mas de dos. */
+    public void setOpponents(final List<PlayerView> opponents,
+                             final PlayerView selected,
+                             final PlayerView activeTurn,
+                             final PlayerView me) {
+        if (isMultiBoard()) {
+            // Viendolos todos, las pestanyas no eligen nada. Y hay que
+            // apagarlas de verdad, no solo darles alto 0: siguen siendo un nodo
+            // clicable, y su click significa "cambia de rival" — que en este
+            // modo es ademas el gesto que elige a quien atacas (ver
+            // NeoMatchUI.onOpponentFocused). Un control invisible que sigue
+            // respondiendo es el principio 1 al reves.
+            opponentTabs.setVisible(false);
+            opponentTabs.setManaged(false);
+        } else {
+            opponentTabs.setOpponents(opponents, selected, activeTurn, me);
+        }
+        requestLayout();
+    }
+
+    /**
+     * Vamos a cambiar de rival: lo de arriba se sustituye entero, no se muere.
+     * Ver {@link BattlefieldPane#skipRemovalAnimation()}.
+     */
+    public void skipOpponentRemovalAnimation() {
+        for (final PlayerField f : oppFields) {
+            f.skipRemovalAnimation();
+        }
+    }
+
+    public void setOnOpponentSelected(final Consumer<PlayerView> h) {
+        opponentTabs.setOnSelect(h);
+        opponentTabs.setPickable(this::hasSelectableCard);
+    }
+
+    /** Cartas en la zona de mando (el comandante). */
+    public void setCommandZone(final List<CardView> command,
+                               final PlayerView owner) {
+        setCommandZone(command, owner, true);
+    }
+
+    /**
+     * @param keepSlot si se le guarda el sitio aunque este vacia: en Commander
+     *                 si (el comandante vuelve), fuera no — vacia le quitaba
+     *                 a la mano el ancho de una carta (itch.io, 08-11-2026).
+     */
+    public void setCommandZone(final List<CardView> command,
+                               final PlayerView owner, final boolean keepSlot) {
+        commandZone.setKeepSlotWhenEmpty(keepSlot);
+        commandZone.setCards(command, owner);
+        reindex();
+    }
+
+    /** Muestra una carta en el panel de detalle sin necesidad de hover. */
+    public void showDetail(final CardView card) {
+        applyDetailSetting();
+        detail.show(card);
+    }
+
+    /** Solo pruebas ({@code --bigcard-test}): el mismo camino que pasar el raton. */
+    public void hoverForTest(final CardNode n) {
+        hovered(n);
+    }
+
+    /**
+     * Solo pruebas ({@code -Dneo.bigcard.popout}): la carta grande sobre la
+     * primera carta de lo que haya abierto encima. Dice si ha salido.
+     */
+    public String popOutHoverForTest() {
+        final java.util.List<CardNode> nodes = new java.util.ArrayList<>();
+        final Node layer = menuOverlay.isShowing() ? menuOverlay : overlay;
+        CardZoom.collectCardNodes(layer, nodes);
+        return bigCardSweep(nodes, layer);
+    }
+
+    /**
+     * Solo pruebas ({@code -Dneo.bigcard.stack}): la carta grande por cada fila
+     * del stack, por el mismo manejador que el raton. Dice cuantas salen y si
+     * alguna tapa la columna (tiene que ir siempre a su izquierda).
+     */
+    public String stackHoverForTest() {
+        int shown = 0;
+        int bad = 0;
+        for (final Region row : stackRows.values()) {
+            if (row.getOnMouseEntered() == null || row.getScene() == null) {
+                continue;
+            }
+            row.getOnMouseEntered().handle(null);
+            if (!bigCard.isVisible()) {
+                continue;
+            }
+            shown++;
+            if (bigCard.getBoundsInParent().getMaxX() > getWidth() - sideWidthNow()) {
+                bad++;
+            }
+        }
+        return stackRows.size() + " filas, " + shown + " con carta grande, " + bad + " tapando la columna";
+    }
+
+    /** Solo pruebas ({@code -Dneo.bigcard.table}): lo mismo con todas las cartas de la mesa. */
+    public String tableHoverForTest() {
+        final java.util.List<CardNode> all = new java.util.ArrayList<>();
+        CardZoom.collectCardNodes(this, all);
+        final java.util.List<CardNode> nodes = new java.util.ArrayList<>();
+        for (final CardNode n : all) {
+            if (!isInside(n, overlay) && !isInside(n, menuOverlay) && !isInside(n, zoomOverlay)
+                    && n.isVisible() && n.getScene() != null) {
+                nodes.add(n);
+            }
+        }
+        return bigCardSweep(nodes, null);
+    }
+
+    /**
+     * Pasa la carta grande por cada carta y cuenta: que salga, que no toque la
+     * carta que se mira (ya crecida), que quepa en la ventana y que vaya en su
+     * capa (encima de la ventana que la contiene; en la mesa, debajo de los
+     * dialogos).
+     */
+    private String bigCardSweep(final java.util.List<CardNode> nodes, final Node layer) {
+        int shown = 0;
+        int hidden = 0;
+        int bad = 0;
+        final double grown = Math.max(1.0, forge.neo.NeoSettings.hoverZoom());
+        for (final CardNode n : nodes) {
+            if (n == bigCard || n.getCard() == null) {
+                continue;
+            }
+            showBigCard(n);
+            if (!bigCard.isVisible()) {
+                hidden++;
+                continue;
+            }
+            shown++;
+            final javafx.geometry.Bounds c = sceneToLocal(n.localToScene(n.getBoundsInLocal()));
+            final double half = c.getWidth() / 2 * grown;
+            final javafx.geometry.Bounds g = bigCard.getBoundsInParent();
+            final boolean touches = g.getMinX() < c.getCenterX() + half && g.getMaxX() > c.getCenterX() - half;
+            final boolean outside = g.getMinX() < 0 || g.getMaxX() > getWidth()
+                    || g.getMinY() < 0 || g.getMaxY() > getHeight();
+            final boolean below = layer != null
+                    ? getChildren().indexOf(bigCard) != getChildren().indexOf(layer) + 1
+                    : getChildren().indexOf(bigCard) > getChildren().indexOf(overlay);
+            if (touches || outside || below) {
+                bad++;
+                System.out.printf(java.util.Locale.ROOT, "[grande] MAL en %s: tapa=%s fuera=%s debajo=%s carta=%.0f-%.0f grande=%.0f-%.0f%n",
+                        n.getCard().getName(), touches, outside, below, c.getCenterX() - half, c.getCenterX() + half,
+                        g.getMinX(), g.getMaxX());
+            }
+        }
+        return shown + " con carta grande, " + hidden + " sin sitio, " + bad + " mal";
+    }
+
+    /** Solo pruebas: cierra lo que haya abierto encima. */
+    public void closePopOutForTest() {
+        menuOverlay.hide();
+    }
+
+    /** Solo pruebas: si la carta grande esta a la vista. */
+    public boolean bigCardShownForTest() {
+        return bigCard.isVisible();
+    }
+
+    private void hovered(final CardNode n) {
+        applyDetailSetting();
+        detail.show(n.getCard());
+        showBigCard(n);
+        if (onCardHover != null) {
+            onCardHover.accept(n);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // La carta grande al pasar el raton (NeoSettings.BIG_HOVER_CARD)
+    // ---------------------------------------------------------------
+
+    /** La carta grande: no se toca (el raton la atraviesa) y va por encima de la mesa. */
+    private final CardNode bigCard = new CardNode(300);
+    /** Sobre cual esta el raton, para saber cuando se va. */
+    private Node bigCardOf;
+    /** Esconderla un pelin despues de salir: pasar de una carta a la de al lado no parpadea. */
+    private final javafx.animation.PauseTransition bigCardHide =
+            new javafx.animation.PauseTransition(javafx.util.Duration.millis(120));
+
+    {
+        bigCard.setMouseTransparent(true);
+        bigCard.setManaged(false);
+        bigCard.setVisible(false);
+        bigCard.setRotationEnabled(false);
+        bigCard.setHoverEnabled(false);
+        // Va cambiando de carta: sin esto, una que no tiene imagen (una
+        // reliquia de Ascenso, que se dibuja) se quedaba con el arte de la
+        // anterior. Discord, 11-10-2026: "hovering over a relic in ascent
+        // should show what the relic does instead of the commander".
+        bigCard.setBlankWhileLoading(true);
+        bigCard.getStyleClass().add("big-hover-card");
+        bigCardHide.setOnFinished(e -> bigCard.setVisible(false));
+    }
+
+    /**
+     * <b>La carta bajo el raton, en grande</b>, como el panel de imagen del
+     * Forge de siempre (Discord, 07-10-2026). Sale en el lado CONTRARIO al de
+     * la carta que se mira — si no, la taparia — centrada en alto, y se va al
+     * salir de la carta. El raton la atraviesa: la mesa se sigue clicando.
+     */
+    private void showBigCard(final CardNode n) {
+        showBigCard(n, n == null ? null : n.getCard());
+    }
+
+    /**
+     * Lo mismo con cualquier nodo de ancla: una fila del stack ensenya la carta
+     * de quien la puso (Discord, 27-10-2026: <i>"If you mouse over a card on the
+     * stack can you blow it up big like other cards"</i>). Su miniatura es
+     * transparente al raton a proposito (ver stackCardArt), asi que el raton lo
+     * mira la fila.
+     */
+    private void showBigCard(final Node n, final CardView card) {
+        if (!forge.neo.NeoSettings.bigHoverCard() || n == null || card == null
+                || zoomOverlay.isShowing()) {
+            return;
+        }
+        bigCardHide.stop();
+        if (bigCardOf != n) {
+            bigCardOf = n;
+            n.hoverProperty().addListener(new javafx.beans.value.ChangeListener<Boolean>() {
+                @Override
+                public void changed(final javafx.beans.value.ObservableValue<? extends Boolean> o,
+                                    final Boolean was, final Boolean is) {
+                    if (!is) {
+                        o.removeListener(this);
+                        if (bigCardOf == n) {
+                            bigCardOf = null;
+                            bigCardHide.playFromStart();
+                        }
+                    }
+                }
+            });
+            // Un dialogo que se cierra con el raton encima de su carta: el nodo
+            // se va de la escena sin que su hover pase a false, y la carta
+            // grande se quedaria puesta.
+            n.sceneProperty().addListener(new javafx.beans.value.ChangeListener<javafx.scene.Scene>() {
+                @Override
+                public void changed(final javafx.beans.value.ObservableValue<? extends javafx.scene.Scene> o,
+                                    final javafx.scene.Scene was, final javafx.scene.Scene is) {
+                    if (is == null) {
+                        o.removeListener(this);
+                        if (bigCardOf == n) {
+                            bigCardOf = null;
+                            bigCardHide.playFromStart();
+                        }
+                    }
+                }
+            });
+        }
+        // Del tamanyo del panel de imagen de Forge: el 62% del alto de la mesa,
+        // sin pasar de 720 px (en 4K seria un cartel).
+        final double[] spot = bigCardSpot(n);
+        if (spot == null) {
+            // No cabe a un tamanyo que se lea sin tapar la carta que se mira:
+            // mejor nada que taparla.
+            bigCardOf = null;
+            bigCard.setVisible(false);
+            return;
+        }
+        bigCard.setCardWidth(spot[2]);
+        bigCard.setCard(card);
+        // resizeRelocate y no relocate: va fuera del layout (setManaged false),
+        // asi que nadie mas le da su tamanyo y se quedaba con el del arranque.
+        bigCard.resizeRelocate(spot[0], spot[1], spot[2], spot[3]);
+        // Una carta de la mesa: debajo de los dialogos, porque lo que el motor
+        // pregunta manda sobre cualquier cartel nuestro (principio 4). Una
+        // carta de un dialogo o de una zona abierta: ENCIMA de su capa, o no
+        // se veria. Justo encima de la capa que la contiene, sin suponer el
+        // orden de las demas.
+        final Node layer = isInside(n, menuOverlay) ? menuOverlay : isInside(n, overlay) ? overlay : null;
+        final int now = getChildren().indexOf(bigCard);
+        final boolean placed = layer != null
+                ? now >= 0 && now == getChildren().indexOf(layer) + 1
+                : now >= 0 && now < getChildren().indexOf(overlay);
+        if (!placed) {
+            getChildren().remove(bigCard);
+            final int at = layer != null ? getChildren().indexOf(layer) + 1 : getChildren().indexOf(overlay);
+            getChildren().add(at < 0 ? getChildren().size() : at, bigCard);
+        }
+        bigCard.setVisible(true);
+    }
+
+    /**
+     * Donde va la carta grande para no tapar NUNCA la que se mira:
+     * {@code {x, y, ancho, alto}}, o null si no cabe a un tamanyo legible.
+     *
+     * <p>Del tamanyo del panel de imagen de Forge (el 62 % del alto, sin pasar
+     * de 720 px), en el lado contrario al de la carta. Pero la carta que se
+     * mira puede estar cerca del centro y, en una ventana, ser ancha — y
+     * ademas crece al pasar el raton ({@code NeoSettings.hoverZoom}, hasta el
+     * 150 %), asi que se cuenta YA crecida. Si no cabe en su lado, el otro; si
+     * en ninguno, se encoge al hueco mas grande.
+     */
+    private double[] bigCardSpot(final Node n) {
+        final javafx.geometry.Bounds b = sceneToLocal(n.localToScene(n.getBoundsInLocal()));
+        if (b == null) {
+            return null;
+        }
+        final double margin = UiScale.px(24);
+        final double minX = margin;
+        final double maxX = getWidth() - sideWidthNow() - margin;
+        final double grown = Math.max(1.0, forge.neo.NeoSettings.hoverZoom());
+        final double half = b.getWidth() / 2 * grown;
+        final double cardLeft = b.getCenterX() - half;
+        final double cardRight = b.getCenterX() + half;
+        // Lo que cabe a cada lado, dejando el margen tambien junto a la carta.
+        final double leftRoom = cardLeft - margin - minX;
+        final double rightRoom = maxX - (cardRight + margin);
+
+        double h = Math.min(getHeight() * 0.62, UiScale.px(720));
+        double w = h / CardNode.ASPECT;
+        final boolean preferRight = b.getCenterX() < getWidth() / 2;
+        boolean right;
+        if ((preferRight ? rightRoom : leftRoom) >= w) {
+            right = preferRight;
+        } else if ((preferRight ? leftRoom : rightRoom) >= w) {
+            right = !preferRight;
+        } else {
+            right = rightRoom >= leftRoom;
+            w = Math.max(0, right ? rightRoom : leftRoom);
+            h = w * CardNode.ASPECT;
+        }
+        if (w < UiScale.px(150)) {
+            return null;
+        }
+        final double x = right ? maxX - w : minX;
+        final double y = Math.max(margin, (getHeight() - h) / 2);
+        return new double[] {x, y, w, h};
+    }
+
+    /** La carta (CardNode) en la que esta {@code target}, sin salir de {@code layer}. */
+    private CardNode cardNodeAt(final Object target, final Node layer) {
+        Node n = target instanceof Node ? (Node) target : null;
+        while (n != null && n != layer) {
+            if (n instanceof CardNode c && c != bigCard && c.getCard() != null) {
+                return c;
+            }
+            n = n.getParent();
+        }
+        return null;
+    }
+
+    /** Lo que mide la columna de la derecha, para que la carta grande no la tape. */
+    private double sideWidthNow() {
+        return side.isVisible() ? side.getWidth() : 0;
+    }
+
+    /**
+     * El panel de detalle en la columna, si el jugador lo ha encendido.
+     *
+     * <p>Se quito de la mesa a proposito y vuelve <b>apagado de fabrica</b>
+     * (ver {@code NeoSettings.HOVER_DETAIL}). Dos cosas hacen que encenderlo no
+     * pueda estropear nada:
+     *
+     * <ul>
+     *   <li><b>Va encima de los botones, nunca debajo.</b> La barra de accion
+     *       no se mueve de sitio pase lo que pase — un boton que cambia de
+     *       posicion se acaba pulsando por inercia (principio 6b).</li>
+     *   <li><b>Se come lo que SOBRA, y nada mas.</b> Pide alto <b>cero</b> y
+     *       crece con lo que quede libre. Asi, cuando la columna va justa,
+     *       desaparece el en vez de encoger el stack — que es exactamente por
+     *       lo que se quito de la mesa.</li>
+     * </ul>
+     *
+     * <p>Se relee al pasar el raton y no solo al construir la mesa: los ajustes
+     * se abren desde el menu de pausa <b>a mitad de partida</b>, y un ajuste que
+     * solo se nota en la partida siguiente parece que no funciona.
+     */
+    private void applyDetailSetting() {
+        final boolean want = forge.neo.NeoSettings.hoverDetail();
+        final boolean has = side.getChildren().contains(detail);
+        if (want == has) {
+            return;
+        }
+        if (!want) {
+            side.getChildren().remove(detail);
+            if (!side.getChildren().contains(sideSpace)) {
+                final int at = side.getChildren().indexOf(actionBar);
+                side.getChildren().add(at < 0 ? side.getChildren().size() : at, sideSpace);
+            }
+            return;
+        }
+        // El panel OCUPA EL SITIO del hueco de la columna, no se pone a su lado.
+        // Ese hueco crece ALWAYS, y un VBox le da todo lo que sobra a los ALWAYS
+        // antes que a los SOMETIMES: con los dos puestos, el panel se quedaba a
+        // alto cero para siempre y el ajuste encendido no ensenyaba nada
+        // (reportado jugando el 15-09-2026). Sin el hueco, el panel se lleva lo
+        // libre, los botones siguen abajo del todo, y con el stack largo (que si
+        // es ALWAYS) sigue siendo el panel el que desaparece.
+        side.getChildren().remove(sideSpace);
+        // Pide CERO y crece con lo que sobre. Es lo que hace que encenderlo no
+        // pueda quitarle sitio a nada: cuando la columna va justa (el rail de
+        // fases es alto y un stack de nueve pide seis filas) un panel que
+        // pidiera su tamanyo se lo comeria al stack — medido, con nueve
+        // entradas el stack se quedaba en linea y media. Pidiendo cero, ahi
+        // simplemente no aparece.
+        detail.setMinHeight(0);
+        detail.setPrefHeight(0);
+        // SOMETIMES y no ALWAYS: con el stack largo (que si es ALWAYS) este se
+        // queda en cero y desaparece entero, en vez de quedarse en una tira de
+        // treinta pixeles ensenyando el borde de una carta.
+        VBox.setVgrow(detail, Priority.SOMETIMES);
+        final int before = side.getChildren().indexOf(actionBar);
+        side.getChildren().add(before < 0 ? side.getChildren().size() : before, detail);
+    }
+
+
+    public PlayerBar getOpponentBar() {
+        return opponentBar;
+    }
+
+    /** El campo del rival que se este mirando ahora (uno solo, aunque haya varios). */
+    public PlayerField getOpponentField() {
+        return opponentField;
+    }
+
+    /** Tu propio campo. */
+    public PlayerField getSelfField() {
+        return selfField;
+    }
+
+    /** Tu pila de cementerio. Para las pruebas: la del rival esta antes. */
+    public ZonePile getSelfGraveyardPile() {
+        return selfField.getGraveyardPile();
+    }
+
+    public PlayerBar getSelfBar() {
+        return selfBar;
+    }
+
+    /**
+     * Pinta el stack: lo que esta esperando a resolverse, de arriba abajo.
+     *
+     * <p><b>Sin cartas, a proposito.</b> Antes cada entrada llevaba su carta al
+     * lado y el resultado era ilegible en cuanto se encadenaban varias: la
+     * columna es estrecha, las cartas salian a 50 px — demasiado pequenyas para
+     * reconocerlas — y con la carta grande no cabian las de debajo. El stack es
+     * una LISTA ORDENADA, y lo que hace falta leer de ella es cuantos hay, de
+     * quien son, en que orden se resuelven y que hacen. Todo eso es texto.
+     *
+     * <p><b>Y cada entrada se despliega.</b> Reportado por un jugador nuevo:
+     * <i>que deje ver el stack entero y no solo el de arriba</i>. La lista
+     * entera ya estaba aqui y rodaba, asi que no le faltaba ni una — pero se
+     * LEIA asi, porque solo el de arriba decia QUE hace y los de debajo eran
+     * una linea con el nombre. Ahora cualquiera se abre con un click, y lo que
+     * lo hace visible es el <b>galon</b> de la izquierda: sin el, el gesto
+     * existe y no lo descubre nadie, que es como no tenerlo.
+     *
+     * <p>Lo que se abre se <b>recuerda</b> ({@link #stackOpen}). Esta lista se
+     * repinta ENTERA en cada aviso del motor — varios por segundo mientras se
+     * encadenan disparos — asi que sin memoria lo que acabas de abrir se
+     * cerraria solo antes de que te diera tiempo a leerlo.
+     *
+     * <p>El click izquierdo abre y cierra; el derecho sigue siendo el menu del
+     * stack. Antes el izquierdo mandaba la carta al panel de detalle, y ese
+     * panel <b>ya no esta en la mesa</b> desde que se le devolvio la columna al
+     * stack: o sea que clicar una entrada no hacia nada visible.
+     */
+    /**
+     * La partida de la pila que se pinta, para la X de cada objeto
+     * ({@link forge.neo.match.StackX}): la vista no la lleva. La pone
+     * {@code TableBinder} antes de cada {@link #setStack}; null en las maquetas.
+     */
+    private forge.game.Game stackGame;
+
+    public void setStackGame(final forge.game.Game game) {
+        stackGame = game;
+    }
+
+    public void setStack(final Iterable<StackItemView> items, final PlayerView me) {
+        stackBox.getChildren().clear();
+        stackRows.clear();
+
+        final List<StackItemView> list = new ArrayList<>();
+        if (items != null) {
+            for (final StackItemView item : items) {
+                list.add(item);
+            }
+        }
+        stackSize = list.size();
+        lastStack = list;
+        lastStackMe = me;
+        refreshStackChip();
+        applyStackTargets();
+        splitStackTargets(list);
+
+        // Lo que ya se ha resuelto se olvida. Los ids del motor se reciclan, y
+        // uno guardado como "abierto" de hace tres turnos abriria por su cuenta
+        // una entrada que nadie ha tocado.
+        stackOpen.keySet().retainAll(idsOf(list));
+        // Lo mismo con las cartas: sin esto, una partida larga va
+        // acumulando un CardNode por cada hechizo que se ha lanzado.
+        stackArt.keySet().retainAll(idsOf(list));
+
+        // La caja se estira SOLO cuando hay mas filas de las que caben, y
+        // entonces se queda con el hueco que dejo el panel de detalle: son unos
+        // 76 px, o sea tres filas mas a la vista sin tener que rodar.
+        //
+        // Con una o dos cosas en el stack no se estira: una caja de 285 px con
+        // una linea dentro llama la atencion hacia donde no hay nada.
+        //
+        // Y cuando se estira, se lo lleva TODO, hasta los botones. El hueco de
+        // la columna (sideSpace) tambien es ALWAYS, y un VBox reparte lo libre
+        // A PARTES IGUALES entre los ALWAYS: la caja se quedaba a media columna
+        // con un stack de 41 dentro (itch.io, 28-09-2026: "Stack should fill
+        // the box probably?"). Mientras el stack desborda, el hueco no crece.
+        //
+        // Lo que se cuenta son las FILAS: con los disparos iguales juntos
+        // (StackGroups, Discord 08-10-2026) seis de lo mismo son una.
+        final List<forge.neo.match.StackGroups.Run> runs = forge.neo.NeoSettings.groupStack()
+                ? forge.neo.match.StackGroups.runs(list) : singleRuns(list);
+        final List<StackItemView> shown = new ArrayList<>();
+        for (final forge.neo.match.StackGroups.Run run : runs) {
+            shown.add(run.first());
+        }
+        final boolean overflow = shown.size() > visibleRows();
+        VBox.setVgrow(stackBox, overflow ? Priority.ALWAYS : Priority.NEVER);
+        VBox.setVgrow(sideSpace, overflow ? Priority.NEVER : Priority.ALWAYS);
+
+        final Label title = new Label(list.isEmpty()
+                ? NeoText.get("table.stack")
+                : NeoText.get("table.stack.count", list.size()));
+        title.getStyleClass().add("caption");
+
+        if (list.isEmpty()) {
+            stackBox.getChildren().add(title);
+            final Label empty = new Label(NeoText.get("table.stack.empty"));
+            empty.getStyleClass().add("hud-sub");
+            stackBox.getChildren().add(empty);
+            return;
+        }
+
+        stackBox.getChildren().add(stackHeader(title, list, me));
+
+        final VBox rows = new VBox(2);
+        rows.getChildren().add(topRow(runs.get(0).first(), runs.get(0).count(), me));
+        for (int r = 1; r < runs.size(); r++) {
+            final forge.neo.match.StackGroups.Run run = runs.get(r);
+            rows.getChildren().add(waitingRow(run.first(), run.start() + 1, run.count(), me));
+        }
+
+        // Se ensenyan TODOS, y con quince encima puedes querer mirar el
+        // septimo: lo que no cabe se alcanza rodando. Cortar en cinco sin
+        // decirlo, como antes, era mentir sobre lo que hay esperando.
+        final ScrollPane scroll = new ScrollPane(rows);
+        scroll.getStyleClass().add("stack-scroll");
+        scroll.setFitToWidth(true);
+        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        scroll.setPrefViewportHeight(viewportHeight(shown));
+        // Y la lista crece con la caja: sin esto la caja se estiraba y la
+        // lista se quedaba en su alto de siempre, con la caja vacia debajo.
+        scroll.setMaxHeight(Double.MAX_VALUE);
+        VBox.setVgrow(scroll, Priority.ALWAYS);
+        stackBox.getChildren().add(scroll);
+        // Otra vez, ya con las filas: un contrahechizo marca la suya.
+        applyStackTargets();
+    }
+
+    /**
+     * El titulo, y con el la llave de todas: abrir o cerrar el stack entero.
+     *
+     * <p>Es lo que se pidio con esas palabras — <i>poder desplegarlo y
+     * plegarlo</i> — y con cinco disparos encadenados abrirlos de uno en uno
+     * son cinco clicks para contestar una sola pregunta: que me va a caer
+     * encima. Si queda alguno cerrado, los abre todos; si ya estan todos
+     * abiertos, los cierra.
+     */
+    private Region stackHeader(final Label title, final List<StackItemView> list,
+                               final PlayerView me) {
+        final boolean allOpen = allStackOpen(list);
+        final HBox header = new HBox(5, chevron(allOpen), title);
+        header.setAlignment(Pos.CENTER_LEFT);
+        header.getStyleClass().add("stack-header");
+        header.setCursor(javafx.scene.Cursor.HAND);
+        header.setOnMouseClicked(e -> {
+            if (e.getButton() == javafx.scene.input.MouseButton.SECONDARY) {
+                return;
+            }
+            for (final StackItemView item : list) {
+                stackOpen.put(item.getId(), !allOpen);
+            }
+            setStack(list, me);
+            e.consume();
+        });
+        return header;
+    }
+
+    /**
+     * Abrir o cerrar el stack entero, como el click en su titulo. Lo usa el
+     * atajo de teclado ("Show stack" en Forge: aqui el stack siempre se ve, asi
+     * que lo que le queda por hacer es desplegarse).
+     *
+     * @return false si no hay nada en el stack
+     */
+    public boolean toggleAllStackEntries() {
+        if (lastStack.isEmpty()) {
+            return false;
+        }
+        final boolean allOpen = allStackOpen(lastStack);
+        for (final StackItemView item : lastStack) {
+            stackOpen.put(item.getId(), !allOpen);
+        }
+        // Copia: setStack se queda la lista que le pasan como la nueva lastStack.
+        setStack(new ArrayList<>(lastStack), lastStackMe);
+        return true;
+    }
+
+    /** Una fila por entrada: el stack con los disparos iguales sin juntar. */
+    private static List<forge.neo.match.StackGroups.Run> singleRuns(final List<StackItemView> list) {
+        final List<forge.neo.match.StackGroups.Run> out = new ArrayList<>();
+        for (final StackItemView item : list) {
+            out.addAll(forge.neo.match.StackGroups.runs(java.util.Collections.singletonList(item)));
+        }
+        return out;
+    }
+
+    /** Solo para pruebas: cuantas filas tiene el stack pintado, y cuantas entradas. */
+    public int[] stackRowsAndItems() {
+        final int items = lastStack.size();
+        final int rows = forge.neo.NeoSettings.groupStack()
+                ? forge.neo.match.StackGroups.runs(lastStack).size() : items;
+        return new int[] {rows, items};
+    }
+
+    /** Si no queda ninguna entrada por abrir. */
+    private boolean allStackOpen(final List<StackItemView> list) {
+        for (int i = 0; i < list.size(); i++) {
+            if (!isStackOpen(list.get(i), i == 0)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Cuanto del stack se ve sin rodar.
+     *
+     * <p>Lo desplegado cuenta. Si no, abrir una de las de abajo la escribiria
+     * fuera del visor y el click no ensenyaria nada — que es exactamente el
+     * fallo que esto viene a arreglar. Con techo, porque la columna tambien
+     * tiene que dejarle sitio a las fases y a los botones.
+     */
+    private double viewportHeight(final List<StackItemView> list) {
+        int open = 0;
+        for (int i = 1; i < list.size(); i++) {
+            if (isStackOpen(list.get(i), false)) {
+                open++;
+            }
+        }
+        return Math.min(list.size(), visibleRows()) * rowHeight() + UiScale.px(TOP_ROW_EXTRA)
+                + Math.min(open, MAX_OPEN_ROWS) * UiScale.px(EXPANDED_EXTRA);
+    }
+
+    /**
+     * Lo que mide una fila, que depende de si lleva carta.
+     *
+     * <p>Los numeros de abajo se midieron con la lista de texto. Con la carta
+     * puesta una fila pasa de 23 px a unos 70, asi que dejarlos fijos pedia un
+     * visor de la altura de tres filas para ensenyar seis: el stack salia
+     * cortado justo cuando mas cosas hay dentro.
+     */
+    private double rowHeight() {
+        return forge.neo.NeoSettings.stackCards()
+                ? stackArtWidth() * CardNode.ASPECT + 8 : UiScale.px(ROW_H);
+    }
+
+    /**
+     * Cuantas filas se ven de una vez.
+     *
+     * <p>Menos con carta, y no es una concesion: seis filas de carta son 420
+     * px, o sea la columna entera, y el rail de fases y los botones tambien
+     * viven ahi. Tres se ven de golpe y el resto rueda, que es lo que ya
+     * pasaba antes con quince disparos encadenados.
+     */
+    private int visibleRows() {
+        return forge.neo.NeoSettings.stackCards() ? 3 : VISIBLE_ROWS;
+    }
+
+    private static java.util.Set<Integer> idsOf(final List<StackItemView> list) {
+        final java.util.Set<Integer> ids = new java.util.HashSet<>();
+        for (final StackItemView item : list) {
+            ids.add(item.getId());
+        }
+        return ids;
+    }
+
+    /** Cuantas filas se ven de una vez; el resto, rodando. */
+    private static final int VISIBLE_ROWS = 6;
+
+    /** Lo que mide una fila normal, con su separacion, en 1080p (crece con la letra). */
+    private static final double ROW_H = 23;
+
+    /** Lo que la primera fila abulta de mas por llevar el texto de la accion. */
+    private static final double TOP_ROW_EXTRA = 38;
+
+    /** Lo que crece el visor por cada entrada desplegada. */
+    private static final double EXPANDED_EXTRA = 34;
+
+    /** Cuantas desplegadas caben antes de que toque rodar. */
+    private static final int MAX_OPEN_ROWS = 2;
+
+    /**
+     * Que entradas ha abierto o cerrado el jugador <b>a mano</b>.
+     *
+     * <p>Solo lo que ha tocado: lo que no esta aqui usa el reparto de fabrica
+     * (abierta la de arriba, cerradas las de debajo), que se calcula en cada
+     * repintado. Guardar tambien las que nadie ha tocado obligaria a saber
+     * cual era "la de arriba" la vez anterior, que es justo lo que cambia solo
+     * en cuanto algo se resuelve.
+     */
+    private final Map<Integer, Boolean> stackOpen = new HashMap<>();
+
+    /**
+     * La carta de cada entrada del stack, reutilizada entre repintados.
+     *
+     * <p>Se guarda por <b>id de la entrada</b> y no de la carta: dos copias del
+     * mismo hechizo son dos entradas distintas, y un {@code Node} de JavaFX no
+     * puede estar en dos sitios a la vez.
+     *
+     * <p>Y se guarda, punto. Esta lista se rehace entera en cada aviso del
+     * motor — varias veces por segundo mientras se encadenan disparos — y
+     * construir un {@link CardNode} por fila y por repintado es justo el error
+     * clasico de rendimiento que avisa la seccion 11 de las notas de diseño. La imagen ya
+     * la cachea {@code CardImages}; lo que no se puede repetir es el arbol de
+     * escena.
+     */
+    private final Map<Integer, CardNode> stackArt = new HashMap<>();
+
+    /**
+     * Cuanto mide la carta de una entrada del stack.
+     *
+     * <p>Un solo tamanyo para todas, y eso es una decision: la de arriba ya se
+     * distingue por su marco de acento y ademas sale grande en el cartel
+     * central, asi que darle otro ancho solo serviria para invalidar el cache
+     * en cuanto algo se resuelve y la segunda pasara a ser la primera.
+     *
+     * <p>El numero sale de la columna, no es fijo: la mesa se escala con la
+     * ventana. Con el tope de 44 px una fila cerrada mide unos 60 px, o sea que
+     * nueve disparos encadenados siguen cabiendo en el visor que ya rodaba.
+     */
+    private double stackArtWidth() {
+        return Math.max(38, Math.min(UiScale.px(54), UiScale.sideWidthNow(sideWidth) * 0.18));
+    }
+
+    /**
+     * La carta de una entrada, o null si no hay que pintarla.
+     *
+     * <p>Null en dos casos: con el ajuste apagado, y cuando el motor no publica
+     * carta de origen. Lo segundo pasa de verdad — hay disparos sin carta — y
+     * ahi la fila se queda como estaba en vez de reservar un hueco vacio.
+     */
+    private CardNode stackCardArt(final StackItemView item) {
+        if (!forge.neo.NeoSettings.stackCards()) {
+            return null;
+        }
+        final CardView source = item.getSourceCard();
+        if (source == null) {
+            return null;
+        }
+        CardNode node = stackArt.get(item.getId());
+        if (node == null) {
+            node = new CardNode(stackArtWidth());
+            node.setRotationEnabled(false);
+            node.setHoverEnabled(false);
+            node.setBadgesVisible(false);
+            node.setCountersVisible(false);
+            // Transparente al raton A PROPOSITO: el click de la fila abre y
+            // cierra, y el derecho saca su menu. Si la carta se quedara los
+            // eventos, clicar justo encima de ella — que es lo que hara todo el
+            // mundo en cuanto haya una carta que clicar — no haria nada.
+            node.setMouseTransparent(true);
+            stackArt.put(item.getId(), node);
+        }
+        node.setCard(source);
+        return node;
+    }
+
+    /** Lo ultimo que se pinto, para poder repintar al abrir o cerrar una fila. */
+    private List<StackItemView> lastStack = new ArrayList<>();
+
+    private PlayerView lastStackMe;
+
+    private boolean isStackOpen(final StackItemView item, final boolean top) {
+        final Boolean choice = stackOpen.get(item.getId());
+        return choice == null ? top : choice;
+    }
+
+    /**
+     * El que se resuelve AHORA.
+     *
+     * <p>Nace abierto, que es lo que ya hacia: es el que te va a caer encima y
+     * de el se lee todo. Se puede cerrar como cualquier otro — con quince
+     * disparos encadenados, ver la lista de un vistazo vale mas que el detalle
+     * de uno.
+     */
+    private Region topRow(final StackItemView item, final int count, final PlayerView me) {
+        final Label header = new Label(headerFor(item, me));
+        header.getStyleClass().add("stack-now");
+        header.pseudoClassStateChanged(MINE, isMine(item, me));
+
+        final Label name = new Label(headlineOf(item, me, stackGame));
+        name.getStyleClass().add("stack-top-name");
+        name.setWrapText(true);
+        name.setMaxWidth(Double.MAX_VALUE);
+        name.setMinHeight(Region.USE_PREF_SIZE);
+        HBox.setHgrow(name, Priority.ALWAYS);
+
+        final Region detailBox = stackDetail(item, count);
+        final boolean expandable = detailBox != null;
+        final boolean open = expandable && isStackOpen(item, true);
+
+        final HBox line = new HBox(5, name);
+        line.setAlignment(Pos.TOP_LEFT);
+        if (expandable) {
+            line.getChildren().add(0, chevron(open));
+        }
+        if (count > 1) {
+            line.getChildren().add(countBadge(count));
+        }
+
+        final VBox texts = new VBox(2, header, line);
+        if (open) {
+            texts.getChildren().add(detailBox);
+        }
+        HBox.setHgrow(texts, Priority.ALWAYS);
+        texts.setMaxWidth(Double.MAX_VALUE);
+
+        // La carta a la izquierda, si el ajuste esta puesto. Se pinta al lado
+        // del bloque entero (cabecera + nombre + detalle) y no dentro de la
+        // linea del nombre: si fuera dentro, abrir la entrada empujaria el
+        // texto por debajo de la carta y la fila se leeria en L.
+        final CardNode art = stackCardArt(item);
+        final Region box;
+        if (art == null) {
+            box = texts;
+        } else {
+            final HBox row = new HBox(8, art, texts);
+            row.setAlignment(Pos.TOP_LEFT);
+            box = row;
+        }
+        box.getStyleClass().add("stack-top");
+        wireRow(box, item, true, expandable);
+        return box;
+    }
+
+    /** Uno de los que esperan: numero, quien y nombre. Lo demas, al abrirlo. */
+    private Region waitingRow(final StackItemView item, final int order, final int count,
+                              final PlayerView me) {
+        final Label num = new Label(String.valueOf(order));
+        num.getStyleClass().add("stack-order");
+        num.setMinWidth(UiScale.px(15));
+
+        final Label who = new Label(ownerName(item, me));
+        who.getStyleClass().add("stack-who");
+        who.pseudoClassStateChanged(MINE, isMine(item, me));
+        who.setMinWidth(Region.USE_PREF_SIZE);
+
+        final Label name = new Label(headlineOf(item, me, stackGame));
+        name.getStyleClass().add(item.isTrigger() ? "stack-trigger" : "stack-spell");
+        name.setMaxWidth(Double.MAX_VALUE);
+        HBox.setHgrow(name, Priority.ALWAYS);
+
+        final Region detailBox = stackDetail(item, count);
+        final boolean expandable = detailBox != null;
+        final boolean open = expandable && isStackOpen(item, false);
+
+        // Cerrada es una linea y el nombre largo se corta con "..."; abierta se
+        // ha venido justamente a leerla, asi que el nombre se parte entero.
+        if (open) {
+            name.setWrapText(true);
+            name.setMinHeight(Region.USE_PREF_SIZE);
+        }
+
+        final HBox line = new HBox(6, num, who, name);
+        line.setAlignment(Pos.CENTER_LEFT);
+        if (expandable) {
+            line.getChildren().add(1, chevron(open));
+        }
+        if (count > 1) {
+            line.getChildren().add(countBadge(count));
+        }
+
+        final VBox texts = new VBox(2, line);
+        if (open) {
+            texts.getChildren().add(detailBox);
+        }
+        HBox.setHgrow(texts, Priority.ALWAYS);
+        texts.setMaxWidth(Double.MAX_VALUE);
+
+        final CardNode art = stackCardArt(item);
+        final Region box;
+        if (art == null) {
+            box = texts;
+        } else {
+            // Cerrada, el texto es una linea y la carta mide sesenta pixeles:
+            // centrado, o el nombre queda pegado al canto de arriba y la fila
+            // parece descuadrada. Abierta manda el texto y crece hacia abajo.
+            final HBox row = new HBox(8, art, texts);
+            row.setAlignment(open ? Pos.TOP_LEFT : Pos.CENTER_LEFT);
+            box = row;
+        }
+        box.getStyleClass().add("stack-strip");
+        wireRow(box, item, false, expandable);
+        return box;
+    }
+
+    /**
+     * El "×6" de una fila que junta disparos iguales (ver
+     * {@link forge.neo.match.StackGroups}). Una pastilla y no texto suelto:
+     * es lo que se busca de un vistazo, y el nombre de al lado puede venir
+     * cortado con "...".
+     */
+    private static Label countBadge(final int count) {
+        final Label badge = new Label("×" + count);
+        // Clase PROPIA, no "stack-count": esa es la del "x3" de las pilas de la
+        // mesa, y compartirla le metio a aquella este relleno y este fondo; su
+        // ancho esta medido para el numero justo, asi que salia "..." hasta en
+        // un x2 (Discord, 09-10-2026).
+        badge.getStyleClass().add("stack-group-count");
+        badge.setMinWidth(Region.USE_PREF_SIZE);
+        return badge;
+    }
+
+    /**
+     * Lo que la entrada cuenta al abrirse: que hace y a quien apunta.
+     *
+     * @return null si no tiene nada mas que contar — y entonces no lleva
+     *         galon: un desplegable que se abre vacio promete algo que no hay,
+     *         y eso es peor que no tenerlo (principio 1)
+     */
+    private static Region stackDetail(final StackItemView item, final int count) {
+        final VBox box = new VBox(2);
+        box.getStyleClass().add("stack-detail");
+
+        // Juntando varias, sin el "[Zone Changer: Grizzly Bears]" del final:
+        // habla de UNA de las seis, y al lado de un "×6" se lee como si las
+        // seis fueran de ese oso. Ver StackGroups.withoutCause.
+        final String what = count > 1
+                ? forge.neo.match.StackGroups.withoutCause(effectText(item)) : effectText(item);
+        if (!what.isEmpty()) {
+            final Label text = new Label(what);
+            text.getStyleClass().add(item.isTrigger() ? "stack-trigger" : "stack-spell");
+            text.setWrapText(true);
+            text.setMaxWidth(Double.MAX_VALUE);
+            text.setMinHeight(Region.USE_PREF_SIZE);
+            box.getChildren().add(text);
+        }
+
+        final String targets = targetsOf(item, what);
+        if (!targets.isEmpty()) {
+            final Label line = new Label(NeoText.get("stack.targets", targets));
+            line.getStyleClass().add("stack-targets");
+            line.setWrapText(true);
+            line.setMaxWidth(Double.MAX_VALUE);
+            line.setMinHeight(Region.USE_PREF_SIZE);
+            box.getChildren().add(line);
+        }
+        return box.getChildren().isEmpty() ? null : box;
+    }
+
+    /**
+     * A quien apunta, y solo lo que el texto del motor no diga ya.
+     *
+     * <p>Con varios disparos encadenados, "a que apunta este" es la pregunta
+     * que decide si respondes o lo dejas pasar, y el motor publica los
+     * objetivos aparte ({@code getTargetCards} / {@code getTargetPlayers}).
+     * Casi siempre van tambien dentro de su descripcion, asi que se anyade
+     * solo el que falte: repetir el mismo nombre en dos lineas seguidas fue
+     * justo lo que hizo ilegible el panel del stack la primera vez.
+     *
+     * @param what el texto que ya se esta ensenyando encima
+     */
+    /**
+     * El texto del cartel central (el espejo del stack), una cosa por linea:
+     * quien, que carta, que hace y a quien apunta.
+     *
+     * <p>Antes era un parrafo: "Jugador: Carta (12) - efecto (Targeting:
+     * Otra (34))", el texto del motor tal cual con el nombre delante. Pedido en
+     * Discord (01-10-2026): <i>"line breaks between the individual pieces of
+     * information (player, card name, target, effect)"</i>. Son las mismas
+     * piezas que ya usa el panel del stack de la derecha ({@link #headlineOf},
+     * {@link #effectText}, {@link #targetsOf}), asi que los dos cuentan lo
+     * mismo. El "(Targeting: ...)" que el motor pega al final —en ingles y con
+     * el numero interno de cada carta— sale del efecto y va en su linea,
+     * traducido.
+     */
+    public static String bannerText(final StackItemView item, final PlayerView me) {
+        return bannerText(item, me, 1);
+    }
+
+    /**
+     * @param count cuantas iguales hay seguidas, esta incluida: con mas de una
+     *              el nombre lleva su "×6", como la fila del stack
+     */
+    public static String bannerText(final StackItemView item, final PlayerView me, final int count) {
+        return bannerText(item, me, count, null);
+    }
+
+    /** @param game la partida, para la X ({@link forge.neo.match.StackX}); null si no se sabe */
+    public static String bannerText(final StackItemView item, final PlayerView me, final int count,
+                                    final forge.game.Game game) {
+        if (item == null) {
+            return "";
+        }
+        final java.util.List<String> lines = new java.util.ArrayList<>();
+        final String who = ownerName(item, me);
+        if (!who.isBlank()) {
+            lines.add(who);
+        }
+        final String head = headlineOf(item, me, game);
+        if (!head.isBlank()) {
+            lines.add(count > 1 ? head + "  ×" + count : head);
+        }
+        String what = count > 1
+                ? forge.neo.match.StackGroups.withoutCause(effectText(item)) : effectText(item);
+        final int targeting = what.lastIndexOf("(Targeting:");
+        if (targeting >= 0) {
+            what = what.substring(0, targeting).trim();
+        }
+        if (!what.isBlank() && !what.equals(head)) {
+            lines.add(what);
+        }
+        // Aqui el objetivo va SIEMPRE en su linea, aunque el efecto ya lo
+        // nombre ("hace 3 de dano a Grizzly Bears"): es justo lo que se pidio
+        // poder ver de un vistazo, sin leer la frase.
+        // Y de QUIEN es cada uno (Discord, 20-10-2026: "ideally grouped by
+        // their controller/owner"): "Grizzly Bears, Llanowar Elves (Parker)".
+        final String targets = targetsByController(item, me);
+        if (!targets.isEmpty()) {
+            lines.add(NeoText.get("stack.targets", targets));
+        }
+        return lines.isEmpty() ? NeoText.get("alert.aSpell") : String.join("\n", lines);
+    }
+
+    /** Los objetivos agrupados por quien los controla ({@code StackTargets}). */
+    static String targetsByController(final StackItemView item, final PlayerView me) {
+        return forge.neo.match.StackTargets.byController(item, me,
+                c -> c.getCurrentState() == null ? null : CardText.nameOf(c.getCurrentState()),
+                forge.neo.match.PlayerName::of);
+    }
+
+    private static String targetsOf(final StackItemView item, final String what) {
+        final StringBuilder sb = new StringBuilder();
+        try {
+            final Iterable<CardView> cards = item.getTargetCards();
+            if (cards != null) {
+                for (final CardView c : cards) {
+                    appendTarget(sb, c == null || c.getCurrentState() == null
+                            ? null : CardText.nameOf(c.getCurrentState()), what);
+                }
+            }
+            final Iterable<PlayerView> players = item.getTargetPlayers();
+            if (players != null) {
+                for (final PlayerView p : players) {
+                    appendTarget(sb, p == null ? null
+                            : forge.neo.match.PlayerName.of(p), what);
+                }
+            }
+        } catch (final RuntimeException e) {
+            // Un objetivo que ya no existe no es motivo para quedarse sin
+            // panel: se ensenya lo que se haya podido leer.
+            return sb.toString();
+        }
+        return sb.toString();
+    }
+
+    private static void appendTarget(final StringBuilder sb, final String name,
+                                     final String what) {
+        if (name == null || name.isBlank() || what.contains(name)
+                || sb.indexOf(name) >= 0) {
+            return;
+        }
+        if (sb.length() > 0) {
+            sb.append(", ");
+        }
+        sb.append(name);
+    }
+
+    /** El galon: lo unico que dice que una entrada se puede abrir. */
+    private static Label chevron(final boolean open) {
+        final Label c = new Label(open ? "▾" : "▸");
+        c.getStyleClass().add("stack-chevron");
+        c.setMinWidth(Region.USE_PREF_SIZE);
+        return c;
+    }
+
+    /**
+     * Clicar una entrada la abre o la cierra; con el derecho, su menu.
+     *
+     * <p>Antes el izquierdo mandaba la carta al panel de detalle. Ese panel
+     * salio de la mesa cuando se decidio devolverle la columna al stack, y
+     * nadie volvio por aqui: desde entonces clicar una entrada del stack no
+     * hacia absolutamente nada. Es el tipo de fallo que no da ningun error y
+     * que solo se ve cuando alguien lo intenta y te lo cuenta.
+     */
+    private void wireRow(final Region row, final StackItemView item,
+                         final boolean top, final boolean expandable) {
+        row.setCursor(javafx.scene.Cursor.HAND);
+        stackRows.put(item.getId(), row);
+        // Con el raton encima, los objetivos de ESTA entrada (applyStackTargets).
+        row.setOnMouseEntered(e -> {
+            hoveredStackId = item.getId();
+            applyStackTargets();
+            showBigCard(row, item.getSourceCard());
+            // Y el detalle de la columna, como cualquier carta de la mesa
+            // (itch.io, 08-11-2026: "hovering over the cards on the stack
+            // doesn't update the one on the right column").
+            if (item.getSourceCard() != null) {
+                applyDetailSetting();
+                detail.show(item.getSourceCard());
+            }
+        });
+        row.setOnMouseExited(e -> {
+            if (hoveredStackId == item.getId()) {
+                hoveredStackId = -1;
+                applyStackTargets();
+            }
+        });
+        row.setOnMouseClicked(e -> {
+            if (e.getButton() == javafx.scene.input.MouseButton.SECONDARY) {
+                final CardView source = item.getSourceCard();
+                if (source == null) {
+                    return;
+                }
+                // El menu del stack si hay partida detras; si no, lo de
+                // siempre. La maqueta (run.cmd ui) no tiene controlador al que
+                // preguntarle nada, y ahi el click derecho tiene que seguir
+                // ampliando la carta como hasta ahora.
+                final Consumer<StackItemView> menu = onStackMenu;
+                if (menu != null) {
+                    menu.accept(item);
+                } else {
+                    showZoom(source);
+                }
+                e.consume();
+                return;
+            }
+            if (expandable) {
+                stackOpen.put(item.getId(), !isStackOpen(item, top));
+                setStack(lastStack, lastStackMe);
+                e.consume();
+            }
+        });
+    }
+
+    /**
+     * Que hacer al clicar con el derecho en algo del stack.
+     *
+     * <p>Lo engancha {@code NeoMatchUI}, que es quien tiene el controlador del
+     * jugador y por tanto lo unico que puede contestar "¿esto ya lo dejas
+     * pasar?". La mesa no sabe de eso ni tiene por que.
+     */
+    public void setOnStackMenu(final Consumer<StackItemView> handler) {
+        onStackMenu = handler;
+    }
+
+    private Consumer<StackItemView> onStackMenu;
+
+    private static final javafx.css.PseudoClass MINE =
+            javafx.css.PseudoClass.getPseudoClass("mine");
+
+    /** "SE RESUELVE AHORA \u00b7 IA-1", o sin el quien si el motor no lo dice. */
+    private static String headerFor(final StackItemView item, final PlayerView me) {
+        final String owner = ownerName(item, me);
+        return owner.isEmpty()
+                ? NeoText.get("stack.now.plain")
+                : NeoText.get("stack.now", owner);
+    }
+
+    private static boolean isMine(final StackItemView item, final PlayerView me) {
+        return me != null && me.equals(item.getActivatingPlayer());
+    }
+
+    /** Quien lo ha puesto ahi. Lo tuyo se dice "TU", que se lee antes. */
+    private static String ownerName(final StackItemView item, final PlayerView me) {
+        final PlayerView who = item.getActivatingPlayer();
+        if (who == null) {
+            return "";
+        }
+        return isMine(item, me) ? NeoText.get("stack.you")
+                : forge.neo.match.PlayerName.of(who);
+    }
+
+    /** El titulo de una entrada: el nombre de la carta, y si es disparo, dicho. */
+    private static String headlineOf(final StackItemView item, final PlayerView me) {
+        return headlineOf(item, me, null);
+    }
+
+    private static String headlineOf(final StackItemView item, final PlayerView me, final forge.game.Game game) {
+        final CardView src = item.getSourceCard();
+        String name = src == null || src.getCurrentState() == null
+                ? "" : CardText.nameOf(src.getCurrentState());
+        // La tuya boca abajo, con lo que es (Magar of the Magic Strings).
+        final String real = forge.neo.card.FaceDownName.of(src, forge.neo.match.NeoMatchUI::mayFlipHere);
+        if (real != null) {
+            name = name + " (" + real + ")";
+        }
+        String head = item.isTrigger() ? NeoText.get("stack.triggerOf", name) : name;
+        // Un disparo OPCIONAL se puede declinar; uno normal, no — y sin esto
+        // no habia forma de distinguirlos salvo leyendo el texto entero cada
+        // vez. Solo se dice de los TUYOS: es tu decision, no la del rival, y
+        // el motor solo te pregunta a ti si aceptas los tuyos.
+        if (item.isOptionalTrigger() && isMine(item, me)) {
+            head = NeoText.get("stack.optional") + " " + head;
+        }
+        // Los costes opcionales que HAN pagado: kicker, escalada, exceso...
+        // Cambian lo que va a hacer el hechizo y decidian si merece la pena
+        // responder; el motor los publica aparte (`getOptionalCostString`) y no
+        // estan en el texto, asi que sin esto no habia forma de saberlo.
+        String extra = optionalCostOf(item);
+        // Y cuanto vale la X (Discord, 21-10-2026): "deals X damage to each
+        // creature" no dice si va a por tus 2/2 o por todo.
+        final Integer x = forge.neo.match.StackX.of(game, item);
+        if (x != null) {
+            extra = extra.isEmpty() ? "(X = " + x + ")" : "(X = " + x + ") " + extra;
+        }
+        return extra.isEmpty() ? head : head + "  " + extra;
+    }
+
+    private static String optionalCostOf(final StackItemView item) {
+        try {
+            final String s = item.getOptionalCostString();
+            return s == null || s.isBlank() ? "" : "(" + s.trim() + ")";
+        } catch (final RuntimeException e) {
+            return "";
+        }
+    }
+
+    /**
+     * Que HACE el objeto, sin repetir el nombre.
+     *
+     * <p>Era el fallo mas visible del panel: el nombre salia hasta tres veces
+     * — en la carta, en nuestra primera linea y otra vez dentro del texto del
+     * motor, que para un permanente es literalmente el nombre. Se veia
+     * "Espada de la animista / Espada de la animista", y con varios objetos
+     * encadenados eso es lo que hacia el panel ilegible.
+     */
+    private static String effectText(final StackItemView item) {
+        // "gains hidden cardname can't attack." de Edifice of Authority: ver EngineText.
+        String text = forge.neo.match.EngineText.stackText(item.getText());
+        if (text == null) {
+            return "";
+        }
+        // El motor escribe cada carta como "Nombre (12)", con su numero interno
+        // detras: "Lightning Bolt (5) - Lightning Bolt (5) deals 3 damage to
+        // Grizzly Bears (4)." Ese numero no le dice nada al jugador, y ademas
+        // dejaba "(5) - " colgando al quitar el nombre de delante.
+        text = CARD_ID.matcher(text).replaceAll("").trim();
+        final CardView src = item.getSourceCard();
+        if (src != null) {
+            final String translated = src.getCurrentState() == null
+                    ? null : CardText.nameOf(src.getCurrentState());
+            for (final String name : new String[] {translated, src.getName()}) {
+                if (name != null && !name.isBlank() && text.startsWith(name)) {
+                    text = text.substring(name.length()).trim();
+                    // Y el separador que deje detras ("- ", ": ", "\u2014 ").
+                    while (!text.isEmpty() && SEPARATORS.indexOf(text.charAt(0)) >= 0) {
+                        text = text.substring(1).trim();
+                    }
+                    break;
+                }
+            }
+        }
+        return text;
+    }
+
+    private static final String SEPARATORS = "-\u2013\u2014:\u00b7";
+
+    /** El " (12)" que el motor pone detras del nombre de cada carta. */
+    private static final java.util.regex.Pattern CARD_ID = java.util.regex.Pattern.compile(" \\(\\d+\\)");
+
+    /** Ensenya el estado de un jugador mientras el raton este sobre su barra. */
+    private void hoverDetails(final PlayerBar bar, final boolean opponent) {
+        bar.setOnMouseEntered(e -> {
+            final String text = bar.getDetailsText();
+            if (text == null || text.isBlank()) {
+                return;
+            }
+            playerDetails.setText(text);
+            playerDetails.setVisible(true);
+            detailsBelow = opponent;
+            detailsAnchor = bar;
+            requestLayout();
+        });
+        bar.setOnMouseExited(e -> {
+            playerDetails.setVisible(false);
+            requestLayout();
+        });
+    }
+
+    /** Debajo de la barra del rival, encima de la tuya: siempre hacia la mesa. */
+    private boolean detailsBelow;
+    /** La barra sobre la que esta el raton: el estado sale pegado a ella. */
+    private PlayerBar detailsAnchor;
+
+    /**
+     * Relee el tapete elegido.
+     *
+     * <p>Publico porque la pantalla de personalizacion lo cambia con la mesa ya
+     * montada: sin esto habria que reiniciar para verlo.
+     */
+    public final void applyPlaymat() {
+        javafx.scene.image.Image image = null;
+        try {
+            image = forge.neo.look.NeoLook.currentPlaymat().image();
+        } catch (final RuntimeException e) {
+            System.err.println("[neo] no se ha podido poner el tapete: " + e);
+        }
+        playmat.setImage(image);
+        final boolean on = image != null;
+        playmat.setVisible(on);
+        playmatVeil.setVisible(on);
+    }
+
+    public void setPhase(final PhaseType phase) {
+        phaseRail.setCurrent(phase);
+    }
+
+    public void setPrompt(final String text) {
+        actionBar.setPrompt(text);
+        lastPrompt = text;
+    }
+
+    /** El boton que abre el registro. */
+    public Button getLogButton() {
+        return logButton;
+    }
+
+    /**
+     * Ensenya el boton de la pausa y dice que hace al pulsarlo.
+     *
+     * <p>Apagado mientras nadie lo encienda, asi que el resto de los modos
+     * quedan exactamente igual que antes. Ver {@link #menuButton}.
+     */
+    public void enablePauseButton(final Runnable open) {
+        menuButton.setOnAction(e -> open.run());
+        menuButton.setVisible(true);
+        requestLayout();
+    }
+
+    /** Solo para pruebas: el boton de la pausa, este puesto o no. */
+    public Button getMenuButton() {
+        return menuButton;
+    }
+
+    /**
+     * Enciende el boton del panel «Turno». {@code source} lee la partida cada
+     * vez (el panel se refresca solo mientras esta abierto); si devuelve null
+     * — un invitado en red — se dice en un aviso en vez de abrir nada.
+     */
+    public void enableTurnStats(final java.util.function.Supplier<forge.neo.match.TurnStats.Snapshot> source) {
+        turnButton.setOnAction(e -> showTurnStats(source));
+        turnButton.setVisible(true);
+        requestLayout();
+    }
+
+    /** Abre el panel «Turno» en la capa de consulta (principio 10). */
+    public void showTurnStats(final java.util.function.Supplier<forge.neo.match.TurnStats.Snapshot> source) {
+        if (source == null || source.get() == null) {
+            showNotice(NeoText.get("turnStats.localOnly"));
+            return;
+        }
+        final TurnStatsView view = new TurnStatsView(source, menuOverlay::hide);
+        menuOverlay.setOnBackgroundClick(menuOverlay::hide);
+        menuOverlay.show(view);
+    }
+
+    /** Solo para pruebas: el boton del panel «Turno». */
+    public Button getTurnButton() {
+        return turnButton;
+    }
+
+    /** Levanta el registro de partida. */
+    public void showGameLog(final forge.game.GameLog log, final PlayerView me) {
+        showGameLog(log, me, null);
+    }
+
+    /** Con las cartas del registro a la vista (ver {@link GameLogView#update}). */
+    public void showGameLog(final forge.game.GameLog log, final PlayerView me,
+                            final java.util.function.IntFunction<forge.game.card.CardView> lookup) {
+        final GameLogView view = new GameLogView(menuOverlay::hide);
+        view.update(log, me, lookup);
+        logButton.pseudoClassStateChanged(UNREAD, false);
+        menuOverlay.setOnBackgroundClick(menuOverlay::hide);
+        menuOverlay.show(view);
+        gesture(Gesture.LOG_OPEN);
+    }
+
+    // ------------------------------------------------------------------
+    // El chat de una partida en red
+    // ------------------------------------------------------------------
+
+    private final Button chatButton = new Button(NeoText.get("lobby.chat"));
+    private java.util.function.Supplier<List<String>> chatHistory;
+    private java.util.function.Consumer<String> chatSend;
+    private NetChatView chatView;
+
+    /**
+     * Enciende el boton del chat. Solo en red: en local no hay con quien hablar.
+     *
+     * @param history lo dicho hasta ahora (la sala lo guarda)
+     * @param send    manda una linea
+     */
+    public void enableChat(final java.util.function.Supplier<List<String>> history,
+                           final java.util.function.Consumer<String> send) {
+        this.chatHistory = history;
+        this.chatSend = send;
+        chatButton.setVisible(true);
+        requestLayout();
+    }
+
+    private void openChat() {
+        if (chatHistory == null) {
+            return;
+        }
+        chatButton.pseudoClassStateChanged(UNREAD, false);
+        final NetChatView view = new NetChatView(chatHistory.get(), chatSend, () -> {
+            chatView = null;
+            menuOverlay.hide();
+        });
+        chatView = view;
+        menuOverlay.setOnBackgroundClick(() -> {
+            chatView = null;
+            menuOverlay.hide();
+        });
+        menuOverlay.show(view);
+    }
+
+    /**
+     * Llega una linea de chat. Hilo de JavaFX.
+     *
+     * <p>Con el chat abierto va dentro; cerrado, sale en la esquina sin parar
+     * la partida (como el resto de avisos) y el boton se marca como no leido.
+     */
+    public void chatLine(final String text) {
+        final NetChatView open = chatView;
+        // Que siga EN pantalla: Escape cierra la capa sin pasar por aqui, y el
+        // menu de pausa la reutiliza con otra cosa dentro.
+        if (open != null && menuOverlay.isShowing() && open.getScene() != null) {
+            open.addLine(text);
+            return;
+        }
+        chatView = null;
+        if (chatButton.isVisible()) {
+            chatButton.pseudoClassStateChanged(UNREAD, true);
+        }
+        showNotice(text);
+    }
+
+    /** Marca que hay novedades sin leer en el registro. */
+    public void markLogUnread() {
+        logButton.pseudoClassStateChanged(UNREAD, true);
+    }
+
+    private static final javafx.css.PseudoClass UNREAD =
+            javafx.css.PseudoClass.getPseudoClass("unread");
+
+    /** El aviso grande del centro de la mesa. */
+    /**
+     * El cartel central se va VOLANDO a la columna del stack (ajuste
+     * {@code stackBannerBrief}): una foto suya que encoge hasta la primera
+     * entrada, y el cartel de verdad escondido ya. Con la columna plegada va a
+     * la chapa del stack; con las animaciones apagadas, solo se esconde.
+     */
+    public void flyBannerToStack() {
+        final PromptBanner banner = getPromptBanner();
+        if (banner == null || !banner.isVisible() || banner.isAlerting()) {
+            return;
+        }
+        final Node target = stackBox.getScene() != null && stackBox.isVisible() ? stackBox
+                : stackChip.getScene() != null && stackChip.isVisible() ? stackChip : null;
+        if (target == null || !ImpactLayer.isEnabled() || banner.getScene() == null) {
+            banner.hide();
+            return;
+        }
+        final javafx.geometry.Bounds from = banner.localToScene(banner.getBoundsInLocal());
+        final javafx.geometry.Bounds to = target.localToScene(target.getBoundsInLocal());
+        final javafx.scene.SnapshotParameters params = new javafx.scene.SnapshotParameters();
+        params.setFill(javafx.scene.paint.Color.TRANSPARENT);
+        final javafx.scene.image.WritableImage img;
+        try {
+            img = banner.snapshot(params, null);
+        } catch (final RuntimeException e) {
+            banner.hide();
+            return;
+        }
+        banner.hide();
+        final javafx.geometry.Bounds fromL = impactLayer.sceneToLocal(from);
+        final javafx.geometry.Bounds toL = impactLayer.sceneToLocal(to);
+        if (fromL == null || toL == null || fromL.getWidth() <= 0) {
+            return;
+        }
+        final javafx.scene.image.ImageView ghost = new javafx.scene.image.ImageView(img);
+        ghost.setMouseTransparent(true);
+        ghost.setManaged(false);
+        ghost.setFitWidth(fromL.getWidth());
+        ghost.setFitHeight(fromL.getHeight());
+        ghost.relocate(fromL.getMinX(), fromL.getMinY());
+        impactLayer.getChildren().add(ghost);
+        // Hasta lo alto del stack, del ancho de la columna: ahi es donde aparece
+        // la entrada que lo cuenta.
+        final double s = Math.min(1, Math.max(0.12, toL.getWidth() / fromL.getWidth()));
+        final double cx = toL.getCenterX();
+        final double cy = toL.getMinY() + Math.min(toL.getHeight() / 2, fromL.getHeight() * s / 2 + UiScale.px(24));
+        final double dx = cx - fromL.getCenterX();
+        final double dy = cy - fromL.getCenterY();
+        final javafx.util.Duration d = javafx.util.Duration.millis(Integer.getInteger("neo.bannerFlyMs", 320));
+        final javafx.animation.Timeline t = new javafx.animation.Timeline(
+                new javafx.animation.KeyFrame(d,
+                        new javafx.animation.KeyValue(ghost.translateXProperty(), dx, javafx.animation.Interpolator.EASE_IN),
+                        new javafx.animation.KeyValue(ghost.translateYProperty(), dy, javafx.animation.Interpolator.EASE_IN),
+                        new javafx.animation.KeyValue(ghost.scaleXProperty(), s, javafx.animation.Interpolator.EASE_IN),
+                        new javafx.animation.KeyValue(ghost.scaleYProperty(), s, javafx.animation.Interpolator.EASE_IN),
+                        new javafx.animation.KeyValue(ghost.opacityProperty(), 0.35, javafx.animation.Interpolator.EASE_IN)));
+        t.setOnFinished(e -> impactLayer.getChildren().remove(ghost));
+        if (Boolean.getBoolean("neo.impact.log")) {
+            System.out.println("[cartel] vuela al stack");
+        }
+        t.play();
+    }
+
+    public PromptBanner getPromptBanner() {
+        return promptBanner;
+    }
+
+    /** El ultimo texto que mando el motor, para poder repetirlo en el banner. */
+    public String getLastPrompt() {
+        return lastPrompt;
+    }
+
+    private String lastPrompt = "";
+
+    public ActionBar getActionBar() {
+        return actionBar;
+    }
+
+    public Overlay getOverlay() {
+        return overlay;
+    }
+
+    /** Las pestanyas de rival (a cuatro): para marcar el que tiene la mano a la vista. */
+    public OpponentTabs getOpponentTabs() {
+        return opponentTabs;
+    }
+
+    /**
+     * Un aviso que solo hay que leer y cerrar.
+     *
+     * <p>Va en la capa del menu, no en la de los dialogos del motor: esto no es
+     * una pregunta con la que el motor este bloqueado, y cerrarlo no debe
+     * llevarse por delante nada que este esperando.
+     */
+    public void showInfo(final String title, final String text) {
+        final javafx.scene.control.Label heading = new javafx.scene.control.Label(
+                title == null ? "" : title);
+        heading.getStyleClass().add("dialog-title");
+
+        // Los textos del motor traen los saltos de linea escapados.
+        final Label body = new Label(text == null ? "" : text.replace("\\n", "\n"));
+        body.getStyleClass().add("dialog-text");
+        body.setWrapText(true);
+        body.setMaxWidth(UiScale.px(560));
+        body.setMinHeight(Region.USE_PREF_SIZE);
+
+        final javafx.scene.control.Button ok = new javafx.scene.control.Button(NeoText.get("banner.understood"));
+        ok.getStyleClass().add("btn-primary");
+        ok.setOnAction(e -> menuOverlay.hide());
+
+        final javafx.scene.layout.HBox footer = new javafx.scene.layout.HBox(ok);
+        footer.setAlignment(javafx.geometry.Pos.CENTER_RIGHT);
+
+        final VBox box = new VBox(12, heading, body, footer);
+        box.getStyleClass().add("dialog");
+        box.setPadding(new Insets(22, 26, 20, 26));
+        box.setMaxWidth(Region.USE_PREF_SIZE);
+        box.setMaxHeight(Region.USE_PREF_SIZE);
+        menuOverlay.show(box);
+    }
+
+    /**
+     * Abre el visor de una zona.
+     *
+     * <p>Va en la capa del menu: normalmente es consultar, no contestar, y asi
+     * si el motor estaba esperando algo su dialogo sigue debajo y no se pierde.
+     *
+     * <p>Pero las cartas de dentro <b>se pueden elegir</b> si el motor las ha
+     * marcado como elegibles ({@code setSelectables}). Eso es lo que permite
+     * contestar a "elige como objetivo una criatura de tu cementerio", que no
+     * llega por ningun dialogo: el motor espera un click en la carta, alli donde
+     * este. Se aplica igual cuando abres el cementerio tu mismo desde la pila:
+     * si hay algo que elegir ahi, se puede elegir.
+     *
+     * <p>Y ademas se pueden <b>lanzar</b> las cartas que el motor dice que se
+     * pueden lanzar desde aqui ({@code PlayerView.getFlashback()}): la aventura
+     * que se fue al exilio, el flashback del cementerio. Eso no es contestar
+     * una pregunta, es jugar — y por eso va con el resaltado de "accionable" y
+     * no con el azul de "elige esto". Ver {@link ZoneViewer}.
+     */
+    public void showZone(final PlayerView owner, final forge.game.zone.ZoneType zone) {
+        if (owner == null) {
+            return;
+        }
+        final List<CardView> cards = new ArrayList<>();
+        final var view = zone == forge.game.zone.ZoneType.Library && librarySource != null
+                ? librarySource.apply(owner) : owner.getCards(zone);
+        if (view != null) {
+            for (final CardView cv : view) {
+                cards.add(cv);
+            }
+        }
+        menuOverlay.show(new ZoneViewer(forge.neo.match.PlayerName.of(owner), zone, cards,
+                mayView, cardWidth * 1.15, selectable, playableOutside, this::pickedInZone,
+                menuOverlay::hide).letTry(tryOutside, this::pickedInZone)
+                .markPicked(cv -> highlighted != null && highlighted.test(cv)));
+        gesture(Gesture.ZONE_OPEN);
+    }
+
+    /**
+     * <b>Lo que lleva encima una carta</b>, en grande y clicable.
+     *
+     * <p>Solo hace falta con lo enganchado <b>apilado</b>
+     * ({@code NeoSettings.ATTACHMENTS_STACKED}): ahi el equipo y el aura no se
+     * ven, asi que esta es la unica forma de leerlos y de elegirlos. Pedido en
+     * itch.io el 20-09-2026 — <i>"con la mesa llena cuesta seleccionar el
+     * equipo, sobre todo en las criaturas del rival"</i> — y la respuesta es
+     * esta: en vez de afinar el raton sobre una rendija de ocho pixeles, se
+     * clica un contador y salen las cartas enteras.
+     *
+     * <p>Es el MISMO visor de las zonas, y no uno nuevo, por lo que trae
+     * hecho: marca lo que el motor deja elegir, marca lo que se puede lanzar
+     * desde donde esta, y al clicar contesta por el camino de siempre
+     * ({@code cardClickedDirect}). O sea que desde aqui se puede apuntar a un
+     * aura con una destruccion, o activar el equipar de un equipo.
+     */
+    public void showAttached(final CardView host, final List<CardView> attached) {
+        showAttached(host, attached, false);
+    }
+
+    /**
+     * Lo mismo, y ademas <b>usable</b> si la criatura es tuya.
+     *
+     * <p>Faltaba esto: la ventana marcaba lo que el motor PREGUNTA y lo que se
+     * lanza desde fuera, pero un equipo en la mesa con su "Equipar" a mano no
+     * es ninguna de las dos — asi que con los equipos apilados no habia forma
+     * de volver a equipar Skullclamp a otra criatura (Discord, 23-09-2026).
+     * Ahora se clica como en la mesa y el motor enseña sus habilidades.
+     *
+     * <p>Se puede usar lo que el motor marca como accionable y, por si esos
+     * resaltados estan apagados en ese momento, lo que controlas tu encima de
+     * una criatura tuya. Lo del rival no: clicarlo cerraria la ventana para
+     * nada. Un aura del rival sobre tu criatura tampoco, salvo que el motor la
+     * marque.
+     *
+     * @param ownField la criatura esta en tu lado de la mesa
+     */
+    public void showAttached(final CardView host, final List<CardView> attached, final boolean ownField) {
+        if (host == null || attached == null || attached.isEmpty()) {
+            return;
+        }
+        final java.util.function.ToIntFunction<CardView> strength = actionable;
+        final Predicate<CardView> usable = c -> {
+            if (strength != null && strength.applyAsInt(c) > 0) {
+                return true;
+            }
+            return ownField && c.getController() != null
+                    && c.getController().equals(host.getController());
+        };
+        final ZoneViewer viewer = new ZoneViewer(null, forge.game.zone.ZoneType.Battlefield,
+                attached, mayView, cardWidth * 1.15, selectable, playableOutside, usable,
+                this::pickedInZone, menuOverlay::hide);
+        viewer.setHeading(NeoText.get("zoneViewer.attachedTo",
+                forge.neo.card.CardText.nameOf(host)));
+        menuOverlay.show(viewer);
+        gesture(Gesture.ZONE_OPEN);
+    }
+
+    /**
+     * Se ha clicado una carta dentro del visor de una zona.
+     *
+     * <p>Se cierra el visor antes de contestar: el motor puede pedir lo
+     * siguiente inmediatamente (otro objetivo, un dialogo), y dejar el visor
+     * encima taparia esa peticion. Es el mismo principio que ya costo un
+     * {@code toFront()}: lo que el motor te esta ensenyando manda.
+     */
+    private void pickedInZone(final CardView card) {
+        menuOverlay.hide();
+        cardClickedDirect(card);
+    }
+
+    /** Si el motor ha marcado esta carta como elegible ahora mismo. */
+    private java.util.function.Predicate<CardView> selectable = c -> false;
+
+    /** Tu carta de tu exilio o cementerio: clicable siempre (ZoneViewer.letTry). */
+    private java.util.function.Predicate<CardView> tryOutside = c -> false;
+
+    public void setTryOutside(final java.util.function.Predicate<CardView> test) {
+        this.tryOutside = test == null ? c -> false : test;
+    }
+
+    /** Si esta carta se puede LANZAR desde la zona en la que esta. */
+    private java.util.function.Predicate<CardView> playableOutside = c -> false;
+
+    /**
+     * Que cartas se pueden lanzar desde fuera de la mano y del campo.
+     *
+     * <p>Lo contesta el motor entero: {@code PlayerView.getFlashback()}. Aqui
+     * no se deduce nada — ni por tipo de carta, ni por palabra clave, ni por
+     * zona — porque la lista de formas de lanzar algo desde el cementerio o el
+     * exilio no para de crecer y cualquier copia nuestra nacería incompleta.
+     */
+    public void setPlayableOutside(final Predicate<CardView> test) {
+        this.playableOutside = test == null ? c -> false : test;
+    }
+
+    /** Si esta carta se puede lanzar desde donde esta. Para las pilas. */
+    public boolean isPlayableOutside(final CardView card) {
+        return card != null && playableOutside.test(card);
+    }
+
+    /** El visor de lo revelado que hay puesto, si lo hay. Ver {@link #showRevealed}. */
+    private ZoneViewer revealedViewer;
+
+    /**
+     * <b>Lo que el motor te esta ensenyando de la mano de otro</b>, sin dialogo.
+     *
+     * <p>Forge ya no lo manda con {@code reveal()} cuando la mano revelada es
+     * de otro y {@code UI_SELECT_FROM_CARD_DISPLAYS} esta encendido: pide
+     * {@code showRevealedCards} y pone la pregunta (OK / fin de turno) en la
+     * barra de botones ({@code PlayerControllerHuman.reveal}). En una partida
+     * en red manda la preferencia del ANFITRION, que en Forge viene encendida,
+     * y nosotros no lo pintabamos: salia el OK y ninguna carta (itch.io,
+     * 29-09-2026). Swing abre la mano como zona; aqui, el mismo visor de zonas,
+     * en la capa de consultar (principio 10): lo que contesta es el OK de la
+     * barra, no esto. Se ve todo lo que llega: el motor lo esta revelando.
+     */
+    public void showRevealed(final PlayerView owner, final List<CardView> cards) {
+        if (cards == null || cards.isEmpty()) {
+            return;
+        }
+        final ZoneViewer viewer = new ZoneViewer(
+                owner == null ? null : forge.neo.match.PlayerName.of(owner),
+                forge.game.zone.ZoneType.Hand, cards, c -> true, cardWidth * 1.15,
+                menuOverlay::hide);
+        viewer.setHeading(owner == null ? NeoText.get("zoneViewer.revealedAny")
+                : NeoText.get("zoneViewer.revealed", forge.neo.match.PlayerName.of(owner)));
+        revealedViewer = viewer;
+        menuOverlay.show(viewer);
+    }
+
+    /** Quita lo revelado, si sigue puesto (el motor ya no espera el OK). */
+    public void hideRevealed() {
+        if (revealedViewer != null && menuOverlay.isShowing() && !menuOverlay.getChildren().isEmpty()
+                && menuOverlay.getChildren().get(0) == revealedViewer) {
+            menuOverlay.hide();
+        }
+        revealedViewer = null;
+    }
+
+    /** Cierra el visor de zona, si es lo que hay puesto. */
+    public void hideZoneViewer() {
+        if (menuOverlay.isShowing() && !menuOverlay.getChildren().isEmpty()
+                && menuOverlay.getChildren().get(0) instanceof ZoneViewer) {
+            menuOverlay.hide();
+        }
+    }
+
+    /**
+     * Que cartas puede ver el jugador.
+     *
+     * <p>Lo decide el motor ({@code IGuiGame.mayView}), no nosotros: la
+     * biblioteca es informacion oculta y el visor no puede destaparla. Por
+     * defecto se ve todo, que es lo correcto fuera de una partida (maquetas).
+     */
+    public void setCardVisibility(final Predicate<CardView> test) {
+        this.mayView = test == null ? c -> true : test;
+    }
+
+    private Predicate<CardView> mayView = c -> true;
+
+    /**
+     * De donde sale la biblioteca al abrirla: la partida la cambia por la de
+     * antes de perder al acabar (NeoMatchUI.libraryToShow). Null = la del motor.
+     */
+    public void setLibrarySource(
+            final java.util.function.Function<PlayerView, Iterable<CardView>> source) {
+        this.librarySource = source;
+    }
+
+    private java.util.function.Function<PlayerView, Iterable<CardView>> librarySource;
+
+    /** La capa del menu de pausa, por encima de los dialogos del motor. */
+    public Overlay getMenuOverlay() {
+        return menuOverlay;
+    }
+
+    // ---------------------------------------------------------------
+    // La pregunta que el motor esta esperando no se puede perder
+    // ---------------------------------------------------------------
+
+    /**
+     * Los dialogos que el motor espera, el ultimo arriba.
+     *
+     * <p><b>Por que hace falta.</b> Reportado en itch.io el 20-09-2026: un
+     * rival lanza <i>Dredge the Mire</i>, se abre la eleccion obligatoria, el
+     * jugador da a "Ver la mesa" para leer el hechizo, abre el menu del
+     * stack... y la eleccion <b>ya no vuelve</b>. El motor se queda esperando
+     * una respuesta que nadie puede dar: partida muerta, sin un solo error
+     * por consola y sin mas salida que abandonar.
+     *
+     * <p>La causa de ESE caso era el menu del stack, que se abria en la capa
+     * de los dialogos (una capa ensenya una sola cosa: {@code show} hace
+     * {@code setAll}), y esta arreglado en su sitio. Pero quien lo reporto
+     * tenia razon en lo otro que decia: <i>"puede que sea un problema mas
+     * general de conservar la pregunta pendiente"</i>. Esto es lo general —
+     * cualquier camino, hoy o dentro de un anyo, que tape o cierre la capa
+     * mientras el motor espera, se deshace solo.
+     *
+     * <p>La regla es una sola frase, y se mira sola: <b>si el motor espera un
+     * dialogo, ese dialogo tiene que estar puesto</b>. Si no lo esta, se pone.
+     */
+    private final java.util.ArrayDeque<Region> engineDialogs =
+            new java.util.ArrayDeque<>();
+
+    /** El vigilante, solo vivo mientras hay algo que vigilar. */
+    private javafx.animation.Timeline dialogGuard;
+
+    /**
+     * "El motor esta esperando ESTE dialogo."
+     *
+     * <p>Lo dice {@code NeoMatchUI.askUser}, que es por donde pasan todas las
+     * preguntas del motor — las de sus quince sitios distintos. Hilo de
+     * interfaz siempre.
+     */
+    public void markEngineDialog(final Region dialog) {
+        if (dialog == null) {
+            return;
+        }
+        engineDialogs.remove(dialog);
+        engineDialogs.push(dialog);
+        if (dialogGuard == null) {
+            // Un segundo: esto no es una animacion, es una red. Si salta,
+            // el jugador ya ha tenido tiempo de darse cuenta de que algo
+            // raro ha pasado, y lo que importa es que pueda seguir jugando.
+            dialogGuard = new javafx.animation.Timeline(
+                    new javafx.animation.KeyFrame(javafx.util.Duration.seconds(1),
+                            e -> guardEngineDialog()));
+            dialogGuard.setCycleCount(javafx.animation.Animation.INDEFINITE);
+            // Solo mientras la mesa se ve. Una partida que acaba con una
+            // pregunta pendiente no siempre pasa por forgetEngineDialogs, y un
+            // Timeline en marcha retiene la mesa entera para siempre (la fuga
+            // de la pantalla en blanco, 25-09-2026: ver CombatOverlay.sync).
+            sceneProperty().addListener((o, was, is) -> {
+                if (is == null) {
+                    dialogGuard.stop();
+                } else if (!engineDialogs.isEmpty()) {
+                    dialogGuard.playFromStart();
+                }
+            });
+        }
+        dialogGuard.playFromStart();
+    }
+
+    /**
+     * Contestado: ese dialogo ya no lo espera nadie.
+     *
+     * <p>Y si debajo habia otro (el motor puede preguntar una cosa DENTRO de
+     * otra: una habilidad al clicar una carta mientras hay algo pendiente),
+     * vuelve en el acto, sin esperar al vigilante.
+     */
+    public void clearEngineDialog(final Region dialog) {
+        engineDialogs.remove(dialog);
+        if (engineDialogs.isEmpty()) {
+            if (dialogGuard != null) {
+                dialogGuard.stop();
+            }
+            return;
+        }
+        guardEngineDialog();
+    }
+
+    /** La partida se ha acabado o se abandona: ya no hay nada que esperar. */
+    public void forgetEngineDialogs() {
+        engineDialogs.clear();
+        if (dialogGuard != null) {
+            dialogGuard.stop();
+        }
+    }
+
+    /** ¿El motor espera una respuesta que no se puede dar? Pues se repone. */
+    private void guardEngineDialog() {
+        final Region top = engineDialogs.peek();
+        if (top == null) {
+            if (dialogGuard != null) {
+                dialogGuard.stop();
+            }
+            return;
+        }
+        // Apartado con "Ver la mesa" NO es haberlo perdido: sigue puesto, solo
+        // que invisible a proposito, y la pastilla de volver esta ahi. Por eso
+        // se compara el CONTENIDO y no si se ve.
+        if (overlay.isShowing() && overlay.getContent() == top) {
+            return;
+        }
+        System.out.println("[neo] el dialogo que el motor espera se habia perdido: se repone");
+        overlay.show(top);
+    }
+
+    /** true si hay algo modal delante de la mesa. */
+    // ---------------------------------------------------------------
+    // La IA esta pensando (Forge #12265): el borde de su retrato
+    // ---------------------------------------------------------------
+
+    /** Repinta cada 100 ms mientras alguna IA piensa, y se para sola. */
+    private final javafx.animation.Timeline aiThinking = new javafx.animation.Timeline(
+            new javafx.animation.KeyFrame(javafx.util.Duration.millis(100), e -> {
+                if (!refreshAiThinking()) {
+                    stopAiThinking();
+                }
+            }));
+
+    /** La mesa que se ve, para el aviso del motor (que es estatico): debil, no la retiene. */
+    private static volatile java.lang.ref.WeakReference<TableScreen> live = new java.lang.ref.WeakReference<>(null);
+
+    static {
+        // El motor avisa cuando una barra va a aparecer y cuando una decision
+        // de la IA acaba: no hace falta mirar a cada rato.
+        forge.util.AITimeoutTracker.setRepaintHook(() -> javafx.application.Platform.runLater(() -> {
+            final TableScreen t = live.get();
+            if (t != null) {
+                t.kickAiThinking();
+            }
+        }));
+    }
+
+    /** La partida que se ensenya, para preguntar por sus IA. */
+    public void setAiGameId(final int id) {
+        for (final PlayerBar b : thinkingBars()) {
+            b.setGameId(id);
+        }
+    }
+
+    private void kickAiThinking() {
+        if (getScene() == null) {
+            return;
+        }
+        if (refreshAiThinking()) {
+            if (aiThinking.getStatus() != javafx.animation.Animation.Status.RUNNING) {
+                aiThinking.setCycleCount(javafx.animation.Animation.INDEFINITE);
+                aiThinking.play();
+            }
+        } else {
+            stopAiThinking();
+        }
+    }
+
+    private void stopAiThinking() {
+        aiThinking.stop();
+        refreshAiThinking();
+    }
+
+    private boolean refreshAiThinking() {
+        boolean any = false;
+        for (final PlayerBar b : thinkingBars()) {
+            any |= b.refreshThinking();
+        }
+        return any;
+    }
+
+    private List<PlayerBar> thinkingBars() {
+        final List<PlayerBar> out = new ArrayList<>(oppBars);
+        // opponentBar puede no estar en oppBars (con un solo rival).
+        if (!out.contains(opponentBar)) {
+            out.add(opponentBar);
+        }
+        out.add(selfBar);
+        return out;
+    }
+
+    /**
+     * Si el nodo esta DENTRO de una capa que se ve (dialogo, menu, carta
+     * ampliada): un boton de ahi si es lo que Espacio debe pulsar; uno de la
+     * mesa de detras, no. Ver {@code TableKeys.guardFocusedButtons}.
+     */
+    public boolean isInShownLayer(final javafx.scene.Node node) {
+        for (final Overlay layer : new Overlay[] {overlay, menuOverlay, zoomOverlay}) {
+            if (!layer.isShowing()) {
+                continue;
+            }
+            for (javafx.scene.Node n = node; n != null; n = n.getParent()) {
+                if (n == layer) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public boolean isModalShowing() {
+        return overlay.isShowing() || menuOverlay.isShowing() || zoomOverlay.isShowing();
+    }
+
+    /**
+     * Espacio con el dialogo de ordenar disparos delante: su "Auto". Solo si es
+     * lo que se ve (nada de consulta encima, sin apartar con "Ver la mesa").
+     * Ver {@link ChoiceDialog#pressAuto}.
+     */
+    public boolean pressDialogAuto() {
+        if (isConsultShowing() || !overlay.isShowing() || overlay.isPeeking()) {
+            return false;
+        }
+        return overlay.getContent() instanceof ChoiceDialog<?> dialog && dialog.pressAuto();
+    }
+
+    /** Lo que se CONSULTA (menu de pausa, carta ampliada) esta encima de la pregunta del motor. */
+    public boolean isConsultShowing() {
+        return menuOverlay.isShowing() || zoomOverlay.isShowing();
+    }
+
+    /**
+     * true si hay algo delante que impide MIRAR la mesa (acercarla, moverla).
+     *
+     * <p>Un dialogo apartado con "Ver la mesa" no cuenta: para eso se aparta.
+     * Sigue contando como modal para todo lo demas — los atajos y el arrastre
+     * contestarian al motor, y el motor espera ese dialogo.
+     */
+    private boolean isViewBlocked() {
+        return (overlay.isShowing() && !overlay.isPeeking())
+                || menuOverlay.isShowing() || zoomOverlay.isShowing();
+    }
+
+    /**
+     * Ampliar una carta a pantalla casi completa, como el click derecho de Arena.
+     *
+     * <p>El tamano sale del alto de la mesa, no de un numero fijo: en 4K la
+     * carta tiene que crecer igual que crece todo lo demas.
+     */
+    /** Ancho de carta para las vistas "grandes": la ampliada y el menu. */
+    public double zoomCardWidth() {
+        return Math.max(320, getHeight() * 0.86) / CardNode.ASPECT;
+    }
+
+    public void showZoom(final CardView card) {
+        zoomRing = List.of();
+        renderZoom(card);
+    }
+
+    /**
+     * Ampliar una carta <b>dentro de su lista</b>: la rueda y las flechas pasan
+     * a la de al lado, como en el resto de pantallas ({@code CardZoom.show}
+     * con serie). La pide el clic derecho de la mesa.
+     *
+     * @param ring  las cartas de ese dialogo o visor, en el orden en que se ven
+     * @param index la que se ensenya primero
+     */
+    public void showZoom(final List<CardView> ring, final int index) {
+        if (ring == null || ring.isEmpty()) {
+            return;
+        }
+        if (ring.size() == 1 || index < 0 || index >= ring.size()) {
+            showZoom(ring.get(Math.max(0, Math.min(index, ring.size() - 1))));
+            return;
+        }
+        zoomRing = new ArrayList<>(ring);
+        zoomIndex = index;
+        renderZoom(zoomRing.get(index));
+        // Las flechas llegan a la mesa solo si el foco esta dentro de ella.
+        zoomOverlay.requestFocus();
+    }
+
+    /** Pasa a la siguiente (+1) o la anterior (-1) de la serie. Sin dar la vuelta. */
+    private void stepZoom(final int delta) {
+        final int next = zoomIndex + delta;
+        if (zoomRing.size() <= 1 || next < 0 || next >= zoomRing.size()) {
+            return;
+        }
+        zoomIndex = next;
+        renderZoom(zoomRing.get(next));
+    }
+
+    /**
+     * Solo pruebas ({@code -Dneo.zoom.ringTest}): un clic derecho de verdad a la
+     * carta {@code index} del dialogo de encima, {@code steps} pasos, y dice
+     * que serie y que carta se ven.
+     */
+    public void zoomRingTest(final int index, final int steps) {
+        final List<CardNode> nodes = new ArrayList<>();
+        CardZoom.collectCardNodes(overlay, nodes);
+        if (index >= nodes.size()) {
+            System.out.println("[zoom] el dialogo no tiene carta " + index + " (tiene " + nodes.size() + ")");
+            return;
+        }
+        final CardNode n = nodes.get(index);
+        final javafx.geometry.Point2D p = n.localToScene(n.getWidth() / 2, n.getHeight() / 2);
+        n.fireEvent(new MouseEvent(MouseEvent.MOUSE_PRESSED, p.getX(), p.getY(), p.getX(), p.getY(),
+                javafx.scene.input.MouseButton.SECONDARY, 1, false, false, false, false,
+                false, false, true, true, false, true, null));
+        // Con flechas de verdad, para que pase por el filtro de teclado.
+        for (int i = 0; i < Math.abs(steps); i++) {
+            zoomOverlay.fireEvent(new javafx.scene.input.KeyEvent(javafx.scene.input.KeyEvent.KEY_PRESSED,
+                    "", "", steps > 0 ? javafx.scene.input.KeyCode.RIGHT : javafx.scene.input.KeyCode.LEFT,
+                    false, false, false, false));
+        }
+        System.out.println("[zoom] ampliada: " + zoomOverlay.isShowing() + " | serie " + zoomRing.size()
+                + " | se ve la " + (zoomRing.isEmpty() ? 0 : zoomIndex + 1)
+                + (zoomRing.isEmpty() ? "" : " (" + zoomRing.get(zoomIndex).getName() + ")"));
+    }
+
+    /** Solo pruebas: cuantas cartas tiene la serie de la ampliada, y cual se ve (0 si va sola). */
+    public int[] zoomRingState() {
+        return new int[] {zoomRing.size(), zoomIndex};
+    }
+
+    /**
+     * Las cartas de la misma lista que {@code node}, dentro de su capa: el
+     * {@code ScrollPane} que la contiene, o la capa entera. NO la pantalla: eso
+     * meteria en la serie las cartas de la mesa que hay debajo.
+     */
+    private static List<CardNode> ringOf(final CardNode node, final Node layer) {
+        Node container = layer;
+        for (Node n = node.getParent(); n != null && n != layer; n = n.getParent()) {
+            if (n instanceof javafx.scene.control.ScrollPane sp && sp.getContent() != null) {
+                container = sp.getContent();
+                break;
+            }
+        }
+        final List<CardNode> out = new ArrayList<>();
+        CardZoom.collectCardNodes(container, out);
+        return out;
+    }
+
+    /** La serie de la carta ampliada (vacia si va sola) y cual se ve. */
+    private List<CardView> zoomRing = List.of();
+    private int zoomIndex;
+
+    private void renderZoom(final CardView card) {
+        if (card == null) {
+            return;
+        }
+        // La misma composicion que el click derecho del resto de pantallas:
+        // la carta grande y, al lado, lo que la imagen NO cuenta (P/T de ahora
+        // contra la impresa, contadores, danyo y lo que lleva encima). El click
+        // sobre la propia carta tambien cierra: nadie quiere buscar una X.
+        // Y se dice que la partida esta parada. Sin esto, la pausa es
+        // invisible: el jugador no sabe si le estan esperando o si la IA sigue
+        // jugando detras de la carta (principio 6: nunca dejarle sin saber que
+        // pasa). El rotulo dice ademas como seguir, que es lo unico que hay
+        // que saber.
+        final boolean paused = pausesWhileReading();
+        // "Equipar {1}" si es un equipo tuyo y ahora se puede. Ver
+        // NeoMatchUI.equipLabel.
+        final String equip = equipLabel == null ? null : equipLabel.apply(card);
+        // Con rotulo o boton debajo, la carta se encoge un pelin: a pantalla
+        // completa ocupa el 86% del alto y lo de abajo se salia.
+        final boolean browsing = zoomRing.size() > 1;
+        final boolean below = paused || equip != null || browsing;
+        final Region big = CardZoom.compose(card, zoomCardWidth() * (below ? (equip != null ? 0.9 : 0.95) : 1),
+                Math.max(getWidth(), 640), this::hideZoom);
+        if (below) {
+            final VBox box = new VBox(8, big);
+            if (equip != null) {
+                final Button b = new Button(equip);
+                b.getStyleClass().addAll("btn-primary", "zoom-equip");
+                // Se cierra la ampliacion ANTES: el motor va a pedir el
+                // objetivo enseguida, y se contesta clicando la mesa.
+                b.setOnAction(e -> {
+                    hideZoom();
+                    if (onEquip != null) {
+                        onEquip.accept(card);
+                    }
+                });
+                box.getChildren().add(b);
+            }
+            if (browsing) {
+                // "3 / 7 · rueda o flechas para la siguiente": el mismo aviso
+                // que el resto de pantallas (CardZoom.Layer.showCurrent).
+                final Label where = new Label(NeoText.get("zoom.browse", zoomIndex + 1, zoomRing.size()));
+                where.getStyleClass().add("zoom-browse-hint");
+                where.setMouseTransparent(true);
+                box.getChildren().add(where);
+            }
+            if (paused) {
+                final Label note = new Label(NeoText.get("zoom.paused"));
+                note.getStyleClass().add("zoom-browse-hint");
+                note.setMouseTransparent(true);
+                box.getChildren().add(note);
+            }
+            box.setAlignment(Pos.CENTER);
+            box.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+            zoomOverlay.show(box);
+        } else {
+            zoomOverlay.show(big);
+        }
+        gesture(Gesture.ZOOM_CARD);
+    }
+
+    public void hideZoom() {
+        zoomRing = List.of();
+        zoomOverlay.hide();
+    }
+
+    /** El texto del boton "Equipar" para esa carta, o null si no toca. */
+    private java.util.function.Function<CardView, String> equipLabel;
+    /** Que hacer al pulsarlo. */
+    private Consumer<CardView> onEquip;
+
+    /**
+     * El boton "Equipar {coste}" de la carta ampliada. Quien sabe si se puede
+     * y como se hace es la partida ({@code NeoMatchUI.equipLabel}); la mesa
+     * solo lo pinta.
+     */
+    public void setEquipAction(final java.util.function.Function<CardView, String> label,
+                               final Consumer<CardView> action) {
+        this.equipLabel = label;
+        this.onEquip = action;
+    }
+
+    /** Solo pruebas ({@code --equip-test}): el texto que tendria el boton. */
+    public String equipLabelFor(final CardView card) {
+        return equipLabel == null || card == null ? null : equipLabel.apply(card);
+    }
+
+    public boolean isZoomShowing() {
+        return zoomOverlay.isShowing();
+    }
+
+    /**
+     * Si el jugador ha parado la partida para leer: carta ampliada o menu de
+     * pausa puestos.
+     *
+     * <p>Lo pregunta {@code NeoMatchUI.holdWhileReading} desde el hilo del
+     * MOTOR, y por eso es {@code volatile} y no un {@code isShowing()} de
+     * JavaFX: leer el grafo de escena desde fuera del hilo de interfaz no esta
+     * garantizado. El espejo lo mantienen los dos listeners del constructor.
+     */
+    public boolean isPlayerReading() {
+        return playerReading;
+    }
+
+    private volatile boolean playerReading;
+
+    /**
+     * Si detras de esta mesa hay un motor NUESTRO al que de verdad se le puede
+     * parar el reloj. Lo pone {@code NeoMatchUI.openView}.
+     *
+     * <p>Solo decide si se anuncia la pausa al ampliar una carta: quien para
+     * de verdad es {@code NeoMatchUI}. Una maqueta o una partida en red no
+     * paran nada, y prometerlo en pantalla seria mentir (principio 1).
+     */
+    public void setEnginePausable(final boolean can) {
+        this.enginePausable = can;
+    }
+
+    private boolean enginePausable;
+
+    /** ¿Ampliar una carta va a parar la partida ahora mismo? */
+    private boolean pausesWhileReading() {
+        return enginePausable && forge.neo.NeoSettings.pauseWhileReading();
+    }
+
+    /**
+     * Anuncia de quien es el turno, en grande y en el centro.
+     *
+     * <p>Lo llama {@code NeoMatchUI} cuando el motor avisa de cambio de turno.
+     */
+    public void announceTurn(final boolean yours, final String who, final int turn) {
+        announceTurn(yours, who, turn, 0);
+    }
+
+    /** Igual, con la ronda al lado (0 = no ensenyarla). Ver {@code RoundCounter}. */
+    public void announceTurn(final boolean yours, final String who, final int turn, final int round) {
+        turnBanner.announce(yours, who, turn, round);
+        requestLayout();
+    }
+
+    /**
+     * Lanza una moneda en el centro de la mesa y avisa al acabar.
+     *
+     * <p>Lo llama {@code NeoMatchUI.showCoinFlip}, con lo que manda el motor.
+     */
+    public void flipCoin(final boolean heads, final String caption, final String headsWord,
+                         final String tailsWord, final Runnable done) {
+        coinFlip.flip(heads, caption, headsWord, tailsWord, done);
+        requestLayout();
+    }
+
+    /**
+     * Tira unos dados en el centro de la mesa y avisa al acabar.
+     *
+     * <p>Lo llama {@code NeoMatchUI.showDiceRoll}, con cada
+     * {@code GameEventRollDice} del motor.
+     */
+    public void rollDice(final int sides, final java.util.List<Integer> results,
+                         final String caption, final Runnable done) {
+        diceRoll.roll(sides, results, caption, done);
+        requestLayout();
+    }
+
+    public TurnBanner getTurnBanner() {
+        return turnBanner;
+    }
+
+    /** El rail de fases, que ademas dice de quien es el turno. */
+    public PhaseRail getPhaseRail() {
+        return phaseRail;
+    }
+
+    /** El panel de detalle, para poder ajustar el zoom de su texto. */
+    public CardDetailPanel getDetailPanel() {
+        return detail;
+    }
+
+    /**
+     * Apila o desapila lo identico de la zona de mando mientras el motor
+     * espera que el jugador senyale cartas concretas.
+     *
+     * <p>La MESA ya no se desapila (22-10-2026): con cientos de fichas eran
+     * cientos de cartas de golpe. Alli las pilas se parten en elegidas,
+     * libres y no elegibles, y el "xN" pregunta cuantas. Ver
+     * {@link BattlefieldPane#setSelectableTest}.
+     */
+    public void setGroupingEnabled(final boolean on) {
+        commandZone.setGroupingEnabled(on);
+    }
+
+    /**
+     * Marca que cartas se pueden elegir ahora mismo.
+     *
+     * <p>Es el resaltado azul: el motor dice cuales valen y el jugador solo
+     * tiene que clicar una. Sin esto habria que adivinar.
+     */
+    public void setSelectable(final Predicate<CardView> test) {
+        // Se guarda ademas del reparto por nodos: las cartas que no estan
+        // pintadas en la mesa (cementerio, exilio, mando) tambien tienen que
+        // poder marcarse cuando se abre su visor.
+        this.selectable = test == null ? c -> false : test;
+        // PRIMERO se parten las pilas (ver BattlefieldPane.setSelectableTest):
+        // reagrupar fabrica nodos nuevos, y marcar antes seria marcar los que
+        // se van a tirar.
+        selfField.setSelectableTest(this.selectable);
+        for (final PlayerField f : oppFields) {
+            f.setSelectableTest(this.selectable);
+        }
+        for (final CardNode n : everyNode()) {
+            final CardView cv = n.getCard();
+            n.setSelectable(cv != null && test != null && test.test(cv));
+        }
+        // Y la pestanya del rival que no se esta viendo, si lo que hay que
+        // elegir esta en SU mesa. Ver OpponentTabs.setPickable.
+        opponentTabs.refreshPickable();
+    }
+
+    /** Las zonas en las que se mira si un rival tiene algo que elegir. */
+    private static final forge.game.zone.ZoneType[] PICK_ZONES = {
+            forge.game.zone.ZoneType.Battlefield, forge.game.zone.ZoneType.Command,
+            forge.game.zone.ZoneType.Graveyard, forge.game.zone.ZoneType.Exile};
+
+    /** Si este jugador tiene alguna carta que el motor deja elegir ahora. */
+    private boolean hasSelectableCard(final PlayerView p) {
+        if (p == null) {
+            return false;
+        }
+        for (final forge.game.zone.ZoneType z : PICK_ZONES) {
+            final var cards = p.getCards(z);
+            if (cards == null) {
+                continue;
+            }
+            for (final CardView cv : cards) {
+                if (cv != null && selectable.test(cv)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * El resaltado <b>debil</b> que manda el motor: "esto lo puedes usar".
+     *
+     * <p>La funcion devuelve la <b>fuerza</b> de cada carta: 1 la puedes usar,
+     * 2 ademas es una de las que taparia el boton "Auto". Ver
+     * {@code CardNode.setActionable}.
+     */
+    /**
+     * LOS OBJETIVOS SE VEN EN LA MESA. Discord, 20-10-2026: <i>"I quite often
+     * make misplays because it's not clear enough to me which permanents or
+     * players are being targeted by a spell or ability ... highlight its
+     * targets with a red outline"</i>. Las flechas ya existian, pero salen de
+     * la carta de origen: un hechizo lanzado desde la mano no tiene carta en
+     * la mesa y no habia flecha; y con un stack grande se cruzan todas.
+     *
+     * <p>Borde rojo en las cartas y barras que son objetivo de lo de ARRIBA del
+     * stack (lo que va a resolverse, lo mismo que el cartel), o de la entrada
+     * del panel del stack que esta bajo el raton. Se reparte por NODO, asi que
+     * hay que reponerlo cuando cambian los nodos: lo llama {@link #setStack},
+     * que el binder llama despues de colocar las mesas.
+     */
+    /** Los ids a los que apunta algo del stack, la ultima vez. */
+    private java.util.Set<Integer> stackTargetIds = java.util.Set.of();
+
+    /**
+     * Que una ficha a la que apunta el stack no se quede en la pila de sus
+     * gemelas. Ver {@link BattlefieldPane#setTargetedTest}. Solo se reparte si
+     * cambia: el stack se repinta varias veces por segundo.
+     */
+    private void splitStackTargets(final List<StackItemView> items) {
+        final java.util.Set<Integer> ids = new java.util.HashSet<>();
+        for (final StackItemView s : items) {
+            try {
+                if (s.getTargetCards() != null) {
+                    for (final CardView c : s.getTargetCards()) {
+                        if (c != null && c.getId() > 0) {
+                            ids.add(c.getId());
+                        }
+                    }
+                }
+            } catch (final RuntimeException e) {
+                // Una vista a medio montar: se queda como estaba.
+            }
+        }
+        if (ids.equals(stackTargetIds)) {
+            return;
+        }
+        stackTargetIds = ids;
+        final java.util.function.Predicate<CardView> test =
+                cv -> cv != null && cv.getId() > 0 && ids.contains(cv.getId());
+        selfField.setTargetedTest(test);
+        for (final PlayerField f : oppFields) {
+            f.setTargetedTest(test);
+        }
+    }
+
+    private void applyStackTargets() {
+        final java.util.Set<Integer> cards = new java.util.HashSet<>();
+        // Las cartas sin partida (maquetas, getCardForUi) tienen todas id 0:
+        // esas se comparan por objeto.
+        final java.util.Set<CardView> loose = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        final java.util.Set<Integer> players = new java.util.HashSet<>();
+        final java.util.Set<Integer> spells = new java.util.HashSet<>();
+        StackItemView item = null;
+        for (final StackItemView s : lastStack) {
+            if (s.getId() == hoveredStackId) {
+                item = s;
+                break;
+            }
+        }
+        if (item == null && !lastStack.isEmpty()) {
+            item = lastStack.get(0);
+        }
+        if (item != null) {
+            try {
+                if (item.getTargetCards() != null) {
+                    for (final CardView c : item.getTargetCards()) {
+                        if (c != null && c.getId() > 0) {
+                            cards.add(c.getId());
+                        } else if (c != null) {
+                            loose.add(c);
+                        }
+                    }
+                }
+                if (item.getTargetPlayers() != null) {
+                    for (final PlayerView p : item.getTargetPlayers()) {
+                        if (p != null) {
+                            players.add(p.getId());
+                        }
+                    }
+                }
+                // Un contrahechizo apunta a otro hechizo del STACK: su fila.
+                if (item.getTargetStackItems() != null) {
+                    for (final StackItemView s : item.getTargetStackItems()) {
+                        if (s != null) {
+                            spells.add(s.getId());
+                        }
+                    }
+                }
+            } catch (final RuntimeException e) {
+                // Un objetivo que ya no esta: se marca lo que se haya leido.
+            }
+        }
+        for (final CardNode n : everyNode()) {
+            final CardView cv = n.getCard();
+            n.setStackTarget(cv != null && (cv.getId() > 0 ? cards.contains(cv.getId()) : loose.contains(cv)));
+        }
+        for (final PlayerBar b : allBars()) {
+            b.setStackTarget(b.getPlayer() != null && players.contains(b.getPlayer().getId()));
+        }
+        for (final java.util.Map.Entry<Integer, Region> r : stackRows.entrySet()) {
+            r.getValue().pseudoClassStateChanged(STACK_TARGET_ROW, spells.contains(r.getKey()));
+        }
+    }
+
+    /**
+     * EL EQUIPO VUELA A SU NUEVA CRIATURA. Visto en XMage Nexus (20-10-2026):
+     * al cambiar un equipo o un aura de anfitrion, aparecia de golpe debajo de
+     * otra carta y habia que buscar que habia pasado (seccion 6: la animacion
+     * cuenta QUE acaba de pasar).
+     *
+     * <p>Como el motor actualiza las vistas EN SITIO, el anfitrion de antes no
+     * se puede preguntar despues: se apunta en cada repintado ({@link #lastHosts})
+     * y, justo antes de recolocar, donde estaba cada carta enganchada
+     * ({@link #noteAttachmentsBefore}). Despues se compara
+     * ({@link #attachmentsMoved}) y la que ha cambiado de anfitrion vuela: una
+     * foto de la carta de su sitio viejo al nuevo, con la de verdad escondida
+     * mientras tanto. Con las animaciones apagadas, nada.
+     */
+    public void noteAttachmentsBefore() {
+        attachedBefore.clear();
+        if (lastHosts.isEmpty()) {
+            return;
+        }
+        for (final CardNode n : everyNode()) {
+            final CardView cv = n.getCard();
+            if (cv != null && cv.getId() > 0 && lastHosts.containsKey(cv.getId())
+                    && n.getScene() != null && n.isVisible()) {
+                attachedBefore.put(cv.getId(), n.localToScene(n.getBoundsInLocal()));
+            }
+        }
+    }
+
+    /** Ver {@link #noteAttachmentsBefore}. */
+    public void attachmentsMoved() {
+        final java.util.Map<Integer, Integer> now = new java.util.HashMap<>();
+        final java.util.Map<Integer, javafx.geometry.Bounds> moved = new java.util.HashMap<>();
+        for (final CardNode n : everyNode()) {
+            final CardView cv = n.getCard();
+            if (cv == null || cv.getId() <= 0) {
+                continue;
+            }
+            final CardView host;
+            try {
+                host = cv.getAttachedTo();
+            } catch (final RuntimeException e) {
+                continue;
+            }
+            if (host == null) {
+                continue;
+            }
+            now.put(cv.getId(), host.getId());
+            final Integer was = lastHosts.get(cv.getId());
+            final javafx.geometry.Bounds from = attachedBefore.get(cv.getId());
+            if (was != null && was != host.getId() && from != null) {
+                moved.put(cv.getId(), from);
+            }
+        }
+        lastHosts = now;
+        attachedBefore.clear();
+        if (moved.isEmpty() || !ImpactLayer.isEnabled()) {
+            return;
+        }
+        // Despues del layout: la carta tiene que estar ya en su sitio nuevo.
+        javafx.application.Platform.runLater(() -> {
+            applyCss();
+            layout();
+            for (final CardNode n : everyNode()) {
+                final CardView cv = n.getCard();
+                final javafx.geometry.Bounds from = cv == null ? null : moved.get(cv.getId());
+                if (from != null && n.getScene() != null) {
+                    flyCard(n, from);
+                }
+            }
+        });
+    }
+
+    /** La ultima carta soltada desde la mano, donde y cuando: de ahi sale su vuelo. */
+    private int lastDropId = -1;
+    private double lastDropX;
+    private double lastDropY;
+    private long lastDropAt;
+
+    /**
+     * <b>La carta que entra en la mesa vuela desde donde estaba</b> (Discord,
+     * 26-10-2026: <i>"a quick float to the board from the opponent's hand, or
+     * from where I release my card"</i>). Va con las animaciones: si estan
+     * encendidas sale, si no, no. Sin ajuste propio (Ana).
+     *
+     * <p>Sale de donde soltaste la carta si la arrastraste hace poco, si no del
+     * stack (un hechizo que se resuelve), de tu mano o del retrato del rival
+     * (una tierra). La carta aun no esta en su sitio cuando llega el aviso: se
+     * espera a que el refresco la pinte y entonces vuela con {@link #flyCard}.
+     */
+    public void flyIn(final CardView card, final boolean fromStack, final boolean mine, final PlayerView owner) {
+        if (card == null || !CardNode.areAnimationsEnabled()) {
+            return;
+        }
+        final javafx.geometry.Bounds from = flightSource(card, fromStack, mine, owner);
+        if (from != null) {
+            flyInLater(card, from, 0);
+        }
+    }
+
+    private void flyInLater(final CardView card, final javafx.geometry.Bounds from, final int attempt) {
+        final javafx.animation.PauseTransition wait =
+                new javafx.animation.PauseTransition(javafx.util.Duration.millis(attempt == 0 ? 20 : 60));
+        wait.setOnFinished(e -> {
+            final CardNode n = nodeOf(card);
+            if (n == null || n.getScene() == null || n.getWidth() <= 0) {
+                // Hasta ~0,7 s: lo que no aparece en ese rato no vuela.
+                if (attempt < 12) {
+                    flyInLater(card, from, attempt + 1);
+                }
+                return;
+            }
+            applyCss();
+            layout();
+            if (Boolean.getBoolean("neo.impact.log")) {
+                System.out.println("[vuelo] " + card.getName() + " desde " + (int) from.getCenterX() + ","
+                        + (int) from.getCenterY() + " (intento " + attempt + ")");
+            }
+            flyCard(n, from);
+        });
+        wait.play();
+    }
+
+    /** Cuando puede salir el siguiente vuelo de una carta robada (ms, reloj de sistema). */
+    private long nextDrawSlot;
+
+    /** Entre dos cartas robadas seguidas (la mano inicial, un Wheel). */
+    private static final int DRAW_GAP = 110;
+
+    /**
+     * <b>La carta que robas vuela de tu biblioteca a la mano</b> (Discord,
+     * 04-11-2026: <i>"an animation of the card coming from the library to the
+     * hand, just like arena"</i>). Sale boca abajo del monton de la biblioteca,
+     * se da la vuelta a medio camino y llega a su hueco del abanico, con su
+     * inclinacion. Varias seguidas salen en cascada, una cada {@link #DRAW_GAP}
+     * ms. Va con las animaciones, como {@link #flyIn}: el motor no la espera,
+     * es solo pintura.
+     */
+    public void flyDraw(final CardView card) {
+        if (card == null || !CardNode.areAnimationsEnabled()) {
+            return;
+        }
+        final ZonePile pile = selfField.libraryPile();
+        if (pile == null || pile.getScene() == null || !pile.isVisible() || pile.getWidth() <= 0) {
+            return;
+        }
+        final javafx.geometry.Bounds from = pile.localToScene(pile.getBoundsInLocal());
+        final javafx.scene.image.Image back = pile.backSnapshot();
+        final long now = System.currentTimeMillis();
+        final long start = Math.max(now, nextDrawSlot);
+        nextDrawSlot = start + DRAW_GAP;
+        flyDrawLater(card, from, back, start, 0);
+    }
+
+    private void flyDrawLater(final CardView card, final javafx.geometry.Bounds from,
+            final javafx.scene.image.Image back, final long start, final int attempt) {
+        final javafx.animation.PauseTransition wait =
+                new javafx.animation.PauseTransition(javafx.util.Duration.millis(attempt == 0 ? 20 : 60));
+        wait.setOnFinished(e -> {
+            final CardNode n = nodeOf(card);
+            if (n == null || n.getScene() == null || n.getWidth() <= 0 || !hand.getCards().contains(n)) {
+                // Hasta ~0,7 s: lo que no aparece en ese rato no vuela.
+                if (attempt < 12) {
+                    flyDrawLater(card, from, back, start, attempt + 1);
+                }
+                return;
+            }
+            // Escondida desde ya: si no, se veria en la mano mientras espera su turno.
+            n.setOpacity(0);
+            final long left = start - System.currentTimeMillis();
+            if (left > 15) {
+                final javafx.animation.PauseTransition turn =
+                        new javafx.animation.PauseTransition(javafx.util.Duration.millis(left));
+                turn.setOnFinished(x -> flyDrawCard(n, from, back));
+                turn.play();
+            } else {
+                flyDrawCard(n, from, back);
+            }
+        });
+        wait.play();
+    }
+
+    /** El vuelo en si: dorso hasta la mitad, cara despues, y la inclinacion del abanico. */
+    private void flyDrawCard(final CardNode n, final javafx.geometry.Bounds fromScene,
+            final javafx.scene.image.Image back) {
+        if (n.getScene() == null || !hand.getCards().contains(n)) {
+            n.setOpacity(1);
+            return;
+        }
+        applyCss();
+        layout();
+        // El sitio de llegada sin la rotacion: centro de la carta y su ancho de
+        // verdad (los limites de una carta inclinada son mas anchos que ella).
+        final javafx.geometry.Point2D c0 = n.localToScene(n.getWidth() / 2, n.getHeight() / 2);
+        final javafx.geometry.Point2D c1 = n.localToScene(n.getWidth(), n.getHeight() / 2);
+        final javafx.geometry.Point2D centreL = impactLayer.sceneToLocal(c0);
+        final javafx.geometry.Point2D edgeL = impactLayer.sceneToLocal(c1);
+        final javafx.geometry.Bounds fromL = impactLayer.sceneToLocal(fromScene);
+        if (centreL == null || edgeL == null || fromL == null) {
+            n.setOpacity(1);
+            return;
+        }
+        final double w = 2 * centreL.distance(edgeL);
+        final double h = w * n.getHeight() / Math.max(1, n.getWidth());
+        final javafx.scene.SnapshotParameters params = new javafx.scene.SnapshotParameters();
+        params.setFill(javafx.scene.paint.Color.TRANSPARENT);
+        final double rotate = n.getRotate();
+        final javafx.scene.image.Image face;
+        n.setRotate(0);
+        n.setOpacity(1);
+        try {
+            face = n.snapshot(params, null);
+        } catch (final RuntimeException e) {
+            return;
+        } finally {
+            n.setRotate(rotate);
+        }
+        n.setOpacity(0);
+        final javafx.scene.image.ImageView ghost = new javafx.scene.image.ImageView(back != null ? back : face);
+        ghost.setMouseTransparent(true);
+        ghost.setManaged(false);
+        ghost.setFitWidth(w);
+        ghost.setFitHeight(h);
+        ghost.relocate(centreL.getX() - w / 2, centreL.getY() - h / 2);
+        final double s0 = fromL.getWidth() / w;
+        final double dx = fromL.getCenterX() - centreL.getX();
+        final double dy = fromL.getCenterY() - centreL.getY();
+        ghost.setTranslateX(dx);
+        ghost.setTranslateY(dy);
+        ghost.setScaleX(s0);
+        ghost.setScaleY(s0);
+        ghost.setEffect(new javafx.scene.effect.DropShadow(14, javafx.scene.paint.Color.rgb(0, 0, 0, 0.6)));
+        impactLayer.getChildren().add(ghost);
+        // -Dneo.drawFlyMs: mas lento, para capturarlo a medias (la guía de pruebas).
+        final javafx.util.Duration d = javafx.util.Duration.millis(Integer.getInteger("neo.drawFlyMs", 300));
+        final javafx.util.Duration half = d.multiply(0.45);
+        final double mid = (s0 + 1) / 2;
+        final javafx.animation.Interpolator io = javafx.animation.Interpolator.EASE_BOTH;
+        final javafx.animation.Timeline t = new javafx.animation.Timeline(
+                new javafx.animation.KeyFrame(javafx.util.Duration.ZERO,
+                        new javafx.animation.KeyValue(ghost.translateXProperty(), dx),
+                        new javafx.animation.KeyValue(ghost.translateYProperty(), dy),
+                        new javafx.animation.KeyValue(ghost.scaleXProperty(), s0),
+                        new javafx.animation.KeyValue(ghost.scaleYProperty(), s0),
+                        new javafx.animation.KeyValue(ghost.rotateProperty(), 0)),
+                // A media vuelta la carta esta de canto: ahi el dorso pasa a ser la cara.
+                new javafx.animation.KeyFrame(half, x -> ghost.setImage(face),
+                        new javafx.animation.KeyValue(ghost.scaleXProperty(), 0, javafx.animation.Interpolator.EASE_IN),
+                        new javafx.animation.KeyValue(ghost.scaleYProperty(), mid, io)),
+                new javafx.animation.KeyFrame(d,
+                        new javafx.animation.KeyValue(ghost.translateXProperty(), 0, io),
+                        new javafx.animation.KeyValue(ghost.translateYProperty(), 0, io),
+                        new javafx.animation.KeyValue(ghost.scaleXProperty(), 1, javafx.animation.Interpolator.EASE_OUT),
+                        new javafx.animation.KeyValue(ghost.scaleYProperty(), 1, io),
+                        new javafx.animation.KeyValue(ghost.rotateProperty(), rotate, io)));
+        t.setOnFinished(e -> {
+            impactLayer.getChildren().remove(ghost);
+            n.setOpacity(1);
+        });
+        if (Boolean.getBoolean("neo.impact.log")) {
+            System.out.println("[robo] vuela " + (n.getCard() == null ? "?" : n.getCard().getName()));
+        }
+        t.play();
+    }
+
+    /** De donde sale el vuelo, como un rectangulo de carta pequenya en la escena. */
+    private javafx.geometry.Bounds flightSource(final CardView card, final boolean fromStack, final boolean mine,
+            final PlayerView owner) {
+        javafx.geometry.Point2D c = null;
+        if (mine && card.getId() == lastDropId && System.currentTimeMillis() - lastDropAt < 8000) {
+            c = new javafx.geometry.Point2D(lastDropX, lastDropY);
+        } else if (fromStack) {
+            final Node s = stackBox.getScene() != null && stackBox.isVisible() ? stackBox
+                    : stackChip.getScene() != null && stackChip.isVisible() ? stackChip : null;
+            c = centerOf(s);
+        } else if (mine) {
+            c = centerOf(hand);
+        } else if (owner != null) {
+            c = centerOf(portraitOf(owner));
+        }
+        if (c == null) {
+            return null;
+        }
+        final double w = UiScale.px(70);
+        final double h = w * 7 / 5;
+        return new javafx.geometry.BoundingBox(c.getX() - w / 2, c.getY() - h / 2, w, h);
+    }
+
+    private static javafx.geometry.Point2D centerOf(final Node n) {
+        if (n == null || n.getScene() == null) {
+            return null;
+        }
+        final javafx.geometry.Bounds b = n.localToScene(n.getBoundsInLocal());
+        return new javafx.geometry.Point2D(b.getCenterX(), b.getCenterY());
+    }
+
+    /** Una foto de {@code n} que va de {@code fromScene} a donde esta {@code n} ahora. */
+    private void flyCard(final CardNode n, final javafx.geometry.Bounds fromScene) {
+        final javafx.geometry.Bounds toScene = n.localToScene(n.getBoundsInLocal());
+        if (toScene.getWidth() <= 0 || fromScene.getWidth() <= 0
+                || Math.hypot(toScene.getMinX() - fromScene.getMinX(),
+                        toScene.getMinY() - fromScene.getMinY()) < 4) {
+            return;
+        }
+        final javafx.scene.SnapshotParameters params = new javafx.scene.SnapshotParameters();
+        params.setFill(javafx.scene.paint.Color.TRANSPARENT);
+        final javafx.scene.image.WritableImage img;
+        try {
+            img = n.snapshot(params, null);
+        } catch (final RuntimeException e) {
+            return;
+        }
+        // En las coordenadas de la capa de efectos, tamanyo incluido: la capa
+        // puede ir escalada respecto a la escena (la mesa acercada, la escala).
+        final javafx.geometry.Bounds fromL = impactLayer.sceneToLocal(fromScene);
+        final javafx.geometry.Bounds toL = impactLayer.sceneToLocal(toScene);
+        if (fromL == null || toL == null) {
+            return;
+        }
+        final javafx.scene.image.ImageView ghost = new javafx.scene.image.ImageView(img);
+        ghost.setMouseTransparent(true);
+        ghost.setManaged(false);
+        // La foto mide lo que mide la carta ahora; al salir, lo que media antes.
+        ghost.setFitWidth(toL.getWidth());
+        ghost.setFitHeight(toL.getHeight());
+        ghost.relocate(toL.getMinX(), toL.getMinY());
+        final double s0 = fromL.getWidth() / toL.getWidth();
+        final double dx = fromL.getCenterX() - toL.getCenterX();
+        final double dy = fromL.getCenterY() - toL.getCenterY();
+        ghost.setTranslateX(dx);
+        ghost.setTranslateY(dy);
+        ghost.setScaleX(s0);
+        ghost.setScaleY(s0);
+        ghost.setEffect(new javafx.scene.effect.DropShadow(18, javafx.scene.paint.Color.rgb(224, 166, 60, 0.85)));
+        impactLayer.getChildren().add(ghost);
+        n.setOpacity(0);
+        // -Dneo.attachFlyMs: mas lento, para capturarlo a medias (la guía de pruebas).
+        final javafx.util.Duration d = javafx.util.Duration.millis(Integer.getInteger("neo.attachFlyMs", 340));
+        final double lift = Math.max(s0, 1) * 1.12;
+        final javafx.animation.Timeline t = new javafx.animation.Timeline(
+                new javafx.animation.KeyFrame(javafx.util.Duration.ZERO,
+                        new javafx.animation.KeyValue(ghost.translateXProperty(), dx),
+                        new javafx.animation.KeyValue(ghost.translateYProperty(), dy)),
+                // A medio camino se levanta un poco: "se despega" de la de antes.
+                new javafx.animation.KeyFrame(d.multiply(0.5),
+                        new javafx.animation.KeyValue(ghost.scaleXProperty(), lift, javafx.animation.Interpolator.EASE_OUT),
+                        new javafx.animation.KeyValue(ghost.scaleYProperty(), lift, javafx.animation.Interpolator.EASE_OUT)),
+                new javafx.animation.KeyFrame(d,
+                        new javafx.animation.KeyValue(ghost.translateXProperty(), 0, javafx.animation.Interpolator.EASE_BOTH),
+                        new javafx.animation.KeyValue(ghost.translateYProperty(), 0, javafx.animation.Interpolator.EASE_BOTH),
+                        new javafx.animation.KeyValue(ghost.scaleXProperty(), 1, javafx.animation.Interpolator.EASE_IN),
+                        new javafx.animation.KeyValue(ghost.scaleYProperty(), 1, javafx.animation.Interpolator.EASE_IN)));
+        t.setOnFinished(e -> {
+            impactLayer.getChildren().remove(ghost);
+            n.setOpacity(1);
+        });
+        if (Boolean.getBoolean("neo.impact.log")) {
+            System.out.println("[equipo] vuela " + n.getCard().getName());
+        }
+        t.play();
+    }
+
+    /** El anfitrion de cada carta enganchada en el ultimo repintado, por id. */
+    private java.util.Map<Integer, Integer> lastHosts = new java.util.HashMap<>();
+    /** Donde estaban, en la escena, justo antes de recolocar. */
+    private final java.util.Map<Integer, javafx.geometry.Bounds> attachedBefore = new java.util.HashMap<>();
+
+    /** La entrada del panel del stack bajo el raton, o -1. */
+    private int hoveredStackId = -1;
+
+    /** Las filas del panel del stack por id de entrada (las pone {@link #wireRow}). */
+    private final java.util.Map<Integer, Region> stackRows = new java.util.HashMap<>();
+
+    private static final javafx.css.PseudoClass STACK_TARGET_ROW =
+            javafx.css.PseudoClass.getPseudoClass("stack-target");
+
+    public void setActionable(final java.util.function.ToIntFunction<CardView> strength) {
+        this.actionable = strength;
+        for (final CardNode n : everyNode()) {
+            final CardView cv = n.getCard();
+            n.setActionable(cv == null || strength == null ? 0 : strength.applyAsInt(cv));
+        }
+    }
+
+    private java.util.function.ToIntFunction<CardView> actionable;
+
+    /** La carta de la mano bajo el raton, o null al salir. Ver forge.neo.match.TapPreview. */
+    public void setOnHandHover(final java.util.function.Consumer<CardView> handler) {
+        this.onHandHover = handler;
+    }
+
+    private java.util.function.Consumer<CardView> onHandHover;
+
+    /**
+     * Que hacer cuando se clica el retrato de un jugador.
+     *
+     * <p>Se recuerda porque los asientos de rival se crean y se destruyen sobre
+     * la marcha ({@link #setOpponentSeats}): un asiento nuevo tiene que nacer
+     * ya cableado, o clicar esa barra no haria nada y el motor se quedaria
+     * esperando una respuesta que nunca llega.
+     */
+    public void setOnPlayerClicked(final Consumer<PlayerView> handler) {
+        this.onPlayerClicked = handler;
+        for (final PlayerBar b : oppBars) {
+            b.setOnPlayerClicked(handler);
+        }
+        selfBar.setOnPlayerClicked(handler);
+    }
+
+    private Consumer<PlayerView> onPlayerClicked;
+    private boolean playersSelectable;
+
+    /** Resalta los retratos cuando hay que elegir jugador. */
+    public void setPlayersSelectable(final boolean on) {
+        this.playersSelectable = on;
+        for (final PlayerBar b : oppBars) {
+            b.setSelectable(on);
+        }
+        selfBar.setSelectable(on);
+    }
+
+    /** Que hacer cuando el jugador clica una carta. */
+    public void setOnCardClicked(final Consumer<CardView> handler) {
+        this.onCardClicked = handler;
+    }
+
+    private Consumer<CardView> onCardClicked;
+
+    private void cardClicked(final CardNode n) {
+        if (onCardClicked != null && n.getCard() != null) {
+            onCardClicked.accept(n.getCard());
+        }
+    }
+
+    /**
+     * Que hacer al clicar el "xN" de una pila de fichas (recibe todas sus
+     * cartas). Sin nadie que lo quiera, es un clic en la de delante, que es lo
+     * que hacia antes.
+     */
+    public void setOnStackCountClicked(final Consumer<java.util.List<CardView>> handler) {
+        this.onStackCountClicked = handler;
+    }
+
+    private Consumer<java.util.List<CardView>> onStackCountClicked;
+
+    private void stackCountClicked(final java.util.List<CardView> cards) {
+        if (cards == null || cards.isEmpty()) {
+            return;
+        }
+        if (onStackCountClicked != null) {
+            onStackCountClicked.accept(cards);
+        } else {
+            cardClickedDirect(cards.get(0));
+        }
+    }
+
+    /**
+     * "Cuantas?" al clicar el "xN" de una pila mientras se elige (Discord,
+     * 22-10-2026: <i>"have a selection like X"</i>). Sacrificar veinte Tesoros
+     * de una pila de cuarenta son veinte clics; aqui es uno y un numero.
+     *
+     * <p>En la capa del menu, no en la de los dialogos del motor (principio
+     * 10): es una ayuda nuestra para contestar, y cerrarla no puede llevarse
+     * por delante nada que el motor este esperando. Sale con todas marcadas,
+     * que es lo que se quiere casi siempre al ir a la pila entera.
+     *
+     * @param most cuantas se pueden coger como mucho (las libres de la pila, sin
+     *             pasar de lo que aun deja elegir el motor); al menos 2
+     */
+    public void askPileCount(final CardView card, final int most,
+            final java.util.function.IntConsumer onPick) {
+        final String name = card == null || card.getCurrentState() == null ? ""
+                : forge.neo.card.CardText.nameOf(card.getCurrentState());
+        final Label heading = new Label(NeoText.get("pile.count.title"));
+        heading.getStyleClass().add("dialog-title");
+        final Label body = new Label(NeoText.get("pile.count.body", name, most));
+        body.getStyleClass().add("dialog-text");
+        body.setWrapText(true);
+        body.setMaxWidth(UiScale.px(460));
+        body.setMinHeight(Region.USE_PREF_SIZE);
+
+        final javafx.scene.control.Slider slider = new javafx.scene.control.Slider(1, most, most);
+        slider.setBlockIncrement(1);
+        slider.setMajorTickUnit(1);
+        slider.setMinorTickCount(0);
+        slider.setSnapToTicks(true);
+        slider.setPrefWidth(UiScale.px(320));
+        final Button less = new Button("−");
+        final Button more = new Button("+");
+        less.getStyleClass().add("btn-secondary");
+        more.getStyleClass().add("btn-secondary");
+        less.setOnAction(e -> slider.setValue(Math.max(1, Math.round(slider.getValue()) - 1)));
+        more.setOnAction(e -> slider.setValue(Math.min(most, Math.round(slider.getValue()) + 1)));
+        final Label value = new Label();
+        value.getStyleClass().add("dialog-title");
+        value.setMinWidth(UiScale.px(48));
+        value.setAlignment(javafx.geometry.Pos.CENTER);
+        final HBox picker = new HBox(10, less, slider, more, value);
+        picker.setAlignment(javafx.geometry.Pos.CENTER);
+
+        final Button cancel = new Button(NeoText.get("common.cancel"));
+        cancel.getStyleClass().add("btn-secondary");
+        cancel.setCancelButton(true);
+        cancel.setOnAction(e -> menuOverlay.hide());
+        final Button ok = new Button();
+        ok.getStyleClass().add("btn-primary");
+        ok.setDefaultButton(true);
+        final Runnable sync = () -> {
+            final int n = (int) Math.round(slider.getValue());
+            value.setText(Integer.toString(n));
+            ok.setText(NeoText.get("pile.count.pick", n));
+        };
+        slider.valueProperty().addListener((o, a, b) -> sync.run());
+        sync.run();
+        ok.setOnAction(e -> {
+            menuOverlay.hide();
+            onPick.accept((int) Math.round(slider.getValue()));
+        });
+
+        final HBox footer = new HBox(10, cancel, ok);
+        footer.setAlignment(javafx.geometry.Pos.CENTER_RIGHT);
+        final VBox box = new VBox(14, heading, body, picker, footer);
+        box.getStyleClass().add("dialog");
+        box.setPadding(new Insets(22, 26, 20, 26));
+        box.setMaxWidth(Region.USE_PREF_SIZE);
+        box.setMaxHeight(Region.USE_PREF_SIZE);
+        menuOverlay.setOnBackgroundClick(menuOverlay::hide);
+        menuOverlay.show(box);
+        javafx.application.Platform.runLater(ok::requestFocus);
+    }
+
+    /** Como un click en la mesa, pero sobre una carta que no esta pintada ahi. */
+    private void cardClickedDirect(final CardView card) {
+        if (onCardClicked != null && card != null) {
+            onCardClicked.accept(card);
+        }
+    }
+
+    public void setOnCardHover(final Consumer<CardNode> handler) {
+        this.onCardHover = handler;
+    }
+
+    /** Refresca todo lo pintado. Se llama cuando llegan imagenes nuevas. */
+    public void refreshAll() {
+        // Tambien lo que haya en los dialogos: una carta ampliada o el reparto
+        // de dano se quedaban con el marcador hasta cerrarlos y volver a abrir.
+        CardNode.refreshAllIn(overlay);
+        CardNode.refreshAllIn(menuOverlay);
+        CardNode.refreshAllIn(zoomOverlay);
+        // Y el cartel central, que se quedaba fuera del barrido: su carta es un
+        // CardNode reutilizado, asi que cuando por fin llegaba su imagen no
+        // habia nadie que se lo dijera. El arte solo aparecia al cambiar de
+        // carta — o sea que el cartel iba SIEMPRE una carta por detras.
+        CardNode.refreshAllIn(promptBanner);
+        for (final PlayerField f : oppFields) {
+            f.refreshAll();
+        }
+        selfField.refreshAll();
+        commandZone.refreshAll();
+        for (final CardNode n : extraNodes) {
+            n.refresh();
+        }
+        if (handPeek.isVisible()) {
+            handPeek.refresh();
+        }
+        detail.refresh();
+    }
+
+    private List<CardNode> everyNode() {
+        final List<CardNode> all = new ArrayList<>(extraNodes);
+        for (final PlayerField f : oppFields) {
+            all.addAll(f.nodes());
+        }
+        all.addAll(selfField.nodes());
+        all.addAll(commandZone.nodes());
+        return all;
+    }
+
+    /**
+     * Si hay en la mesa alguna criatura <b>preparada</b>. Solo para capturas.
+     *
+     * <p>Existe porque ese estado no se puede pedir: aparece cuando la partida
+     * llega a la fase que lo dispara, y con el piloto automatico eso cae en un
+     * momento cualquiera. Sin poder esperarlo, la captura sale con lo que
+     * hubiera — un dialogo, otro turno — y no prueba nada.
+     */
+    public boolean hasPreparedCard() {
+        return preparedCardNode() != null;
+    }
+
+    /**
+     * Las cartas que se VEN en la mesa marcadas como elegibles. Solo para
+     * pruebas: lo que el motor ofrece y lo que el jugador puede clicar no
+     * tienen por que ser lo mismo (ver {@code --proliferate-test}).
+     */
+    public List<CardView> shownSelectableCards() {
+        final List<CardView> out = new ArrayList<>();
+        for (final CardNode n : everyNode()) {
+            if (n.getCard() != null && n.isSelectable() && n.isVisible()) {
+                out.add(n.getCard());
+            }
+        }
+        return out;
+    }
+
+    /** La primera criatura preparada de la mesa, para clicarla en una prueba. */
+    public CardNode preparedCardNode() {
+        for (final CardNode n : everyNode()) {
+            if (n.getCard() != null && n.getCard().getPreparedSpell() != null) {
+                return n;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Vuelve a repartir el resaltado del motor, para los nodos que acaban de
+     * nacer. Lo llama {@code TableBinder} tras cada repintado, igual que el
+     * resaltado debil: una pila que cambia de tamanyo se rehace con nodos
+     * nuevos, y sin esto lo ya elegido se quedaba sin marca.
+     */
+    public void reapplyHighlighted() {
+        if (highlighted != null) {
+            setHighlighted(highlighted);
+        }
+    }
+
+    private Predicate<Object> highlighted;
+
+    public int nodeCount() {
+        return everyNode().size();
+    }
+
+    public long nodesWithArt() {
+        return everyNode().stream().filter(CardNode::hasArt).count();
+    }
+
+
+    // ---------------------------------------------------------------
+    // Indice de cartas: CardView -> nodo en pantalla
+    // ---------------------------------------------------------------
+
+    /**
+     * Donde esta pintada cada carta.
+     *
+     * <p>Lo necesitan las flechas de combate y el arrastre: los dos trabajan
+     * con {@code CardView} y tienen que llegar a pixeles. Se reconstruye cuando
+     * cambian las zonas, no en cada consulta: se consulta 60 veces por segundo
+     * mientras hay flechas en pantalla.
+     */
+    private final Map<Integer, CardNode> byCardId = new HashMap<>();
+
+    /**
+     * Respaldo por identidad para las vistas SIN id valido.
+     *
+     * <p>{@code CardView.getCardForUi()} (maquetas, editor de mazos) devuelve
+     * vistas que comparten un id negativo: indexarlas por id las colapsaria
+     * todas en una. Ahi la unica clave fiable es el propio objeto.
+     */
+    private final java.util.IdentityHashMap<CardView, CardNode> byCardRef =
+            new java.util.IdentityHashMap<>();
+
+    private void reindex() {
+        byCardId.clear();
+        byCardRef.clear();
+        for (final CardNode n : everyNode()) {
+            final CardView cv = n.getCard();
+            if (cv == null) {
+                continue;
+            }
+            byCardRef.put(cv, n);
+            if (cv.getId() >= 0) {
+                byCardId.put(cv.getId(), n);
+            }
+        }
+    }
+
+    /**
+     * Destella la carta a la que acaban de pegar.
+     *
+     * <p>Lo pide {@code NeoMatchUI} al recibir {@code GameEventCardDamaged}. Si
+     * esa carta no esta en la mesa — dano a algo del cementerio, a una carta que
+     * ya se ha ido — no pasa nada: no hay nada que ensenyar.
+     */
+    public void flashHit(final CardView card) {
+        final CardNode node = nodeOf(card);
+        if (node != null) {
+            Anim.hit(node);
+        }
+    }
+
+    /** Da un golpe de escala a una carta: "este numero acaba de cambiar". */
+    public void bumpCard(final CardView card) {
+        final CardNode node = nodeOf(card);
+        if (node != null) {
+            Anim.bump(node);
+        }
+    }
+
+    private CardNode nodeOf(final CardView card) {
+        if (card == null) {
+            return null;
+        }
+        final CardNode byId = card.getId() >= 0 ? byCardId.get(card.getId()) : null;
+        return byId != null ? byId : byCardRef.get(card);
+    }
+
+    /**
+     * Rectangulo de una entidad del motor en coordenadas de la mesa.
+     *
+     * <p>Es lo unico que necesita {@link CombatOverlay} para dibujar. Un
+     * jugador se representa con su barra: es lo que hace Arena, donde la flecha
+     * del atacante apunta al retrato del rival.
+     */
+    /**
+     * La barra de ese jugador, sea rival o tu.
+     *
+     * <p>Es el unico sitio que sabe donde se sienta cada uno. Antes esto era un
+     * {@code if/else} entre dos barras repetido en cinco metodos; con varias
+     * mesas a la vez eso serian cinco bucles distintos que hay que acordarse de
+     * cambiar a la vez, y olvidar uno no da ningun error: simplemente ese rival
+     * deja de poder ser objetivo, o de resaltarse, y no se nota hasta que
+     * pasa en una partida.
+     *
+     * @return null si ese jugador no tiene barra (todavia no se ha repartido)
+     */
+    private PlayerBar barOf(final PlayerView player) {
+        if (player == null) {
+            return null;
+        }
+        for (final PlayerBar b : oppBars) {
+            if (player.equals(b.getPlayer())) {
+                return b;
+            }
+        }
+        return player.equals(selfBar.getPlayer()) ? selfBar : null;
+    }
+
+    /** Todas las barras de la mesa, la tuya incluida. */
+    private List<PlayerBar> allBars() {
+        final List<PlayerBar> all = new ArrayList<>(oppBars);
+        all.add(selfBar);
+        return all;
+    }
+
+    /**
+     * Destellos sobre lo que acaba de ser objetivo de algo ({@link ImpactLayer}).
+     * Solo en el hilo de interfaz.
+     */
+    public void impactHit(final Object entity, final List<javafx.scene.paint.Color> colors, final Object source) {
+        // Que la carta espere entera a que le llegue (GhostHold).
+        if (entity instanceof CardView cv && ImpactLayer.isEnabled()) {
+            GhostHold.hold(cv.getId());
+            selfField.holdGhost(cv);
+            for (final PlayerField f : oppFields) {
+                f.holdGhost(cv);
+            }
+        }
+        impactLayer.hit(entity, colors, source);
+    }
+
+    /**
+     * El efecto de un hechizo famoso que acaba de resolverse ({@link SpellBlast}):
+     * en la mesa entera, o sobre {@code target} si es una quitada. Al golpe, los
+     * gordos hacen temblar el area de juego (solo ella: las barras y los botones
+     * se quedan quietos). Solo en el hilo de interfaz.
+     */
+    public void spellBlast(final forge.neo.match.SpellSignature signature, final Object target) {
+        final Bounds b = signature.atTarget && target != null ? impactBoundsOf(target) : null;
+        if (signature.atTarget && b == null) {
+            return;
+        }
+        impactLayer.spell(signature, b, () -> Anim.shake(viewport));
+    }
+
+    /**
+     * {@code --spell-test}: el efecto de {@code -Dneo.spell.test=NOMBRE} (de
+     * fabrica BLASPHEMOUS_ACT), sobre la primera carta del rival si es una quitada.
+     */
+    public void spellTest() {
+        // Congelado (-Dneo.spell.freezeAt), uno solo: dos encima falsean la captura.
+        if (System.getProperty("neo.spell.freezeAt") != null && impactLayer.blastShowing()) {
+            return;
+        }
+        forge.neo.match.SpellSignature sig;
+        try {
+            sig = forge.neo.match.SpellSignature.valueOf(
+                    System.getProperty("neo.spell.test", "BLASPHEMOUS_ACT").trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (final IllegalArgumentException e) {
+            sig = forge.neo.match.SpellSignature.BLASPHEMOUS_ACT;
+        }
+        CardView target = null;
+        for (final PlayerField f : oppFields) {
+            for (final CardNode n : f.nodes()) {
+                if (target == null && n.getCard() != null) {
+                    target = n.getCard();
+                }
+            }
+        }
+        spellBlast(sig, target);
+    }
+
+    /** La entrada de tu comandante ({@link CommanderEntrance}). Solo en el hilo de interfaz. */
+    public void commanderEntrance(final CardView card, final List<javafx.scene.paint.Color> colors,
+            final String subtitle, final forge.neo.match.CommanderSignature signature) {
+        impactLayer.commander(card, colors, subtitle, signature);
+    }
+
+    /** Si hay una entrada de comandante en pantalla. Para {@code --entrance-test}. */
+    public boolean entranceShowing() {
+        return impactLayer.entranceShowing();
+    }
+
+    /**
+     * {@code --entrance-test}: la entrada de comandante con la primera carta
+     * tuya de la mesa (tu comandante si lo hay), sin partida que la provoque.
+     */
+    public void entranceTest() {
+        CardNode pick = null;
+        for (final CardNode n : selfField.nodes()) {
+            if (n.getCard() != null && (pick == null || n.getCard().isCommander())) {
+                pick = n;
+            }
+        }
+        if (pick != null) {
+            impactLayer.commander(pick.getCard(), List.of(ImpactLayer.RED, ImpactLayer.WHITE),
+                    forge.neo.NeoText.get("entrance.commander"),
+                    forge.neo.match.CommanderSignature.of(pick.getCard(), true));
+        }
+    }
+
+    /**
+     * El golpe del combate: la carta que hace dano se lanza hacia lo que
+     * golpea ({@link Anim#strike}). Solo en el hilo de interfaz.
+     */
+    public void strike(final CardView source, final Object target) {
+        final CardNode n = nodeOf(source);
+        final Bounds to = impactBoundsOf(target);
+        if (Boolean.getBoolean("neo.impact.log")) {
+            System.out.println("[golpe] " + source + " -> " + target
+                    + (n == null || n.getScene() == null ? " (atacante no se ve)" : to == null ? " (victima no se ve)" : ""));
+        }
+        if (n == null || to == null || n.getScene() == null) {
+            return;
+        }
+        Anim.strike(n, localToScene(to.getCenterX(), to.getCenterY()));
+    }
+
+    /**
+     * <b>El dano que acaba de recibir</b> una carta o un jugador: su numero
+     * salta cuando llega el golpe ({@link ImpactLayer#damage}); en ese instante
+     * la carta da su destello rojo y el retrato del jugador se sacude. Y la
+     * carta que muere del golpe espera entera a recibirlo ({@link GhostHold}),
+     * como con los hechizos: <i>"the creature going to the graveyard or being
+     * destroyed upon hit"</i>. Con los efectos apagados, nada de esto: el
+     * destello de siempre y punto (lo hace NeoMatchUI).
+     */
+    public void damagePop(final Object entity, final int amount, final boolean combat, final boolean poison) {
+        if (entity instanceof CardView cv) {
+            GhostHold.hold(cv.getId());
+            selfField.holdGhost(cv);
+            for (final PlayerField f : oppFields) {
+                f.holdGhost(cv);
+            }
+        }
+        impactLayer.damage(entity, amount, combat, poison, () -> {
+            if (entity instanceof CardView cv) {
+                CardNode n = nodeOf(cv);
+                if (n == null || n.getScene() == null) {
+                    n = selfField.ghostOf(cv);
+                    for (int i = 0; n == null && i < oppFields.size(); i++) {
+                        n = oppFields.get(i).ghostOf(cv);
+                    }
+                }
+                Anim.hit(n);
+            } else if (entity instanceof PlayerView pv) {
+                Anim.shake(portraitOf(pv));
+            }
+        });
+    }
+
+    /** El retrato de ese jugador en la mesa, o su pestanya si su mesa no se ve. */
+    private Node portraitOf(final PlayerView pv) {
+        final PlayerBar bar = barOf(pv);
+        if (bar != null && bar.getPortrait() != null && bar.getPortrait().getScene() != null) {
+            return bar.getPortrait();
+        }
+        return opponentTabs.tabOf(pv);
+    }
+
+    /** Remolino bajo un permanente que acaba de entrar lanzado. */
+    public void impactArrive(final Object entity, final List<javafx.scene.paint.Color> colors) {
+        impactLayer.arrive(entity, colors);
+    }
+
+    /** Cuantos destellos hay en marcha. Para {@code --impact-test}. */
+    public int impactCount() {
+        return impactLayer.liveCount();
+    }
+
+    /**
+     * {@code --impact-test}: destellos sobre lo que haya en la mesa, sin
+     * partida que los provoque. Las cartas del rival y los jugadores reciben;
+     * las tuyas entran. Un color por carta, el ultimo multicolor.
+     */
+    private int impactTick;
+
+    public void impactTest() {
+        final List<javafx.scene.paint.Color> palette = List.of(ImpactLayer.RED, ImpactLayer.BLUE,
+                ImpactLayer.GREEN, ImpactLayer.BLACK, ImpactLayer.WHITE, ImpactLayer.COLORLESS);
+        // -Dneo.impact.only=N: solo ese color de la paleta (0 rojo ... 5 incoloro).
+        final int only = Integer.getInteger("neo.impact.only", -1);
+        final Object me = selfBar.getPlayer();
+        int i = 0;
+        // -Dneo.impact.damage=true: el numero del dano sobre las cartas del
+        // rival y sobre los dos jugadores (uno en verde, de veneno).
+        if (Boolean.getBoolean("neo.impact.damage")) {
+            int k = impactTick++;
+            for (final PlayerField f : oppFields) {
+                for (final CardNode n : f.nodes()) {
+                    if (n.getCard() != null) {
+                        damagePop(n.getCard(), 1 + k++ % 6, true, false);
+                    }
+                }
+            }
+            damagePop(me, 3, true, false);
+            if (opponentBar.getPlayer() != null) {
+                damagePop(opponentBar.getPlayer(), 1 + k % 5, false, k % 2 == 0);
+            }
+            return;
+        }
+        // -Dneo.impact.one=true: UNO cada vez, rotando carta y color (para grabar).
+        if (Boolean.getBoolean("neo.impact.one")) {
+            final List<CardNode> targets = new ArrayList<>();
+            for (final PlayerField f : oppFields) {
+                for (final CardNode n : f.nodes()) {
+                    if (n.getCard() != null && n.getCard().getCurrentState() != null
+                            && n.getCard().getCurrentState().isCreature()) {
+                        targets.add(n);
+                    }
+                }
+            }
+            if (!targets.isEmpty()) {
+                final int k = impactTick++;
+                impactLayer.hit(targets.get(k % targets.size()).getCard(),
+                        List.of(palette.get(k % palette.size())), me);
+            }
+            return;
+        }
+        // -Dneo.impact.arriveOnly=true: solo las entradas en la mesa.
+        final boolean arriveOnly = Boolean.getBoolean("neo.impact.arriveOnly");
+        for (final PlayerField f : arriveOnly ? List.<PlayerField>of() : oppFields) {
+            for (final CardNode n : f.nodes()) {
+                final javafx.scene.paint.Color c = palette.get(only >= 0 ? only : i++ % palette.size());
+                impactLayer.hit(n.getCard(), List.of(c), me);
+            }
+        }
+        for (final CardNode n : selfField.nodes()) {
+            impactLayer.arrive(n.getCard(), List.of(palette.get(only >= 0 ? only : i++ % palette.size())));
+        }
+    }
+
+    /**
+     * Como {@link #boundsOf}, pero una carta que se esta yendo cuenta: el
+     * destello sale sobre su fantasma. Solo para los destellos — las flechas
+     * no deben apuntar a algo que ya no esta en la partida.
+     */
+    private Bounds impactBoundsOf(final Object entity) {
+        final Bounds live = boundsOf(entity);
+        if (live != null) {
+            return live;
+        }
+        // Un rival cuya mesa no se esta viendo (Commander a 4): su pestanya.
+        if (entity instanceof PlayerView pv) {
+            final Node tab = opponentTabs.tabOf(pv);
+            return tab == null || tab.getScene() == null ? null
+                    : sceneToLocal(tab.localToScene(tab.getBoundsInLocal()));
+        }
+        if (!(entity instanceof CardView cv)) {
+            return null;
+        }
+        CardNode ghost = selfField.ghostOf(cv);
+        for (int i = 0; ghost == null && i < oppFields.size(); i++) {
+            ghost = oppFields.get(i).ghostOf(cv);
+        }
+        if (ghost != null && ghost.getScene() != null) {
+            return boundsOfNode(ghost);
+        }
+        // Ni fantasma: se fue mientras la partida estaba parada en un aviso.
+        Bounds was = selfField.lastSceneBoundsOf(cv);
+        for (int i = 0; was == null && i < oppFields.size(); i++) {
+            was = oppFields.get(i).lastSceneBoundsOf(cv);
+        }
+        return was == null ? null : sceneToLocal(was);
+    }
+
+    private Bounds boundsOf(final Object entity) {
+        Node node = null;
+        if (entity instanceof CardView cv) {
+            node = nodeOf(cv);
+        } else if (entity instanceof PlayerView pv) {
+            final PlayerBar bar = barOf(pv);
+            if (bar != null) {
+                node = bar.getPortrait();
+            }
+        }
+        if (node == null || node.getScene() == null) {
+            return null;
+        }
+        return boundsOfNode(node);
+    }
+
+    /** El rectangulo de ese nodo en la mesa, recortado a la fila que lo ensenya. */
+    private Bounds boundsOfNode(final Node node) {
+        final Bounds bounds = sceneToLocal(node.localToScene(node.getBoundsInLocal()));
+        // A scrolled card still owns its combat link. Anchor an off-screen end
+        // at the row edge instead of drawing across another player's board/HUD.
+        for (Node parent = node.getParent(); parent != null; parent = parent.getParent()) {
+            if (parent instanceof BattlefieldPane || parent instanceof HandFan) {
+                final Region row = (Region) parent;
+                final Bounds visible = sceneToLocal(row.localToScene(
+                        new javafx.geometry.BoundingBox(0, 0, row.getWidth(), row.getHeight())));
+                final double left = Math.max(visible.getMinX(), Math.min(visible.getMaxX(), bounds.getMinX()));
+                final double right = Math.max(left, Math.min(visible.getMaxX(), bounds.getMaxX()));
+                return new javafx.geometry.BoundingBox(left, bounds.getMinY(), right - left, bounds.getHeight());
+            }
+        }
+        return bounds;
+    }
+
+    // ---------------------------------------------------------------
+    // Flechas
+    // ---------------------------------------------------------------
+
+    /**
+     * Pinta las flechas de combate y de objetivo.
+     *
+     * @param links tripletas {origen, destino, CombatOverlay.Kind}
+     */
+    public void setCombatLinks(final List<Object[]> links) {
+        combatOverlay.setLinks(links);
+    }
+
+    /** Cuantas flechas hay ahora mismo. Solo para verificar con capturas. */
+    public int combatLinkCount() {
+        return combatOverlay.linkCount();
+    }
+
+    /** Los nodos de la mano, en orden. */
+    public List<CardNode> handNodes() {
+        return new ArrayList<>(extraNodes);
+    }
+
+    /** Los nodos del campo del rival. */
+    public List<CardNode> opponentFieldNodes() {
+        return opponentField.nodes();
+    }
+
+    /** Los nodos del campo propio. */
+    /** Las cartas de las mesas de los rivales. Para las pruebas ({@code e:} de --field-click). */
+    public List<CardNode> oppFieldNodes() {
+        final List<CardNode> out = new ArrayList<>();
+        for (final PlayerField f : oppFields) {
+            out.addAll(f.nodes());
+        }
+        return out;
+    }
+
+    public List<CardNode> selfFieldNodes() {
+        return selfField.nodes();
+    }
+
+    /** Cuantas entradas hay en el stack. Solo para verificar con capturas. */
+    public int stackSize() {
+        return stackSize;
+    }
+
+    private int stackSize;
+
+    /** Cuantas flechas de combate (ataque/bloqueo) hay ahora mismo. */
+    public int fightLinkCount() {
+        return combatOverlay.fightLinkCount();
+    }
+
+    /** Repinta las flechas ya. Solo para verificar con capturas. */
+    public void redrawCombat() {
+        combatOverlay.redrawNow();
+    }
+
+    // ---------------------------------------------------------------
+    // Arrastrar y soltar
+    // ---------------------------------------------------------------
+
+    /** Que hacer cuando se suelta una carta encima de algo. */
+    public interface DropHandler {
+        /**
+         * @param source   la carta que se arrastro
+         * @param fromHand true si salio de la mano (soltar = jugarla)
+         * @param target   CardView o PlayerView debajo del raton, o null
+         */
+        void onDrop(CardView source, boolean fromHand, Object target);
+    }
+
+    private DropHandler onDrop;
+    private CardNode dragNode;
+    private boolean dragFromHand;
+    private boolean dragActive;
+
+    private double pressX;
+    private double pressY;
+    /**
+     * La mano tactil: la carta que se esta ensenyando en grande mientras el
+     * dedo sigue apoyado en la mano, o null si no hay gesto de esos en curso.
+     */
+    private CardNode peeking;
+    private CardNode lastDropNode;
+    private boolean swallowNextClick;
+
+    /** Distancia a partir de la cual un click se considera arrastre. */
+    private static final double DRAG_SLOP = 9;
+
+    /** Traza cada soltada. Se enciende con -Dneo.drag.debug=true */
+    private static final boolean DRAG_DEBUG = Boolean.getBoolean("neo.drag.debug");
+
+    public void setOnCardDropped(final DropHandler handler) {
+        this.onDrop = handler;
+    }
+
+    /** Si ya hay quien atienda las soltadas. Lo usa la prueba de arrastre. */
+    public boolean hasDropHandler() {
+        return onDrop != null;
+    }
+
+    /**
+     * Arrastrar como verbo principal, igual que en Arena.
+     *
+     * <p>Se resuelve con filtros de raton sobre la mesa entera en vez de con la
+     * API de drag-and-drop de JavaFX: esa API arranca un gesto del sistema
+     * operativo, obliga a serializar el contenido y no deja pintar la flecha
+     * curva mientras se arrastra, que es justo lo que cuenta la accion.
+     *
+     * <p>Mientras no se supere {@link #DRAG_SLOP} no se consume nada, asi que
+     * un click sigue siendo un click. Es importante: el click tiene que seguir
+     * funcionando siempre como alternativa al arrastre.
+     */
+    private void installDragGestures() {
+        addEventFilter(MouseEvent.MOUSE_PRESSED, e -> {
+            // Clicar en cualquier sitio aparta el cartel central. NO se consume
+            // el evento: el click sigue su camino y hace lo que fuera a hacer.
+            if (promptBanner.isVisible() && !isInside(e.getTarget(), promptBanner)) {
+                promptBanner.fireDismiss();
+            }
+            // Plegada: el stack desplegado se recoge con un click fuera, como
+            // un menu. No se consume: el click sigue su camino.
+            if (stackPeek && !isInside(e.getTarget(), stackBox) && !isInside(e.getTarget(), stackChip)) {
+                stackPeek = false;
+                requestLayout();
+            }
+
+            // Click derecho: ampliar la carta para poder leerla. No entra en
+            // conflicto con el motor porque nunca le mandamos el boton pulsado
+            // (siempre pasamos triggerEvent = null).
+            if (e.getButton() == javafx.scene.input.MouseButton.SECONDARY) {
+                final CardNode zoomed = cardNodeAt(e.getTarget());
+                CardView card = zoomed == null ? null : zoomed.getCard();
+                if (card == null && isInside(e.getTarget(), detail)) {
+                    // El panel de detalle no pinta un CardNode sino la imagen
+                    // suelta, asi que hay que preguntarle a el que carta lleva.
+                    card = detail.getCurrent();
+                }
+                if (card == null) {
+                    // Un monton que ensenya su carta de arriba (la de tu mazo
+                    // con Courser of Kruphix, Future Sight...): esa carta deja
+                    // pasar el raton para que el clic izquierdo abra el visor,
+                    // asi que el derecho la amplia desde la pila (Discord,
+                    // 06-11-2026: antes habia que abrir el mazo y ampliarla ahi).
+                    for (Node n = e.getTarget() instanceof Node t ? t : null; n != null; n = n.getParent()) {
+                        if (n instanceof ZonePile pile) {
+                            card = pile.getTopCard();
+                            break;
+                        }
+                    }
+                }
+                if (card != null) {
+                    // En un dialogo o un visor de zona, la carta se amplia
+                    // DENTRO de su lista, y la rueda o las flechas pasan a la
+                    // siguiente (Discord, 08-10-2026: "add the arrows that let
+                    // us look at the next card ... when searching a deck for
+                    // multiple cards"). Las de la mesa, solas, como siempre.
+                    final Node layer = zoomed == null ? null
+                            : isInside(zoomed, overlay) ? overlay
+                            : isInside(zoomed, menuOverlay) ? menuOverlay : null;
+                    final List<CardNode> ring = layer == null ? List.of() : ringOf(zoomed, layer);
+                    // Sin nodo (el panel de detalle, la carta de arriba de una
+                    // pila), -1: List.of().indexOf(null) revienta.
+                    final int at = zoomed == null ? -1 : ring.indexOf(zoomed);
+                    if (ring.size() > 1 && at >= 0) {
+                        final List<CardView> cards = new ArrayList<>(ring.size());
+                        for (final CardNode n : ring) {
+                            cards.add(n.getCard());
+                        }
+                        showZoom(cards, at);
+                    } else {
+                        showZoom(card);
+                    }
+                } else if (zoomOverlay.isShowing()) {
+                    hideZoom();
+                }
+                e.consume();
+                return;
+            }
+            dragNode = draggableAt(e.getTarget());
+            dragFromHand = dragNode != null && extraNodes.contains(dragNode);
+            dragActive = false;
+            // Si el arrastre anterior acabo en el vacio, JavaFX no manda el
+            // click que ibamos a tragarnos y la marca se queda puesta: sin
+            // limpiarla aqui, el siguiente click legitimo se pierde.
+            swallowNextClick = false;
+            pressX = e.getSceneX();
+            pressY = e.getSceneY();
+            hidePeek();
+            if (dragFromHand && e.getButton() == javafx.scene.input.MouseButton.PRIMARY
+                    && touchHandFor(e) && !isModalShowing() && !overlay.isPeeking()) {
+                // La mano tactil: apoyar el dedo es MIRAR. La carta sale en
+                // grande y todavia no es un arrastre de nada.
+                showPeek(dragNode);
+                dragNode = null;
+                dragFromHand = false;
+            }
+        });
+
+        addEventFilter(MouseEvent.MOUSE_DRAGGED, e -> {
+            if (peeking != null) {
+                if (!isOverBoard(e.getSceneX(), e.getSceneY()) || isModalShowing()) {
+                    // Por la mano se va pasando de carta en carta, sin soltar.
+                    // Solo a la altura de la mano: en cuanto el dedo sube por
+                    // encima (la barra del jugador, camino de la mesa) la carta
+                    // se queda fija, o un gesto un poco en diagonal acabaria
+                    // jugando la de al lado.
+                    final javafx.geometry.Bounds hb = hand.localToScene(hand.getLayoutBounds());
+                    final CardNode under = e.getSceneY() >= hb.getMinY()
+                            ? handCardAt(e.getSceneX()) : null;
+                    if (under != null && under != peeking) {
+                        showPeek(under);
+                    }
+                    e.consume();
+                    return;
+                }
+                // Ha subido a la mesa: desde aqui es el arrastre de siempre,
+                // con la carta que se estaba mirando — no la que se toco
+                // primero, que puede estar tres cartas mas alla.
+                dragNode = peeking;
+                dragFromHand = true;
+                hidePeek();
+                dragActive = true;
+                dragNode.setDragging(true);
+                combatOverlay.startDrag(dragNode.getCard());
+            }
+            if (dragNode == null || isModalShowing()) {
+                return;
+            }
+            if (!dragActive) {
+                if (Math.hypot(e.getSceneX() - pressX, e.getSceneY() - pressY) < DRAG_SLOP) {
+                    return;
+                }
+                dragActive = true;
+                dragNode.setDragging(true);
+                combatOverlay.startDrag(dragNode.getCard());
+            }
+            final Point2D p = sceneToLocal(e.getSceneX(), e.getSceneY());
+            final boolean cancelling = dragFromHand && !isOverBoard(e.getSceneX(), e.getSceneY());
+            final Object target = cancelling ? null : entityAt(e.getSceneX(), e.getSceneY());
+            markDropTarget(target);
+            // Fuera de la mesa la flecha se apaga: es la senyal de que soltar
+            // ahi no va a jugar nada.
+            combatOverlay.moveDrag(p.getX(), p.getY(), target != null);
+            e.consume();
+        });
+
+        addEventFilter(MouseEvent.MOUSE_RELEASED, e -> {
+            if (peeking != null) {
+                // Soltar en la mano no juega nada: es lo que se pidio en
+                // Android y la mitad que hace util el gesto. La excepcion es
+                // cuando PREGUNTA el motor (descartar, elegir de la mano): eso
+                // se contesta tocando, que obligar a arrastrar a la mesa para
+                // "descarta una carta" seria un acertijo.
+                final CardNode shown = peeking;
+                final boolean tap = Math.hypot(e.getSceneX() - pressX,
+                        e.getSceneY() - pressY) < DRAG_SLOP;
+                hidePeek();
+                swallowNextClick = true;
+                if (tap && shown.isSelectable() && !isModalShowing()) {
+                    cardClicked(shown);
+                }
+                e.consume();
+                return;
+            }
+            if (!dragActive) {
+                dragNode = null;
+                return;
+            }
+            final Object target = entityAt(e.getSceneX(), e.getSceneY());
+            final CardView source = dragNode.getCard();
+            final boolean fromHand = dragFromHand;
+            dragNode.setDragging(false);
+            markDropTarget(null);
+            combatOverlay.endDrag();
+            dragNode = null;
+            dragActive = false;
+            swallowNextClick = true;
+            // Soltar una carta de la mano fuera de la mesa es arrepentirse.
+            //
+            // Antes se llamaba a onDrop pasara lo que pasara, y para una carta
+            // de la mano soltar significa jugarla: cogias una tierra, te lo
+            // pensabas mejor, la devolvias hacia la mano... y se jugaba igual
+            // en cuanto el soltar no caia EXACTAMENTE sobre el rectangulo de
+            // la mano. Y jugar una tierra NO se puede deshacer (Forge solo
+            // deshace lo que pasa por el stack, y una tierra no pasa), asi que
+            // el error era definitivo. Ahora hace falta lo contrario: que el
+            // drop caiga de verdad sobre la mesa (ver isOverBoard) para que
+            // cuente como jugarla. Cualquier otro sitio — la mano, o el hueco
+            // de en medio, o mas alla — cancela.
+            final boolean cancelled = fromHand && !isOverBoard(e.getSceneX(), e.getSceneY());
+
+            if (DRAG_DEBUG) {
+                System.out.printf("[drag] %s (mano=%s) -> %s%s%n",
+                        source, fromHand, target, cancelled ? " [CANCELADO]" : "");
+            }
+            if (!cancelled && onDrop != null && source != null) {
+                // Para que vuele desde aqui al entrar (flyIn).
+                if (fromHand) {
+                    lastDropId = source.getId();
+                    lastDropX = e.getSceneX();
+                    lastDropY = e.getSceneY();
+                    lastDropAt = System.currentTimeMillis();
+                }
+                onDrop.onDrop(source, fromHand, target);
+            }
+            // Soltarla DENTRO de la mano la cambia de sitio, como en Forge
+            // (CHand → IGameController.reorderHand). Pedido el 28-09-2026: "si
+            // cojo la cuarta de la mano y la llevo la primera, que se quede la
+            // primera". Es la misma soltada que antes no hacia nada (soltar
+            // fuera de la mesa es arrepentirse), asi que no le quita nada a
+            // jugar arrastrando.
+            // Lo que se ensenya en la mano sin ser de ella (setHandOutside) no
+            // se cambia de sitio: no esta en la mano del motor.
+            if (cancelled && fromHand && source != null && onHandReorder != null
+                    && source.getZone() == forge.game.zone.ZoneType.Hand
+                    && isOverHand(e.getSceneX(), e.getSceneY())) {
+                final int index = Math.min(handDropIndex(e.getSceneX(), source), lastHand.size() - 1);
+                if (index >= 0) {
+                    onHandReorder.accept(source, index);
+                }
+            }
+            e.consume();
+        });
+
+        // Con el dedo, JavaFX saca ademas un desplazamiento del mismo gesto, y
+        // la mano rodaria por debajo del dedo mientras se pasa de carta.
+        addEventFilter(javafx.scene.input.ScrollEvent.ANY, e -> {
+            if (peeking != null && e.isDirect()) {
+                e.consume();
+            }
+        });
+
+        // Tras un arrastre, JavaFX manda ademas un click en el nodo de origen.
+        // Sin tragarselo, soltar una carta la jugaria dos veces.
+        addEventFilter(MouseEvent.MOUSE_CLICKED, e -> {
+            if (swallowNextClick) {
+                swallowNextClick = false;
+                e.consume();
+            }
+        });
+    }
+
+    /**
+     * La carta pulsada, si es una que se puede arrastrar.
+     *
+     * <p>Se descartan las que estan en la columna lateral (la carta grande del
+     * panel de detalle es una vista previa, no una carta de la partida) y las
+     * de un dialogo modal, donde el gesto que vale es el click.
+     */
+    /**
+     * Si ese punto de la pantalla cae sobre la mesa (los dos campos y la
+     * linea de combate — lo que ya delimita {@link #board} para el zoom).
+     *
+     * <p>Es la zona donde soltar una carta de la mano SI la juega. Antes solo
+     * se cancelaba soltando EXACTAMENTE sobre la mano; un arrastre hacia
+     * atras que se quedara corto — sin llegar a caer dentro del rectangulo de
+     * la mano, pero sin llegar a la mesa tampoco — jugaba la carta igual.
+     * Reportado jugando: <i>"si la arrastro para atras que no se juegue,
+     * ahora se juega apuntes donde apuntes y da a missclick"</i>. Con jugar
+     * una tierra irreversible (principio 6 de las notas de diseño), lo seguro es
+     * exigir que el gesto sea inequivoco: solo cuenta un drop que caiga DE
+     * VERDAD sobre la mesa, y cualquier otro sitio cancela.
+     */
+    private boolean isOverBoard(final double sceneX, final double sceneY) {
+        // Y dentro del VISOR: con la mesa acercada, el tablero escalado se
+        // extiende por debajo de su recorte, y un punto sobre la mano caia
+        // "dentro" de el — devolver una carta a la mano la jugaba igual.
+        final Point2D v = viewport.sceneToLocal(sceneX, sceneY);
+        if (v == null || v.getX() < 0 || v.getY() < 0
+                || v.getX() > viewport.getWidth() || v.getY() > viewport.getHeight()) {
+            return false;
+        }
+        final Point2D p = board.sceneToLocal(sceneX, sceneY);
+        return board.getBoundsInLocal().contains(p);
+    }
+
+    /**
+     * Si este gesto va por la mano tactil (Ajustes, <i>Mano tactil</i>).
+     *
+     * <p>"Solo con el dedo" se distingue por {@code isSynthesized()}: JavaFX
+     * marca asi el raton que fabrica a partir de un toque en la pantalla, asi
+     * que en un portatil tactil el raton sigue como siempre y el dedo va como
+     * en Android.
+     */
+    private static boolean touchHandFor(final MouseEvent e) {
+        final String mode = forge.neo.NeoSettings.touchHand();
+        return forge.neo.NeoSettings.TOUCH_HAND_ALWAYS.equals(mode)
+                || forge.neo.NeoSettings.TOUCH_HAND_FINGER.equals(mode) && e.isSynthesized();
+    }
+
+    /**
+     * La carta de la mano que hay bajo ese punto, mirando solo a lo ancho.
+     *
+     * <p>Por la posicion de reparto y no por lo que se pinta: la carta que se
+     * esta tocando va ampliada por el hover y taparia a sus vecinas. Y de
+     * derecha a izquierda, porque en la mano la de la derecha va encima: la
+     * que se ve es la ultima que contiene el punto. Fuera de los extremos, la
+     * del extremo — el dedo se sale un poco y no por eso deja de mirar.
+     */
+    /** Quien mueve una carta de sitio en la mano. Ver {@link #setOnHandReorder}. */
+    private java.util.function.BiConsumer<CardView, Integer> onHandReorder;
+
+    /**
+     * Que hacer al soltar una carta de la mano dentro de la propia mano: el
+     * indice es el sitio en el que queda (las cartas que tendra a su izquierda),
+     * que es lo que espera {@code Zone.reorder}.
+     */
+    public void setOnHandReorder(final java.util.function.BiConsumer<CardView, Integer> handler) {
+        this.onHandReorder = handler;
+    }
+
+    /** Si ya hay quien atienda el cambio de sitio. Lo usa {@code --drag-test}. */
+    public boolean hasHandReorderHandler() {
+        return onHandReorder != null;
+    }
+
+    private boolean isOverHand(final double sceneX, final double sceneY) {
+        final javafx.geometry.Bounds b = hand.localToScene(hand.getLayoutBounds());
+        return b != null && b.contains(sceneX, sceneY);
+    }
+
+    /**
+     * A que sitio de la mano va una carta soltada en {@code sceneX}, o -1 si
+     * no cambia de sitio. Con la mano ORDENADA por el ajuste tampoco: el orden
+     * lo pone el ajuste, y moverla a mano se desharia en el siguiente repintado.
+     */
+    private int handDropIndex(final double sceneX, final CardView source) {
+        if (forge.neo.NeoSettings.orderHand()) {
+            return -1;
+        }
+        final List<CardNode> cards = hand.getCards();
+        final double x = hand.sceneToLocal(sceneX, 0).getX();
+        int current = -1;
+        int index = 0;
+        for (int i = 0; i < cards.size(); i++) {
+            final CardNode c = cards.get(i);
+            if (c.getCard() != null && c.getCard().getId() == source.getId()) {
+                current = i;
+                continue;
+            }
+            if (c.getLayoutX() + c.getWidth() / 2 < x) {
+                index++;
+            }
+        }
+        return current < 0 || index == current ? -1 : index;
+    }
+
+    private CardNode handCardAt(final double sceneX) {
+        final List<CardNode> cards = hand.getCards();
+        if (cards.isEmpty()) {
+            return null;
+        }
+        final double x = hand.sceneToLocal(sceneX, 0).getX();
+        for (int i = cards.size() - 1; i >= 0; i--) {
+            final CardNode c = cards.get(i);
+            if (x >= c.getLayoutX() && x <= c.getLayoutX() + c.getWidth()) {
+                return c;
+            }
+        }
+        final CardNode first = cards.get(0);
+        return x < first.getLayoutX() ? first : cards.get(cards.size() - 1);
+    }
+
+    /**
+     * La carta en grande, encima de la mano y centrada sobre la que se toca.
+     *
+     * <p>La pinta la mesa y no la mano: la mano no sabe cuanto sitio hay por
+     * encima (la barra, la mesa), y en Android la primera version salio
+     * cortada justo por eso. Tan grande como quepa entre el rail de fases y
+     * la mano, con techo en un tercio del ancho: es para LEER la carta.
+     */
+    private void showPeek(final CardNode over) {
+        if (over == null || over.getCard() == null) {
+            return;
+        }
+        peeking = over;
+        final double contentW = getWidth() - side.getWidth();
+        final double handTop = hand.getBoundsInParent().getMinY();
+        final double top = phaseRail.getBoundsInParent().getMaxY() + PAD;
+        double pw = Math.min(contentW / 3, Math.max(over.getWidth() * 2.2, UiScale.px(260)));
+        if (pw * CardNode.ASPECT > handTop - top - PAD) {
+            pw = Math.max(over.getWidth(), (handTop - top - PAD) / CardNode.ASPECT);
+        }
+        final double ph = pw * CardNode.ASPECT;
+        final javafx.geometry.Bounds b = over.localToScene(over.getBoundsInLocal());
+        final double centre = sceneToLocal(b.getCenterX(), b.getCenterY()).getX();
+        final double x = Math.max(PAD, Math.min(contentW - pw - PAD, centre - pw / 2));
+        handPeek.setCard(over.getCard());
+        handPeek.setCardWidth(pw);
+        handPeek.resizeRelocate(x, Math.max(top, handTop - ph - PAD), pw, ph);
+        handPeek.setVisible(true);
+    }
+
+    private void hidePeek() {
+        peeking = null;
+        handPeek.setVisible(false);
+    }
+
+    /** La carta que la mano tactil tiene en grande ahora mismo, o null. Para las pruebas. */
+    public CardView peekedHandCard() {
+        return peeking == null ? null : peeking.getCard();
+    }
+
+    /** true si el objetivo del evento cuelga de ese nodo. */
+    private static boolean isInside(final Object target, final Node ancestor) {
+        Node n = target instanceof Node ? (Node) target : null;
+        while (n != null) {
+            if (n == ancestor) {
+                return true;
+            }
+            n = n.getParent();
+        }
+        return false;
+    }
+
+    /** Un contador de zona de la barra o una pila de la mesa. */
+    private static boolean isZoneOpener(final Object target) {
+        Node n = target instanceof Node ? (Node) target : null;
+        while (n != null) {
+            if (n instanceof ZonePile || n.getStyleClass().contains("zone-button")) {
+                return true;
+            }
+            n = n.getParent();
+        }
+        return false;
+    }
+
+    /** Sube por el arbol hasta encontrar la carta que hay bajo el raton. */
+    private static CardNode cardNodeAt(final Object target) {
+        Node n = target instanceof Node ? (Node) target : null;
+        while (n != null) {
+            if (n instanceof CardNode cn) {
+                return cn;
+            }
+            n = n.getParent();
+        }
+        return null;
+    }
+
+    private CardNode draggableAt(final Object target) {
+        Node n = target instanceof Node ? (Node) target : null;
+        CardNode found = null;
+        while (n != null) {
+            if (found == null && n instanceof CardNode cn) {
+                found = cn;
+            }
+            // El cartel del stack tampoco: es informativo y su carta no se
+            // arrastra a ningun sitio. Antes cogerlo por la carta era el
+            // arrastre de una carta de la mesa, y soltar el hechizo del stack
+            // era clicarlo — elegirlo como objetivo si el motor lo pedia. Ahora
+            // arrastrarlo lo mueve (si el ajuste lo deja) y si no, nada.
+            if (n == side || n == overlay || n == menuOverlay || n == promptBanner) {
+                return null;
+            }
+            n = n.getParent();
+        }
+        return found;
+    }
+
+    /**
+     * Que hay debajo del raton: una carta o un jugador.
+     *
+     * <p>Se busca por geometria y no con {@code pick} porque la carta que se
+     * arrastra va por delante de todo y taparia siempre al destino.
+     */
+    private Object entityAt(final double sceneX, final double sceneY) {
+        CardNode best = null;
+        for (final CardNode n : everyNode()) {
+            if (n == dragNode || n.getCard() == null || n.getScene() == null) {
+                continue;
+            }
+            if (visibleHit(n, sceneX, sceneY)) {
+                // La ultima gana: es la que esta pintada mas arriba.
+                best = n;
+            }
+        }
+        if (best != null) {
+            return best.getCard();
+        }
+        // Con varias mesas a la vez, cada rival tiene SU barra en pantalla: es
+        // lo que hace que arrastrar un atacante sobre el rival al que quieres
+        // pegar signifique exactamente eso, sin tener que cambiar de pestanya
+        // primero (que es de donde salia el fallo de atacar a quien no era).
+        for (final PlayerBar b : allBars()) {
+            if (b.getPlayer() != null
+                    && visibleHit(b, sceneX, sceneY)) {
+                return b.getPlayer();
+            }
+        }
+        return null;
+    }
+
+    /** Geometry picking must respect the same visibility and clips as rendering. */
+    private static boolean visibleHit(final Node node, final double sceneX, final double sceneY) {
+        if (node.getScene() == null || node.isDisabled()) return false;
+        final Point2D point = node.sceneToLocal(sceneX, sceneY);
+        if (point == null || !node.contains(point)) return false;
+        for (Node current = node; current != null; current = current.getParent()) {
+            if (!current.isVisible() || current.getOpacity() <= 0 || current.isMouseTransparent()) return false;
+            final Node clip = current.getClip();
+            if (clip != null) {
+                final Point2D local = current.sceneToLocal(sceneX, sceneY);
+                final Point2D clipped = local == null ? null : clip.parentToLocal(local);
+                if (clipped == null || !clip.contains(clipped)) return false;
+            }
+        }
+        return true;
+    }
+
+    /** Marca la carta bajo el raton para que se vea donde va a caer. */
+    private void markDropTarget(final Object target) {
+        final CardNode node = target instanceof CardView cv ? nodeOf(cv) : null;
+        if (node == lastDropNode) {
+            return;
+        }
+        if (lastDropNode != null) {
+            lastDropNode.setDropTarget(false);
+        }
+        lastDropNode = node;
+        if (node != null) {
+            node.setDropTarget(true);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Resaltados del motor
+    // ---------------------------------------------------------------
+
+    /**
+     * Resaltado que pide el motor con {@code setHighlighted}.
+     *
+     * <p>Durante el combate es lo que dice sobre que estas trabajando: el
+     * defensor elegido mientras declaras atacantes, el atacante elegido
+     * mientras declaras bloqueadores.
+     */
+    public void setHighlighted(final Predicate<Object> test) {
+        this.highlighted = test;
+        // PRIMERO se parten las pilas: una ficha ya elegida deja de ser
+        // indistinguible de su gemela, y sin esto la segunda no se puede
+        // clicar (itch.io, 20-09-2026: convocar con dos fichas iguales).
+        // Ver BattlefieldPane.setPickedTest.
+        //
+        // Y el orden NO es indiferente, que es la misma trampa que ya tenia
+        // apuntada el desapilado de "elegibles": reagrupar fabrica nodos
+        // NUEVOS, asi que marcar antes seria marcar los que se van a tirar —
+        // la ficha elegida se quedaria sin su resaltado justo cuando mas
+        // falta hace, que es lo que dice cual has cogido ya.
+        final Predicate<CardView> picked =
+                cv -> cv != null && test != null && test.test(cv);
+        selfField.setPickedTest(picked);
+        for (final PlayerField f : oppFields) {
+            f.setPickedTest(picked);
+        }
+        for (final CardNode n : everyNode()) {
+            final CardView cv = n.getCard();
+            n.setHighlighted(cv != null && test != null && test.test(cv));
+        }
+        for (final PlayerBar b : allBars()) {
+            b.setHighlighted(test != null && b.getPlayer() != null
+                    && test.test(b.getPlayer()));
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Mana y paradas de fase
+    // ---------------------------------------------------------------
+
+    /**
+     * Enciende o apaga la reserva de mana del jugador.
+     *
+     * <p>El motor la abre al empezar un pago y la cierra al acabar. Verla
+     * destacada justo cuando importa es lo que hace que se entienda que esos
+     * pips son gastables, no un adorno.
+     */
+    public void setManaPoolActive(final PlayerView player, final boolean on) {
+        if (player == null) {
+            return;
+        }
+        final PlayerBar bar = barOf(player);
+        if (bar != null) {
+            bar.setManaPoolActive(on);
+        }
+    }
+
+    /** Click en un pip de mana flotante: gastarlo. */
+    public void setOnManaClicked(final Consumer<Byte> handler) {
+        selfBar.setOnManaClicked(handler);
+    }
+
+    /** Click en una fase del rail: poner o quitar la parada. */
+    public void setOnPhaseToggled(final java.util.function.BiConsumer<Boolean, PhaseType> handler) {
+        // Se envuelve en vez de enganchar el rail por su cuenta: asi el aviso
+        // sale exactamente cuando la parada se pone de verdad, y quien monta el
+        // tutorial no tiene que acordarse de nada.
+        phaseRail.setOnToggle((mine, phase) -> {
+            gesture(Gesture.PHASE_STOP);
+            if (handler != null) {
+                handler.accept(mine, phase);
+            }
+        });
+    }
+
+    /** Paradas de tus turnos y de los del rival. */
+    public void setPhaseStops(final Predicate<PhaseType> mine, final Predicate<PhaseType> theirs) {
+        phaseRail.setStops(mine, theirs);
+    }
+
+    /** Criaturas pintadas en el campo propio. Solo lo usa el modo maqueta. */
+    public List<CardView> selfCreatureViews() {
+        return creatureViews(selfField);
+    }
+
+    /** Criaturas pintadas en el campo del rival. Solo lo usa el modo maqueta. */
+    public List<CardView> opponentCreatureViews() {
+        return creatureViews(opponentField);
+    }
+
+    private static List<CardView> creatureViews(final PlayerField field) {
+        final List<CardView> out = new ArrayList<>();
+        for (final CardNode n : field.nodes()) {
+            final CardView cv = n.getCard();
+            if (cv != null && cv.getCurrentState() != null && cv.getCurrentState().isCreature()) {
+                out.add(cv);
+            }
+        }
+        return out;
+    }
+
+    /** Vuelca las alturas reales de cada zona. Solo para depurar el layout. */
+    public void dumpLayout() {
+        System.out.printf("[layout] table=%.0fx%.0f%n", getWidth(), getHeight());
+        dump("oppBar", opponentBar);
+        dump("oppField", opponentField);
+        dump("selfField", selfField);
+        dump("selfBar", selfBar);
+        dump("hand", hand);
+        // La columna de la derecha. Util cuando algo de ahi sale apretado: un
+        // VBox al que se le pide mas de lo que hay encoge a TODOS, y el alto
+        // que acaba dando no se adivina leyendo el codigo.
+        dump("side", side);
+        dump("  phaseRail", phaseRail);
+        dump("  stackBox", stackBox);
+        dump("  actionBar", actionBar);
+    }
+
+    private static void dump(final String label, final Region r) {
+        System.out.printf("[layout] %-10s y=%.0f h=%.0f%n",
+                label, r.getLayoutY(), r.getHeight());
+    }
+}
+
+
+
+

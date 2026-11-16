@@ -1,0 +1,486 @@
+package forge.neo.match;
+
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import forge.LobbyPlayer;
+import forge.ai.PlayerControllerAi;
+import forge.deck.Deck;
+import forge.game.Game;
+import forge.game.combat.Combat;
+import forge.game.player.Player;
+import forge.game.spellability.SpellAbility;
+import forge.gamemodes.match.HostedMatch;
+
+/**
+ * Que un fallo de la IA no se lleve la partida por delante.
+ *
+ * <p><b>De donde sale esto.</b> Jugando una partida en red a cuatro, la IA de
+ * Forge revento con un NPE dentro de {@code AiBlockController} mientras decidia
+ * bloqueos. La traza acaba asi:
+ *
+ * <pre>
+ *   AiController.declareBlockersFor
+ *   PhaseHandler.declareBlockersTurnBasedAction
+ *   PhaseHandler.onPhaseBegin
+ *   PhaseHandler.mainLoopStep
+ *   PhaseHandler.mainGameLoop        &lt;-- EL BUCLE DE LA PARTIDA
+ *   GameAction.startGame
+ * </pre>
+ *
+ * <p>O sea que la excepcion se lleva <b>el bucle entero</b>. A partir de ahi no
+ * hay partida: ni prioridad, ni fases, ni forma de conceder — el hilo <i>es</i>
+ * la partida, y su maquina de estados vive en esa pila de llamadas. Los dos
+ * jugadores se quedaron mirando una mesa muerta, con Salir sin efecto.
+ *
+ * <p><b>Por que no vale con "que la IA conceda".</b> Conceder es una accion de
+ * la partida y hay que pedirsela al motor; con el bucle ya muerto no queda
+ * nadie a quien pedirsela. Hay que cogerlo <b>antes</b> de que suba.
+ *
+ * <p><b>Y se puede, sin tocar el motor.</b> {@code PlayerControllerAi} es
+ * publica, no es final y sus decisiones son sobrescribibles, y
+ * {@code Player.dangerouslySetController} es publica — la usa el propio Forge
+ * para sentar una IA en el sitio de quien se desconecta. Asi que al empezar
+ * cada partida se le cambia el controlador a cada IA por uno igual pero
+ * envuelto: si una decision revienta, se anota y esa IA <b>se salta esa
+ * decision</b> (no ataca, no bloquea, o pasa) en vez de tirar la partida.
+ *
+ * <p>Es peor IA durante un instante, y una partida entera de diferencia.
+ *
+ * <p><b>Lo que NO hace:</b> no arregla el fallo de Forge — eso es un PR al
+ * upstream, no un parche local (regla de oro) — ni protege contra un fallo del
+ * motor de reglas. Solo contra la IA, que es el sitio donde un fallo no tiene
+ * por que ser mortal.
+ */
+public final class SafeAi {
+
+    private SafeAi() {
+    }
+
+    /**
+     * Rompe la IA a proposito, para poder comprobar todo esto sin esperar a que
+     * vuelva a salir la carta rara. {@code -Dneo.ai.crashTest=true}
+     */
+    private static final String CRASH_TEST = System.getProperty("neo.ai.crashTest", "");
+
+    /** {@code -Dneo.ai.crashTest=true} falla una vez; {@code =always}, siempre. */
+    private static final boolean CRASH_ALWAYS = "always".equalsIgnoreCase(CRASH_TEST);
+
+    private static final boolean CRASH_ONCE = CRASH_ALWAYS
+            || "true".equalsIgnoreCase(CRASH_TEST);
+
+    /**
+     * Cuantos fallos se le aguantan a una IA antes de retirarla.
+     *
+     * <p>Uno puede ser mala suerte. Tres seguidos no: significa que hay algo en
+     * la mesa con lo que esa IA no sabe lidiar, y entonces <b>no vuelve a
+     * bloquear ni a atacar en toda la partida</b>. Un rival que no hace nada es
+     * peor que un rival menos: no es una partida, es un cadaver ocupando sitio.
+     * A partir de ahi se retira y los demas siguen jugando.
+     */
+    private static final int MAX_FAILS = Integer.getInteger("neo.ai.maxFails", 3);
+
+    /**
+     * Se puede apagar con {@code -Dneo.ai.guard=false}.
+     *
+     * <p>Apagarlo no quita el envoltorio: lo que hace es <b>volver a lanzar</b>
+     * la excepcion en vez de tragarsela. Y es a proposito — la primera version
+     * se saltaba el envoltorio entero, y como el inyector de fallos vive dentro,
+     * la contraprueba no rompia nada y "pasaba" sin demostrar nada. Una prueba
+     * que no puede fallar no prueba nada.
+     *
+     * <p>Sirve para dos cosas: demostrar que sin el la partida SI se muere, y
+     * que una sesion futura pueda descartarlo si alguna vez tapa un fallo que
+     * convenga ver.
+     */
+    private static final boolean GUARD =
+            !"false".equalsIgnoreCase(System.getProperty("neo.ai.guard", "true"));
+
+    /** Cuantas decisiones se han rescatado. Lo mira el comprobador. */
+    private static final AtomicInteger RESCUES = new AtomicInteger();
+
+    public static int rescues() {
+        return RESCUES.get();
+    }
+
+    /** Cuantas IA se han retirado por fallar demasiado. */
+    private static final AtomicInteger CONCEDES = new AtomicInteger();
+
+    public static int concedes() {
+        return CONCEDES.get();
+    }
+
+    public static void resetRescues() {
+        RESCUES.set(0);
+    }
+
+    /**
+     * El gancho de arranque de un match, con el blindaje puesto.
+     *
+     * <p>Se COMPONE en vez de sustituir: ese gancho ya lo usan los puzzles y la
+     * prueba del comandante exiliado, y quedarse con el seria cambiar un fallo
+     * por otro.
+     *
+     * @param extra lo que ya hubiera que hacer al empezar; puede ser null
+     */
+    public static Runnable hook(final HostedMatch match, final Runnable extra) {
+        return () -> {
+            try {
+                protect(match.getGame());
+            } catch (final RuntimeException e) {
+                // Blindar es un extra: si fallara, la partida sigue como antes.
+                System.out.println("[ia] no se ha podido blindar la IA: " + e);
+            }
+            // Y otro envoltorio del motor que tiene que ir en TODAS las
+            // partidas: el color elegido de Clara Oswald / The Prismatic Piper
+            // (ver CommanderColorKeeper). Va aqui porque este gancho ya pasa
+            // por todos los modos, en el PC, en Android y en la red.
+            try {
+                CommanderColorKeeper.install(match.getGame());
+            } catch (final RuntimeException e) {
+                System.out.println("[comandante] no se ha podido enganchar: " + e);
+            }
+            if (extra != null) {
+                extra.run();
+            }
+        };
+    }
+
+    /**
+     * Envuelve el controlador de cada IA de esta partida.
+     *
+     * @return cuantas IA se han blindado
+     */
+    public static int protect(final Game game) {
+        if (game == null) {
+            return 0;
+        }
+        int n = 0;
+        for (final Player p : game.getPlayers()) {
+            if (!(p.getController() instanceof PlayerControllerAi) || p.getController() instanceof Guarded) {
+                continue;
+            }
+            final Guarded safe = new Guarded(game, p, p.getLobbyPlayer());
+            // El perfil que el motor deduce del mazo se recalcula, no se
+            // hereda: el campo es privado y su fuente — el mazo — sigue a mano.
+            final Deck deck = p.getRegisteredPlayer() == null
+                    ? null : p.getRegisteredPlayer().getDeck();
+            if (deck != null) {
+                safe.setupAutoProfile(deck);
+            }
+            p.dangerouslySetController(safe);
+            n++;
+        }
+        if (n > 0) {
+            System.out.printf(Locale.ROOT, "  [ai] %d opponent(s) guarded against engine crashes%n", n);
+        }
+        return n;
+    }
+
+    /**
+     * Una IA normal, pero que no se lleva la partida si se cae.
+     *
+     * <p>Solo se envuelven las decisiones que el <b>bucle de la partida</b> le
+     * pide directamente, que son las que al reventar lo matan: declarar
+     * atacantes, declarar bloqueadoras y elegir que jugar. Envolver los ciento
+     * y pico metodos restantes seria mucha superficie para tapar fallos que no
+     * cuelgan nada.
+     */
+    private static final class Guarded extends PlayerControllerAi {
+
+        private boolean crashedOnce;
+
+        /** Fallos de ESTA IA en esta partida. */
+        private int fails;
+
+        Guarded(final Game game, final Player p, final LobbyPlayer lp) {
+            super(game, p, lp);
+        }
+
+        @Override
+        public void declareAttackers(final Player attacker, final Combat combat) {
+            try {
+                // El inyector pincha tambien aqui, y no solo en los bloqueos:
+                // declarar atacantes pasa TODOS los turnos, mientras que
+                // bloquear solo si alguien te ataca. Con una prueba que
+                // depende de que te ataquen, unas veces se ejecuta y otras no.
+                boom();
+                // "Agresividad de la IA contigo" (FriendlyAttacks): en una
+                // partida libre de Commander con el ajuste puesto, decide sin
+                // ti si no eres claramente la mayor amenaza. Si no, como
+                // siempre.
+                FriendlyAttacks.declare(attacker, combat, () -> super.declareAttackers(attacker, combat));
+            } catch (final RuntimeException | StackOverflowError e) {
+                // Sin atacantes: esta IA se queda en casa este turno.
+                if (!GUARD) {
+                    throw e;
+                }
+                report(attacker, "declarar atacantes", e);
+            }
+        }
+
+        @Override
+        public void declareBlockers(final Player defender, final Combat combat) {
+            try {
+                boom();
+                super.declareBlockers(defender, combat);
+            } catch (final RuntimeException | StackOverflowError e) {
+                // Los bloqueos que ya hubiera puesto valen: cada uno se valido
+                // al ponerse. Lo que no llegara a decidir, no bloquea.
+                if (!GUARD) {
+                    throw e;
+                }
+                report(defender, "declarar bloqueadoras", e);
+            }
+        }
+
+        @Override
+        public List<SpellAbility> chooseSpellAbilityToPlay() {
+            try {
+                final List<SpellAbility> chosen = forbiddenToCast(super.chooseSpellAbilityToPlay());
+                if (chosen != null && !chosen.isEmpty()) {
+                    return chosen;
+                }
+                // Nada que hacer: el dado planar, que la IA no ve sola. Ver
+                // PlanarDiceAi.
+                final SpellAbility roll = PlanarDiceAi.pick(this);
+                return roll == null ? chosen : List.of(roll);
+            } catch (final RuntimeException | StackOverflowError e) {
+                // null es "no juego nada", que es justo lo que devuelve la IA
+                // cuando no encuentra jugada. O sea: pasa.
+                if (!GUARD) {
+                    throw e;
+                }
+                report(getPlayer(), "elegir que jugar", e);
+                return null;
+            }
+        }
+
+        /**
+         * <b>Lo que una regla le prohibe lanzar, no lo lanza</b> (Discord,
+         * 30-10-2026: Rakdos, Lord of Riots lanzado sin que el rival perdiera
+         * vida, "You can't cast this spell unless an opponent lost life").
+         *
+         * <p>Al humano el motor se lo para al empezar a lanzar
+         * ({@code PlaySpellAbility}: {@code checkRestrictions} con la carta ya en
+         * la pila). A la IA no: {@code ComputerUtil.handlePlayingSpellAbility}
+         * mueve la carta a la pila y paga sin volver a mirarlo, y se fia de lo
+         * que decidio antes. Aqui se repite esa misma comprobacion del motor
+         * ({@code AiController.canPlaySa}: una copia de la carta "en la pila")
+         * con lo que la IA ya ha elegido. Si no puede, se apunta como intento
+         * fallido (no la vuelve a elegir en este turno) y se queda fuera.
+         */
+        private List<SpellAbility> forbiddenToCast(final List<SpellAbility> chosen) {
+            if (chosen == null || chosen.isEmpty()) {
+                return chosen;
+            }
+            final List<SpellAbility> out = new java.util.ArrayList<>(chosen.size());
+            for (final SpellAbility sa : chosen) {
+                // Una tierra que el motor deja jugar sin permiso (Grenzo con las
+                // del cementerio rival): no se juega. Ver PhantomLandPlay.
+                if (PhantomLandPlay.illegal(sa, getPlayer())) {
+                    continue;
+                }
+                if (sa != null && sa.isSpell() && !sa.isCopied() && !mayCast(sa)) {
+                    getAi().noteFailedCast(forge.ai.AiController.castKey(sa));
+                    continue;
+                }
+                out.add(sa);
+            }
+            return out;
+        }
+
+        private boolean mayCast(final SpellAbility sa) {
+            try {
+                final forge.game.card.Card host = sa.getHostCard();
+                if (host == null || host.isInPlay()) {
+                    return true;
+                }
+                final forge.game.card.Card lki = forge.game.card.CardCopyService.getLKICopy(host);
+                lki.setLKICMC(-1);
+                lki.setLastKnownZone(host.getGame().getStackZone());
+                lki.setCastFrom(host.getZone());
+                return sa.checkRestrictions(lki, getPlayer());
+            } catch (final RuntimeException e) {
+                // Si no se sabe, lo de siempre: decide la IA.
+                return true;
+            }
+        }
+
+        /**
+         * Resolver un disparo suyo sin pasar por el stack.
+         *
+         * <h2>Por que esta aqui</h2>
+         *
+         * <p>Es el tercer sitio por el que el motor entra en la IA, y el que
+         * mas lejos llega: {@code WrappedAbility.resolve} resuelve el disparo
+         * <b>entero</b> por dentro de esta llamada. O sea que una carta rara
+         * que reviente al resolverse mata el hilo de la partida desde aqui, no
+         * desde una decision de la IA.
+         *
+         * <p>Caso real, reportado jugando el 03-09-2026 y dos veces seguidas:
+         * el jefe de Ascenso se quedaba sin esquemas y un "pon otro esquema en
+         * movimiento" ({@code SetInMotionEffect}) llamaba a
+         * {@code Player.setSchemeInMotion} <b>sin comprobar que quedara
+         * alguno</b>; ese metodo hace {@code getZone(SchemeDeck).get(0)}, que
+         * con el mazo vacio devuelve {@code null}, y {@code GameAction.moveTo}
+         * reventaba con un NPE. La partida se caia a mitad y el jugador
+         * aparecia en el mapa: <i>"en medio de la batalla con el boss me saca
+         * de la partida"</i>.
+         *
+         * <h2>Y por que tragarselo es lo correcto aqui</h2>
+         *
+         * <p>No es solo que sea mejor que perder la partida — que tambien. En
+         * ese caso concreto, lo que el efecto pedia era imposible: <b>no habia
+         * otro esquema que poner en movimiento</b>. Saltarselo es exactamente
+         * lo que tenia que pasar.
+         *
+         * <p>Lo que se pierde es que un disparo puede quedarse a medias, con la
+         * primera mitad aplicada. Es el trato de siempre de esta clase, y sigue
+         * siendo mejor que un hilo de partida muerto.
+         *
+         * <p>Va en {@code SafeAi} y no en Ascenso a proposito: el hueco del
+         * motor no es de ese modo, y {@code SafeAi} lo llevan TODAS las
+         * partidas (principio 8).
+         */
+        @Override
+        public void playSpellAbilityNoStack(final SpellAbility effectSA,
+                                            final boolean canSetupTargets) {
+            try {
+                if (canSetupTargets && ForEachPlayerTargets.applies(effectSA)) {
+                    // Lo mismo que el de Forge (elegir y jugar), con el recorte
+                    // de "uno por jugador" en medio. Ver ForEachPlayerTargets.
+                    getAi().doTrigger(effectSA, true);
+                    ForEachPlayerTargets.trim(effectSA);
+                    forge.ai.ComputerUtil.playNoStack(getPlayer(), effectSA, getGame(), true);
+                } else {
+                    super.playSpellAbilityNoStack(effectSA, canSetupTargets);
+                }
+            } catch (final RuntimeException | StackOverflowError e) {
+                if (!GUARD) {
+                    throw e;
+                }
+                report(getPlayer(), "resolver "
+                        + (effectSA == null || effectSA.getHostCard() == null
+                            ? "un disparo suyo" : effectSA.getHostCard().getName()), e);
+            }
+        }
+
+        /**
+         * Un disparo suyo que apunta "para cada jugador, hasta uno que ese
+         * jugador controle" (Nils, Discipline Enforcer): la IA se ponia dos
+         * objetivos suyos. Ver {@link ForEachPlayerTargets}.
+         *
+         * <p>Solo en ESOS disparos se hace a mano lo que hace
+         * {@code PlayerControllerAi.playTrigger}: preparar
+         * ({@code prepareSingleSa}, que es privado: modal, quien elige los
+         * objetivos, y {@code doTrigger}), recortar, y jugar. Cualquier otro
+         * disparo va por el de Forge tal cual, asi que si Card-Forge cambia ese
+         * camino, solo se nota en estos.
+         */
+        @Override
+        public boolean playTrigger(final forge.game.card.Card host,
+                                   final forge.game.trigger.WrappedAbility wrapperAbility,
+                                   final boolean isMandatory) {
+            if (!ForEachPlayerTargets.applies(wrapperAbility)) {
+                return super.playTrigger(host, wrapperAbility, isMandatory);
+            }
+            if (!prepareLikeForge(host, wrapperAbility, isMandatory)) {
+                return false;
+            }
+            ForEachPlayerTargets.trim(wrapperAbility);
+            return forge.ai.ComputerUtil.playNoStack(wrapperAbility.getActivatingPlayer(), wrapperAbility,
+                    getGame(), true);
+        }
+
+        /**
+         * Por aqui entran casi todos sus disparos (los que van a la pila, Nils
+         * incluido; {@link #playTrigger} solo ve los estaticos). Si ninguno
+         * apunta "uno por jugador", el de Forge tal cual. Si alguno si, se
+         * recorre en el MISMO orden que decide Forge y cada uno va al de Forge
+         * de uno en uno, salvo esos, que se preparan, se recortan y se apilan
+         * como hace Forge ({@code prepareSingleSa} + {@code playStack}).
+         */
+        @Override
+        public void orderAndPlaySimultaneousSa(final List<SpellAbility> activePlayerSAs) {
+            boolean any = false;
+            for (final SpellAbility sa : activePlayerSAs) {
+                any |= sa.isTrigger() && !sa.isCopied() && ForEachPlayerTargets.applies(sa);
+            }
+            if (!any) {
+                super.orderAndPlaySimultaneousSa(activePlayerSAs);
+                return;
+            }
+            for (final SpellAbility sa : orderSimultaneousSa(activePlayerSAs)) {
+                if (sa.isTrigger() && !sa.isCopied() && ForEachPlayerTargets.applies(sa)) {
+                    if (prepareLikeForge(sa.getHostCard(), sa, true)) {
+                        ForEachPlayerTargets.trim(sa);
+                        forge.ai.ComputerUtil.playStack(sa, getPlayer(), getGame());
+                    }
+                } else {
+                    super.orderAndPlaySimultaneousSa(new java.util.ArrayList<>(List.of(sa)));
+                }
+            }
+        }
+
+        /** {@code PlayerControllerAi.prepareSingleSa}, que es privado. */
+        private boolean prepareLikeForge(final forge.game.card.Card host, SpellAbility sa,
+                                         final boolean isMandatory) {
+            if (sa.getApi() == forge.game.ability.ApiType.Charm) {
+                if (!forge.game.ability.effects.CharmEffect.makeChoices(sa)) {
+                    return false;
+                }
+                if (!sa.hasParam("Random")) {
+                    return true;
+                }
+                sa = sa.getSubAbility();
+            }
+            if (sa.hasParam("TargetingPlayer")) {
+                final Player targetingPlayer = forge.game.ability.AbilityUtils.getDefinedPlayers(
+                        host, sa.getParam("TargetingPlayer"), sa).get(0);
+                sa.setTargetingPlayer(targetingPlayer);
+                return targetingPlayer.getController().chooseTargetsFor(sa);
+            }
+            return getAi().doTrigger(sa, isMandatory);
+        }
+
+        /** Solo con -Dneo.ai.crashTest=true, y una sola vez por IA. */
+        private void boom() {
+            if (CRASH_ALWAYS || (CRASH_ONCE && !crashedOnce)) {
+                crashedOnce = true;
+                throw new IllegalStateException("fallo de IA de mentira (prueba)");
+            }
+        }
+
+        /**
+         * Anota el fallo y, si esa IA ya no levanta cabeza, la retira.
+         *
+         * <p>Retirarla es <b>concederla</b> ({@code Player.concede()}, que es
+         * publica y solo apunta el resultado: el motor la saca en la siguiente
+         * comprobacion de estado). En una partida a cuatro eso deja a los otros
+         * tres jugando, que es de lo que se trataba. En una a dos termina la
+         * partida — pero es que a dos ya se habia terminado.
+         */
+        private void report(final Player who, final String what, final Throwable e) {
+            RESCUES.incrementAndGet();
+            fails++;
+            final String name = who == null ? "una IA" : who.getName();
+            System.out.printf(Locale.ROOT,
+                    "  [ia] %s ha fallado al %s (%s). Se salta esa decision (%d de %d).%n",
+                    name, what, e, fails, MAX_FAILS);
+            if (fails < MAX_FAILS || who == null || who.getOutcome() != null) {
+                return;
+            }
+            System.out.printf(Locale.ROOT,
+                    "  [ia] %s ha fallado %d veces: se retira de la partida"
+                            + " para que los demas puedan seguir.%n", name, fails);
+            try {
+                who.concede();
+                CONCEDES.incrementAndGet();
+            } catch (final RuntimeException ex) {
+                System.out.printf(Locale.ROOT, "  [ia] y encima no se ha podido retirar: %s%n", ex);
+            }
+        }
+    }
+}

@@ -1,0 +1,1165 @@
+package forge.neo.ascent;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
+import forge.neo.NeoSettings;
+
+/**
+ * El estado de una run de Ascenso. Todo lo que sobrevive a cerrar el juego.
+ *
+ * <h2>Como se guarda</h2>
+ *
+ * <p>En {@code neo.properties}, a mano, como {@code DraftRun} — <b>nada de
+ * XStream</b>, que es lo que obliga a los siete {@code --add-opens} y lo que
+ * revienta al guardar una aventura. El mazo va aparte, en un {@code .dck}
+ * normal, que es formato del motor y ya sabemos leer y escribir.
+ *
+ * <h2>El mapa NO se guarda</h2>
+ *
+ * <p>Se guardan la <b>semilla</b> y <b>que nodos llevas resueltos</b>.
+ * {@link AscentMap} es determinista, asi que el mapa se reconstruye igual al
+ * recargar. Guardar el grafo seria guardar algo que ya sabemos calcular, y
+ * ademas dejaria de casar en cuanto se tocaran los pesos del generador.
+ *
+ * <h2>Una sola run a la vez</h2>
+ *
+ * <p>A proposito. Lo que da valor a una decision es que no puedes volver
+ * atras; con tres runs en marcha, "elegir camino" deja de significar nada.
+ * Abandonar es explicito ({@link #discard()}), no un descuido.
+ */
+public final class AscentRun {
+
+    /** Con que reglas se juega la run. Es una pregunta del principio, no un ajuste. */
+    public enum Mode {
+        /** 30 cartas, avatar Vanguard de personaje, 20 vidas. El roguelike puro. */
+        STANDARD,
+        /** Comandante de ancla, 21 cartas, 40 vidas, recompensas filtradas por identidad. */
+        COMMANDER
+    }
+
+    /** Cuantos actos tiene una run completa. */
+    public static final int ACTS = 3;
+
+    private static final String PREFIX = "ascent.";
+    private static final String ACTIVE = PREFIX + "active";
+
+    private Mode mode;
+    private long seed;
+    private int act;
+    private int life;
+    private int maxLife;
+    private int credits;
+    private int ascension;
+    /** El nodo en el que estas, o {@code null} si todavia no has entrado en el acto. */
+    private String currentNode;
+
+    /**
+     * El nodo cuya partida esta EN CURSO, o null (Ana, 28-10-2026). Se apunta
+     * en disco justo antes de jugarla y se borra al acabar. Si al volver al
+     * modo sigue puesto, el juego se cerro a mitad — a lo bruto, que salir
+     * por Escape ya cuenta como perder — y la partida cuenta como perdida: si
+     * no, cerrar el juego cuando vas perdiendo seria repetir el nodo. Que el
+     * motor reviente con el juego abierto si deja repetirlo: eso el jugador
+     * no lo puede provocar.
+     */
+    private String fighting;
+    private final Set<String> clearedNodes = new LinkedHashSet<>();
+    private final List<String> relics = new ArrayList<>();
+
+    /**
+     * <b>Las cartas que has quitado</b> en esta run (Discord, 08-10-2026: <i>"Cut
+     * cards don't appear again"</i>). Los premios, la tienda y los eventos que
+     * ofrecen cartas no te las vuelven a ofrecer ({@link AscentRewards}): si la
+     * has quitado, ya has dicho que no la quieres. Se apunta al quitarla
+     * ({@link #noteCut}) y se va con la run.
+     */
+    private final java.util.Set<String> cut = new java.util.LinkedHashSet<>();
+    /**
+     * <b>Las reliquias que has vendido</b> en esta run (Ana, 27-10-2026): como
+     * las cartas quitadas, no te las vuelven a ofrecer los premios, la tienda
+     * ni los eventos ({@code AscentRewards.owned}). Si la vendiste es que te
+     * estorbaba. Por id, y se va con la run.
+     */
+    private final java.util.Set<String> relicsGone = new java.util.LinkedHashSet<>();
+    /** El nombre del mazo de la run, que es un .dck en la carpeta de Ascenso. */
+    private String deckName;
+    /** De que expansiones salen las cartas (ver {@link AscentPool}). De fabrica, todas. */
+    private AscentPool pool = AscentPool.ALL;
+    /**
+     * <b>Modo infinito</b> (Discord, 05-10-2026: <i>"I'd love to be able to use
+     * it in an endless mode, even if it's unbalanced"</i>). La run ya se gano
+     * —desbloqueo e hitos apuntados— y se sigue con el mismo mazo: acto 4, 5,
+     * 6... cada uno mas duro ({@link AscentBattle}) hasta que pierdes. Como el
+     * ante infinito de Balatro.
+     */
+    private boolean endless;
+    /**
+     * La victoria (Ascension e hitos) ya esta apuntada. Hace falta por la
+     * pregunta de despues del jefe final: si se cierra el juego ahi, al volver
+     * se vuelve a preguntar, y sin esto la run contaria como ganada DOS veces.
+     */
+    private boolean victoryRecorded;
+    /**
+     * <b>El codigo de la run</b> ({@link AscentSeed}): lo que hay que pasarle a
+     * otro para que juegue la misma (Discord, 06-10-2026). {@code null} en las
+     * runs empezadas antes de que existiera.
+     */
+    private String code;
+    /**
+     * <b>Empezada desde un codigo o un reto</b> (el de hoy, el de la semana o
+     * uno pegado), no al azar. Ganarla <b>no sube la Ascension</b> ni cuenta
+     * como victoria (Ana, 06-10-2026): la Ascension sale solo de tus runs al
+     * azar; si no, un amigo te pasa una run facil y subes sin haberla ganado tu.
+     * Las de antes de existir esto, {@code false}: eran todas al azar.
+     */
+    private boolean fromCode;
+    /**
+     * <b>Con mesas de cuatro</b> (Ana, 27-10-2026): algunos combates del mapa
+     * son partidas a cuatro, todos contra todos ({@link AscentNode.Kind#MELEE}),
+     * y el jefe del acto 3 tambien — tres jefes y tu. Solo Commander. Las runs
+     * de antes, {@code false}: eran todas 1 contra 1.
+     */
+    private boolean melee;
+
+    private AscentRun() {
+    }
+
+    // ------------------------------------------------------------------
+    //  La run de las maquetas, que no se guarda
+    // ------------------------------------------------------------------
+
+    /**
+     * Encendido por {@link #demo}: a partir de ahi nada de Ascenso toca el
+     * disco. Es para todo el proceso y no se apaga: las maquetas son procesos
+     * de usar y tirar ({@code run.cmd ui --ascent-reward --snapshot=...}).
+     */
+    private static volatile boolean demoMode;
+    /** La run de la maqueta, que en modo demo hace de {@code neo.properties}. */
+    private static AscentRun demoRun;
+
+    /**
+     * La run de las maquetas ({@code --ascent-reward}, {@code --ascent-shop}...),
+     * <b>sin guardar nada</b>.
+     *
+     * <p>Antes montaban la suya con {@link #begin}, que escribe en
+     * {@code neo.properties} y deja un {@code .dck} en {@code decks/ascenso/}:
+     * el jugador abria Ascenso y se encontraba una run a medias que nunca
+     * empezo (24-09-2026, dos veces seguidas en una auditoria de capturas).
+     * Y con una run de verdad era peor: la maqueta le regalaba creditos, le
+     * quitaba vida y le cerraba un nodo, y eso SI se guardaba.
+     *
+     * <p>Ahora: si hay una run guardada se usa <b>una copia en memoria</b> (se
+     * ve lo mismo que antes y no se toca); si no, se monta una nueva en
+     * memoria. Desde aqui {@link #save} solo apunta la run en memoria,
+     * {@link #current} devuelve esa y el mazo vive en
+     * {@link AscentDecks#keepInMemory() memoria} — asi que da igual lo que
+     * se pulse despues en la maqueta, incluido empezar otra run.
+     */
+    public static synchronized AscentRun demo(final Mode mode, final int maxLife) {
+        final AscentRun saved = current();
+        demoMode = true;
+        AscentDecks.keepInMemory();
+        demoRun = saved != null ? saved : begin(mode, 0, maxLife, null);
+        // -Dneo.ascent.demoMelee=true: la run de la maqueta con mesas de cuatro
+        // (solo cuenta en Commander), para capturar el mapa con ellas.
+        if (Boolean.getBoolean("neo.ascent.demoMelee")) {
+            demoRun.setMeleeForTest(true);
+        }
+        return demoRun;
+    }
+
+    /** Si estamos en una maqueta: nada de Ascenso se guarda. */
+    public static boolean isDemo() {
+        return demoMode;
+    }
+
+    // ------------------------------------------------------------------
+    //  Empezar, cargar, guardar, abandonar
+    // ------------------------------------------------------------------
+
+    /**
+     * Empieza una run nueva. <b>Pisa la que hubiera</b>: solo hay una.
+     *
+     * @param mode      con que reglas
+     * @param ascension nivel de dificultad desbloqueado que se quiere jugar
+     * @param maxLife   vida maxima de partida (la pone el personaje)
+     * @param deckName  el mazo semilla, ya guardado
+     */
+    public static AscentRun start(final Mode mode, final int ascension,
+                                  final int maxLife, final String deckName) {
+        return start(mode, ascension, maxLife, deckName, AscentPool.ALL);
+    }
+
+    /** Igual, con las cartas de solo unas expansiones ({@link AscentPool}). */
+    public static AscentRun start(final Mode mode, final int ascension,
+                                  final int maxLife, final String deckName, final AscentPool pool) {
+        return start(mode, ascension, maxLife, deckName, pool, AscentSeed.newSeed());
+    }
+
+    /** Igual, con la semilla puesta (la de un codigo, o una nueva). */
+    public static AscentRun start(final Mode mode, final int ascension, final int maxLife,
+                                  final String deckName, final AscentPool pool, final long seed) {
+        final AscentRun run = new AscentRun();
+        run.pool = pool == null ? AscentPool.ALL : pool;
+        run.mode = mode;
+        run.seed = seed;
+        run.act = 1;
+        run.maxLife = maxLife;
+        // Ascension 8: se empieza magullado, al 90% del techo. Redondeado
+        // hacia arriba y con suelo de 1: una run no puede nacer muerta.
+        run.life = ascension >= 8
+                ? Math.max(1, (int) Math.round(maxLife * 0.90)) : maxLife;
+        run.credits = 0;
+        run.ascension = ascension;
+        run.deckName = deckName;
+        run.currentNode = null;
+        // Lo quitado es de la run: una nueva empieza sin nada (ver save()).
+        NeoSettings.set(PREFIX + "cut", null);
+        NeoSettings.set(PREFIX + "relicsGone", null);
+        run.save();
+        return run;
+    }
+
+    /** La run en curso, o {@code null} si no hay ninguna. */
+    public static AscentRun current() {
+        if (demoMode) {
+            return demoRun;
+        }
+        if (!NeoSettings.getBool(ACTIVE, false)) {
+            return null;
+        }
+        final AscentRun run = new AscentRun();
+        run.mode = "COMMANDER".equals(NeoSettings.get(PREFIX + "mode", "STANDARD"))
+                ? Mode.COMMANDER : Mode.STANDARD;
+        try {
+            run.seed = Long.parseLong(NeoSettings.get(PREFIX + "seed", "0"));
+        } catch (final NumberFormatException e) {
+            run.seed = 0L;
+        }
+        run.act = NeoSettings.getInt(PREFIX + "act", 1);
+        run.maxLife = NeoSettings.getInt(PREFIX + "maxLife", 20);
+        run.life = NeoSettings.getInt(PREFIX + "life", run.maxLife);
+        run.credits = NeoSettings.getInt(PREFIX + "credits", 0);
+        run.ascension = NeoSettings.getInt(PREFIX + "ascension", 0);
+        run.deckName = NeoSettings.get(PREFIX + "deck", null);
+        run.currentNode = NeoSettings.get(PREFIX + "node", null);
+        run.fighting = NeoSettings.get(PREFIX + "fighting", null);
+        split(NeoSettings.get(PREFIX + "cleared", ""), run.clearedNodes);
+        final List<String> rel = new ArrayList<>();
+        split(NeoSettings.get(PREFIX + "relics", ""), rel);
+        run.relics.addAll(rel);
+        final List<String> gone = new ArrayList<>();
+        split(NeoSettings.get(PREFIX + "cut", ""), gone);
+        run.cut.addAll(gone);
+        final List<String> sold = new ArrayList<>();
+        split(NeoSettings.get(PREFIX + "relicsGone", ""), sold);
+        run.relicsGone.addAll(sold);
+        run.pool = AscentPool.parse(NeoSettings.get(PREFIX + "pool", ""));
+        run.endless = NeoSettings.getBool(PREFIX + "endless", false);
+        run.victoryRecorded = NeoSettings.getBool(PREFIX + "won", false);
+        run.code = NeoSettings.get(PREFIX + "code", null);
+        run.fromCode = NeoSettings.getBool(PREFIX + "fromCode", false);
+        run.melee = run.mode == Mode.COMMANDER && NeoSettings.getBool(PREFIX + "melee", false);
+        return run;
+    }
+
+    /** Vuelca la run a {@code neo.properties}. */
+    public void save() {
+        if (demoMode) {
+            demoRun = this;
+            return;
+        }
+        // Lo quitado solo crece dentro de una run: si otra pantalla tiene una
+        // copia de ESTA misma run (mismo mazo, misma semilla) y guarda lo suyo,
+        // no puede borrar lo que se apunto desde aqui. Ver noteCut.
+        if (NeoSettings.getBool(ACTIVE, false)
+                && String.valueOf(seed).equals(NeoSettings.get(PREFIX + "seed", null))
+                && java.util.Objects.equals(deckName, NeoSettings.get(PREFIX + "deck", null))) {
+            split(NeoSettings.get(PREFIX + "cut", ""), cut);
+            split(NeoSettings.get(PREFIX + "relicsGone", ""), relicsGone);
+        }
+        NeoSettings.setBool(ACTIVE, true);
+        NeoSettings.set(PREFIX + "mode", mode.name());
+        NeoSettings.set(PREFIX + "seed", String.valueOf(seed));
+        NeoSettings.setInt(PREFIX + "act", act);
+        NeoSettings.setInt(PREFIX + "life", life);
+        NeoSettings.setInt(PREFIX + "maxLife", maxLife);
+        NeoSettings.setInt(PREFIX + "credits", credits);
+        NeoSettings.setInt(PREFIX + "ascension", ascension);
+        NeoSettings.set(PREFIX + "deck", deckName);
+        NeoSettings.set(PREFIX + "node", currentNode);
+        NeoSettings.set(PREFIX + "cleared", String.join(";", clearedNodes));
+        NeoSettings.set(PREFIX + "relics", String.join(";", relics));
+        NeoSettings.set(PREFIX + "cut", cut.isEmpty() ? null : String.join(";", cut));
+        NeoSettings.set(PREFIX + "relicsGone", relicsGone.isEmpty() ? null : String.join(";", relicsGone));
+        NeoSettings.set(PREFIX + "pool", pool.isAll() ? null : pool.serialize());
+        NeoSettings.set(PREFIX + "endless", endless ? "true" : null);
+        NeoSettings.set(PREFIX + "won", victoryRecorded ? "true" : null);
+        NeoSettings.set(PREFIX + "code", code);
+        NeoSettings.set(PREFIX + "fromCode", fromCode ? "true" : null);
+        NeoSettings.set(PREFIX + "melee", melee ? "true" : null);
+        NeoSettings.set(PREFIX + "fighting", fighting);
+        NeoSettings.save();
+    }
+
+    /**
+     * Empieza una run nueva, mazo incluido.
+     *
+     * <p>Es el camino por el que se empieza de verdad: {@link #start} solo
+     * anota el marcador, y una run sin mazo guardado no se puede jugar. Aqui se
+     * genera el mazo de salida ({@link AscentSeedDeck}), se guarda en la carpeta
+     * de Ascenso y se apunta su nombre.
+     *
+     * @param commander en Commander, el que eligio el jugador, o {@code null}
+     *                  para que salga uno al azar. En Estandar se ignora
+     */
+    public static AscentRun begin(final Mode mode, final int ascension, final int maxLife,
+                                  final forge.item.PaperCard commander) {
+        return begin(mode, ascension, maxLife, commander, AscentSeedDeck.NO_COLOURS);
+    }
+
+    /**
+     * Igual, con los <b>colores</b> que pidio el jugador para el mazo de
+     * Estandar.
+     *
+     * @param colours mascara de {@code MagicColor}, o
+     *                {@link AscentSeedDeck#NO_COLOURS} para que salgan al azar.
+     *                Se ignora en Commander, donde los manda el comandante
+     */
+    public static AscentRun begin(final Mode mode, final int ascension, final int maxLife,
+                                  final forge.item.PaperCard commander, final byte colours) {
+        return begin(mode, ascension, maxLife, commander, colours, AscentPool.ALL);
+    }
+
+    /**
+     * Igual, con las cartas de solo unas expansiones. Pedido en Discord el
+     * 02-10-2026: "restrict ... to a certain edition or card sets (e.g. 4th ed
+     * and earlier)". Ver {@link AscentPool}.
+     */
+    public static AscentRun begin(final Mode mode, final int ascension, final int maxLife,
+                                  final forge.item.PaperCard commander, final byte colours,
+                                  final AscentPool pool) {
+        return begin(mode, ascension, maxLife, commander, null, colours, pool);
+    }
+
+    /** Igual, con companero de mando (Partner, Background...); null = sin el. */
+    public static AscentRun begin(final Mode mode, final int ascension, final int maxLife,
+                                  final forge.item.PaperCard commander, final forge.item.PaperCard partner,
+                                  final byte colours, final AscentPool pool) {
+        return begin(mode, ascension, maxLife, commander, partner, colours, pool, false);
+    }
+
+    /** Igual, con o sin mesas de cuatro (solo Commander, {@link #isMelee}). */
+    public static AscentRun begin(final Mode mode, final int ascension, final int maxLife,
+                                  final forge.item.PaperCard commander, final forge.item.PaperCard partner,
+                                  final byte colours, final AscentPool pool, final boolean melee) {
+        // La unica entrada AL AZAR: todas las demas son de una receta dada.
+        return begin(AscentSeed.fresh(mode, ascension, colours,
+                commander == null ? null : commander.getName(),
+                commander == null || partner == null ? null : partner.getName(), pool, melee), maxLife, false);
+    }
+
+    /** Una run desde su receta, con la vida de su modo (40 en Commander, 20 en Estandar). */
+    public static AscentRun begin(final AscentSeed.Recipe recipe) {
+        return begin(recipe, recipe.mode == Mode.COMMANDER ? 40 : 20);
+    }
+
+    /**
+     * <b>Una run desde su receta</b> ({@link AscentSeed}): la misma receta da la
+     * misma run en cualquier ordenador con la misma version.
+     *
+     * <p>Lo unico que no salia ya de la semilla era el mazo de salida: los
+     * generadores de Forge tiran del azar general ({@code MyRandom}). Se le
+     * presta uno sembrado mientras se genera y se le devuelve el suyo despues,
+     * pase lo que pase. Es el asiento que el propio Forge deja para esto
+     * ({@code setRandom}: "Used for deterministic simulation"), asi que no se
+     * toca el motor.
+     *
+     * @throws IllegalStateException si el codigo pide un comandante que no esta
+     *         entre los tuyos (otra version de las cartas, u otro pozo)
+     */
+    public static AscentRun begin(final AscentSeed.Recipe recipe, final int maxLife) {
+        return begin(recipe, maxLife, true);
+    }
+
+    /** @param fromCode empezada desde un codigo o un reto: no sube la Ascension ({@link #isFromCode}) */
+    private static AscentRun begin(final AscentSeed.Recipe recipe, final int maxLife, final boolean fromCode) {
+        return begin(recipe, maxLife, fromCode, null);
+    }
+
+    /**
+     * <b>Una run de Estandar con el mazo de salida drafteado</b>
+     * ({@link AscentDraft}): los hechizos que se cogieron en los sobres, en vez
+     * del generador. Todo lo demas sale de la receta igual que siempre.
+     *
+     * @param deck     el mazo montado en el constructor con el pool del draft
+     *                 ({@code AscentPoolContext}): sus 30 cartas del principal
+     * @param fromCode empezada desde un codigo o un reto: no sube la Ascension
+     */
+    public static AscentRun beginDrafted(final AscentSeed.Recipe recipe, final forge.deck.Deck deck,
+                                         final boolean fromCode) {
+        return begin(recipe, recipe.mode == Mode.COMMANDER ? 40 : 20, fromCode, deck);
+    }
+
+    private static AscentRun begin(final AscentSeed.Recipe recipe, final int maxLife, final boolean fromCode,
+                                   final forge.deck.Deck drafted) {
+        if (drafted != null) {
+            final String name = deckNameFor(recipe.mode);
+            final forge.deck.Deck named = new forge.deck.Deck(name);
+            named.getMain().addAll(drafted.getMain());
+            AscentDecks.save(AscentDraft.finish(named, recipe.ascension, recipe.pool));
+            return started(recipe, maxLife, fromCode, name);
+        }
+        final forge.item.PaperCard commander = AscentSeedDeck.commanderFor(recipe);
+        if (recipe.hasCommander() && commander == null) {
+            throw new IllegalStateException("el comandante del codigo no esta: " + recipe.code());
+        }
+        final forge.item.PaperCard partner = AscentSeedDeck.partnerFor(recipe);
+        if (recipe.hasPartner() && partner == null) {
+            throw new IllegalStateException("el companero del codigo no esta: " + recipe.code());
+        }
+        final String name = deckNameFor(recipe.mode);
+        final java.util.Random previous = forge.util.MyRandom.getRandom();
+        final forge.deck.Deck deck;
+        forge.util.MyRandom.setRandom(AscentSeed.deckRandom(recipe.seed));
+        try {
+            deck = AscentSeedDeck.generate(recipe.mode, commander, partner, name, recipe.ascension,
+                    recipe.colours, recipe.pool);
+        } finally {
+            forge.util.MyRandom.setRandom(previous);
+        }
+        AscentDecks.save(deck);
+        return started(recipe, maxLife, fromCode, name);
+    }
+
+    /** La run, con su mazo ya guardado. */
+    private static AscentRun started(final AscentSeed.Recipe recipe, final int maxLife, final boolean fromCode,
+                                     final String name) {
+        final AscentRun run = start(recipe.mode, recipe.ascension, maxLife, name, recipe.pool,
+                recipe.seed);
+        run.code = recipe.code();
+        run.fromCode = fromCode;
+        run.melee = recipe.melee;
+        run.save();
+        System.out.println("[ascenso] run nueva con el codigo " + run.code
+                + (fromCode ? " (de un codigo o un reto: no sube la Ascension)" : ""));
+        return run;
+    }
+
+    /**
+     * Como se llama el mazo de una run.
+     *
+     * <p>Lleva la fecha porque el fichero sobrevive a la run si algo va mal al
+     * borrarlo, y dos cadaveres con el mismo nombre se pisan sin decirlo.
+     */
+    private static String deckNameFor(final Mode mode) {
+        // La fecha para poder reconocerlo de un vistazo, y una etiqueta corta
+        // para que dos runs del mismo dia no compartan fichero: si lo
+        // compartieran, empezar la segunda pisaria el mazo de la primera y
+        // abandonar cualquiera de las dos borraria el de la otra.
+        final String tag = Long.toString(System.nanoTime() & 0xFFFFFFL, 36);
+        return "Ascenso " + (mode == Mode.COMMANDER ? "Commander" : "Estandar")
+                + " " + java.time.LocalDate.now() + " " + tag;
+    }
+
+    /**
+     * Se lleva todos los ajustes de Ascenso, para poder reponerlos luego.
+     *
+     * <p>Lo usa {@code AscentCheck}, que recorre veinte runs de mentira: sin
+     * esto, pasar los comprobadores <b>borraria la run de verdad</b> del
+     * jugador, y en un modo donde no se puede volver atras eso no se arregla.
+     */
+    static java.util.Map<String, String> snapshot() {
+        final java.util.Map<String, String> out = new java.util.LinkedHashMap<>();
+        for (final String key : NeoSettings.keysWithPrefix(PREFIX)) {
+            out.put(key, NeoSettings.get(key, null));
+        }
+        return out;
+    }
+
+    /** Repone lo que se llevo {@link #snapshot()}, y borra lo que sobre. */
+    static void restore(final java.util.Map<String, String> saved) {
+        for (final String key : NeoSettings.keysWithPrefix(PREFIX)) {
+            NeoSettings.set(key, null);
+        }
+        for (final java.util.Map.Entry<String, String> e : saved.entrySet()) {
+            NeoSettings.set(e.getKey(), e.getValue());
+        }
+        NeoSettings.save();
+    }
+
+    /** Las reliquias que has vendido en esta run (por id): no se te vuelven a ofrecer. */
+    public java.util.Set<String> getRelicsGone() {
+        return java.util.Collections.unmodifiableSet(relicsGone);
+    }
+
+    /**
+     * Cuantas veces se ha roto el escudo en esta run (0 o 1: solo se ofrece
+     * uno). Lo leen el resumen y {@code ascentcheck}.
+     */
+    public int getShieldsBroken() {
+        return NeoSettings.getInt(PREFIX + "shieldsBroken", 0);
+    }
+
+    /** Apunta que el escudo se ha roto. Lo llama {@code AscentBattle.breakShield}. */
+    void noteShieldBroke() {
+        NeoSettings.set(PREFIX + "shieldsBroken", Integer.toString(getShieldsBroken() + 1));
+        NeoSettings.save();
+    }
+
+    /** Apunta que esa reliquia se ha vendido, y guarda. Lo llama {@code AscentShop.sellRelic}. */
+    void noteRelicGone(final String id) {
+        if (id != null && !id.isEmpty() && relicsGone.add(id)) {
+            save();
+        }
+    }
+
+    /** Las cartas que has quitado en esta run: no se te vuelven a ofrecer. */
+    public java.util.Set<String> getCut() {
+        return java.util.Collections.unmodifiableSet(cut);
+    }
+
+    /**
+     * Apunta que has quitado esa carta, y guarda. Lo llaman los sitios donde se
+     * quita una carta por eleccion tuya: el descanso, la tienda y el evento.
+     */
+    public void noteCut(final String name) {
+        if (name != null && !name.isEmpty() && cut.add(name)) {
+            save();
+        }
+    }
+
+    /**
+     * Se acabo la run: se borra el marcador entero, y el mazo con el.
+     *
+     * <p>No se conserva nada. Que perder duela es el modo — los desbloqueos y
+     * la Ascension maxima viven aparte precisamente para que sobrevivan a esto.
+     *
+     * <p>El {@code .dck} se borra tambien: si no, en un mes la carpeta de
+     * Ascenso tiene cuarenta mazos muertos que nadie va a mirar.
+     */
+    public void discard() {
+        AscentDecks.remove(deckName);
+        if (demoMode) {
+            demoRun = null;
+            return;
+        }
+        for (final String k : new String[]{"mode", "seed", "act", "life", "maxLife",
+                "credits", "ascension", "deck", "node", "cleared", "relics", "cut", "pool",
+                "endless", "won", "code", "fromCode", "melee", "relicsGone", "fighting"}) {
+            NeoSettings.set(PREFIX + k, null);
+        }
+        NeoSettings.setBool(ACTIVE, false);
+        NeoSettings.save();
+    }
+
+    // ------------------------------------------------------------------
+    //  El mapa y el avance
+    // ------------------------------------------------------------------
+
+    /** El mapa del acto en curso, reconstruido de la semilla. */
+    public AscentMap map() {
+        final AscentMap map = new AscentMap(seed, act, ascension, melee);
+        for (int r = 0; r < AscentMap.ROWS; r++) {
+            for (final AscentNode n : map.row(r)) {
+                n.setCleared(clearedNodes.contains(n.key()));
+            }
+        }
+        return map;
+    }
+
+    /**
+     * A que nodos se puede ir ahora mismo.
+     *
+     * <p>Al empezar un acto, a cualquiera de la fila 0. Despues, solo a los que
+     * salen del nodo en el que estas. <b>Esta es la regla que hace que el mapa
+     * sea una decision</b>: si se pudiera ir a cualquiera, no habria ruta.
+     */
+    public List<AscentNode> available() {
+        final AscentMap map = map();
+        if (currentNode == null) {
+            return map.entries();
+        }
+        for (int r = 0; r < AscentMap.ROWS; r++) {
+            for (final AscentNode n : map.row(r)) {
+                if (n.key().equals(currentNode)) {
+                    return n.getNext();
+                }
+            }
+        }
+        return Collections.emptyList();
+    }
+
+    /** Si desde donde estas se puede ir a ese nodo. */
+    public boolean canEnter(final AscentNode node) {
+        for (final AscentNode n : available()) {
+            if (n.key().equals(node.key())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Marca un nodo como resuelto y se planta en el.
+     *
+     * @return {@code true} si era un movimiento legal
+     */
+    /** Va a empezar la partida de ese nodo: se apunta YA en disco (ver {@link #fighting}). */
+    public void markFighting(final AscentNode node) {
+        fighting = node == null ? null : node.key();
+        save();
+    }
+
+    /** La partida ha acabado (como sea, con el juego abierto). */
+    public void clearFighting() {
+        if (fighting != null) {
+            fighting = null;
+            save();
+        }
+    }
+
+    /** Si el juego se cerro con una partida a medias: cuenta como perdida. */
+    public boolean wasInterrupted() {
+        return fighting != null;
+    }
+
+    public boolean clear(final AscentNode node) {
+        if (!canEnter(node)) {
+            return false;
+        }
+        currentNode = node.key();
+        clearedNodes.add(node.key());
+        save();
+        return true;
+    }
+
+    /** Si el jefe de este acto ya cayo. */
+    public boolean actCleared() {
+        return clearedNodes.contains(map().boss().key());
+    }
+
+    /** Que toca despues de resolver un nodo. Lo contesta {@link #advance()}. */
+    public enum Step {
+        /** Nada: el acto sigue y se vuelve al mapa de siempre. */
+        CONTINUE,
+        /** El jefe ha caido y quedan actos: el mapa de al lado es OTRO. */
+        NEXT_ACT,
+        /** No quedan actos. La run esta ganada y hay que cerrarla. */
+        RUN_COMPLETED
+    }
+
+    /**
+     * <b>Lo que el bucle de juego llama al volver de un nodo.</b>
+     *
+     * <p>Existe porque no existia, y eso dejaba el modo sin final: el jefe esta
+     * en la ultima fila y <b>no sale ni un camino de el</b>, asi que al ganarlo
+     * {@link #available()} devuelve la lista vacia y el mapa se queda en un
+     * callejon sin salida. Y como {@code act} no pasaba nunca de 1,
+     * {@link #isCompleted()} — que pide {@code act >= ACTS} — <b>no podia ser
+     * cierto jamas</b>: ninguna run era ganable. Reportado jugando el
+     * 17-09-2026 ("beat act 1, but it just goes back to the completed map").
+     *
+     * <p>⚠️ Esto es lo que se llama desde el juego. {@link #nextAct()} sigue
+     * siendo publico porque los comprobadores necesitan plantarse en un acto
+     * para montar su escenario, pero <b>el bucle no lo llama</b>: si lo hiciera
+     * volveria a haber dos sitios que deciden cuando cambia el acto, y el fallo
+     * de origen fue exactamente ese — el unico que lo llamaba era el
+     * comprobador, o sea que verificaba los actos 2 y 3 ejecutando a mano el
+     * paso que en el juego faltaba.
+     */
+    public Step advance() {
+        if (!actCleared()) {
+            return Step.CONTINUE;
+        }
+        return nextAct() ? Step.NEXT_ACT : Step.RUN_COMPLETED;
+    }
+
+    /**
+     * Pasa al acto siguiente, o dice que la run esta ganada.
+     *
+     * <p>El progreso de nodos se vacia: cada acto es un mapa nuevo. Los
+     * creditos, las reliquias y el mazo se quedan — eso es lo que hace que sea
+     * una run y no tres partidas seguidas. La vida, desde el 19-09-2026,
+     * <b>se cura entera</b>: ver el comentario de dentro.
+     *
+     * <p>⚠️ <b>Desde el juego se llama a {@link #advance()}</b>, no a esto.
+     * Ver ahi por que.
+     *
+     * @return {@code false} si ya no hay mas actos (o sea, run completada)
+     */
+    public boolean nextAct() {
+        if (act >= ACTS && !endless) {
+            return false;
+        }
+        act++;
+        clearedNodes.clear();
+        currentNode = null;
+        // Cura completa entre actos (19-09-2026). Es el unico momento en que
+        // se regala la vida entera: acabas de tumbar al jefe, el mapa es otro
+        // y el suelo de FIGHT_FLOOR ya cubre los combates de dentro del acto.
+        // Va AQUI y no en advance(): los comprobadores usan nextAct() para
+        // plantarse en un acto, y si solo curara uno de los dos caminos
+        // volveriamos a tener dos cambios de acto que no hacen lo mismo.
+        life = maxLife;
+        save();
+        return true;
+    }
+
+    // ------------------------------------------------------------------
+    //  Vida, creditos y reliquias
+    // ------------------------------------------------------------------
+
+    /**
+     * Aplica el resultado de un combate.
+     *
+     * @param remainingLife la vida con la que se salio del duelo
+     * @return {@code true} si la run sigue viva
+     */
+    public boolean recordLife(final int remainingLife) {
+        life = Math.max(0, Math.min(maxLife, remainingLife));
+        save();
+        return life > 0;
+    }
+
+    /**
+     * <b>Con cuanta vida empiezas un combate como poco</b>: la mitad de tu
+     * maximo.
+     *
+     * <p>Decidido el 19-09-2026. Con la vida arrastrandose sin suelo, el modo
+     * castigaba justo lo que Magic trata como un COSTE: fetchlands,
+     * choquelands, mana pirexiano, <i>Necropotence</i>, <i>Toxic Deluge</i>.
+     * Pagabas ocho vidas para ganar un duelo y las volvias a pagar en el
+     * siguiente — y en Commander esas cartas son lo normal, no la excepcion.
+     *
+     * <p>Es un suelo y no una cura completa a proposito: con la cura completa
+     * el descanso se queda sin decision, las reliquias de vida no sirven, los
+     * eventos que cuestan vida salen gratis y las Ascensiones 2 y 8 dejan de
+     * hacer nada. Por encima de la mitad todo eso sigue valiendo igual.
+     *
+     * <p>No toca {@link #life}: el suelo vale para EMPEZAR el duelo, y la vida
+     * con la que se sale es la que se apunta. O sea que la vida de la run
+     * sigue diciendo la verdad sobre lo que te han hecho.
+     */
+    private static final double FIGHT_FLOOR = 0.50;
+
+    /**
+     * La vida con la que empiezas el proximo combate: la tuya, o la mitad del
+     * maximo si tienes menos.
+     *
+     * <p>Lo usan la partida ({@code AscentBattle}) y la ficha del mapa que dice
+     * "tus N vidas contra sus M" — si la ficha leyera {@link #getLife()} a
+     * secas, prometeria un duelo que no es el que se juega.
+     */
+    public int fightLife() {
+        return Math.max(life, (int) Math.ceil(maxLife * FIGHT_FLOOR));
+    }
+
+    /**
+     * Que parte de <b>lo que te falta</b> cura un descanso con Ascension 2 en
+     * adelante. Sin Ascension se cura entero.
+     *
+     * <p>Antes era un 30% del maximo (20% con Ascension 2), y el suelo de
+     * {@link #FIGHT_FLOOR} lo dejo sin sentido: con 10 de 40, curar 12 te
+     * dejaba en 22 cuando el duelo iba a empezar en 20 de todas formas — la
+     * cura real eran 2 vidas. Un nodo entero de la run reducido a eso.
+     *
+     * <p>Asi que la hoguera cura <b>entero</b> (decidido el 19-09-2026), y con
+     * eso la decision vuelve a ser la que tenia que ser: <i>vida llena</i>
+     * contra <i>una carta menos en el mazo</i>, que son dos cosas que de verdad
+     * se comparan.
+     *
+     * <p>⚠️ Y por eso la Ascension 2 pasa a ser una <b>fraccion de lo que
+     * falta</b> en vez de un porcentaje del maximo: su unico efecto es
+     * "descansar cura menos", asi que con la cura entera se habria quedado en
+     * un escalon de la escalera que no hace nada — y eso no da ningun error,
+     * solo hace que subir de Ascension no signifique lo que dice. Sobre lo que
+     * falta nunca deja a tope y siempre cura algo, que son las dos cosas que
+     * hacian falta.
+     */
+    private static final double REST_HEAL_HARD = 0.50;
+
+    /**
+     * Cuanto cura un descanso ahora mismo.
+     *
+     * <p>Vive aqui y no en la pantalla a proposito: es <b>logica del modo</b> —
+     * la cura es una de las dos mitades de la decision mas pensada de la run, y
+     * el nivel 2 de Ascension la recorta. Metida en un {@code Screen} de JavaFX
+     * no se podria comprobar sin ventana, que es la regla de la que vive este
+     * modo entero.
+     *
+     * <p>Nunca devuelve cero: un descanso que no cura nada es un nodo que
+     * miente. Si ya estas a tope, quien llame tiene que ofrecer <b>quitar
+     * carta</b> y no curar — eso lo decide la pantalla, que para eso mira
+     * {@link #getLife()}.
+     */
+    public int restHeal() {
+        final int missing = Math.max(0, maxLife - life);
+        final int amount = ascension >= 2
+                ? (int) Math.ceil(missing * REST_HEAL_HARD)
+                : missing;
+        return Math.max(1, amount);
+    }
+
+    /**
+     * Lo que cura ganar una <b>mesa de cuatro</b>: un cuarto de tu maximo (10
+     * en Commander). Ana, 27-10-2026: <i>"podemos hacer que se curen un poco
+     * mas tras una partida de commander de 4"</i> — son tres rivales pegando, y
+     * con tres mesas por acto la vida no aguantaria el acto.
+     */
+    public static final double TABLE_HEAL = 0.25;
+
+    /** Cuanto cura ganar una mesa de cuatro con tu maximo de ahora. */
+    public int tableHeal() {
+        return (int) Math.round(maxLife * TABLE_HEAL);
+    }
+
+    /**
+     * Despues de GANAR ese nodo: si era una mesa de cuatro, cura
+     * {@link #tableHeal()} sin pasar del maximo. Lo llaman los dos sitios que
+     * juegan un nodo (el escritorio en {@code AscentBattle.fight}, Android en
+     * {@code AscentMatch}), justo despues de apuntar la vida.
+     *
+     * @return lo que ha curado de verdad (0 si no era una mesa)
+     */
+    public int healAfterWin(final AscentNode node) {
+        if (node == null || node.getKind() != AscentNode.Kind.MELEE || life <= 0) {
+            return 0;
+        }
+        final int before = life;
+        heal(tableHeal());
+        return life - before;
+    }
+
+    /** Cura, sin pasar del maximo. */
+    public void heal(final int amount) {
+        life = Math.min(maxLife, life + amount);
+        save();
+    }
+
+    /**
+     * Quita vida, <b>sin poder matar</b>.
+     *
+     * <p>Lo segundo es una decision del modo, no un descuido. Lo usan los
+     * eventos ({@link AscentEvent}), y ahi el jugador esta eligiendo de una
+     * lista de texto: acabar una run de cuarenta minutos en un menu, sin haber
+     * jugado una carta, es el peor final posible. Que duela, si; que mate, no.
+     * Para eso estan los duelos.
+     *
+     * @return cuanta vida se ha perdido de verdad (puede ser menos de la pedida)
+     */
+    public int hurt(final int amount) {
+        final int before = life;
+        life = Math.max(1, life - Math.max(0, amount));
+        save();
+        return before - life;
+    }
+
+    /**
+     * Sube la vida maxima, y cura lo mismo.
+     *
+     * <p>Curar de paso no es un regalo: subir el techo sin subir la vida es un
+     * premio que no se nota hasta el proximo descanso, y en un roguelike el
+     * premio tiene que sentirse cuando te lo dan.
+     */
+    /**
+     * Baja la vida maxima, con suelo.
+     *
+     * <p>Es el precio de las cosas que valen de verdad (el pacto): un coste que
+     * <b>no se recupera descansando</b>, y por eso pesa distinto que perder
+     * vida. El suelo existe porque un techo de 3 no es una decision arriesgada,
+     * es una run muerta que todavia no lo sabe.
+     *
+     * @return cuanto ha bajado de verdad
+     */
+    public int lowerMaxLife(final int amount) {
+        final int before = maxLife;
+        maxLife = Math.max(MIN_MAX_LIFE, maxLife - Math.max(0, amount));
+        life = Math.min(life, maxLife);
+        save();
+        return before - maxLife;
+    }
+
+    /** Por debajo de esto no puede bajar el techo de vida. */
+    public static final int MIN_MAX_LIFE = 10;
+
+    /** Sube el techo de vida, y cura lo mismo que sube (como en Slay the Spire). */
+    public void raiseMaxLife(final int amount) {
+        raiseMaxLife(amount, true);
+    }
+
+    /**
+     * Sube el techo de vida; con {@code heal} cura ademas lo mismo que sube.
+     * Sin curar lo usa el maestro, que COBRA vida ahora a cambio de techo
+     * (Discord, 12-10-2026: a 15/23, "−5 vidas y +3 de vida maxima" dejaba
+     * 13/26 por esa cura, y el boton promete 10/26).
+     */
+    public void raiseMaxLife(final int amount, final boolean heal) {
+        if (amount <= 0) {
+            return;
+        }
+        maxLife += amount;
+        if (heal) {
+            life = Math.min(maxLife, life + amount);
+        }
+        save();
+    }
+
+    public void addCredits(final int amount) {
+        credits = Math.max(0, credits + amount);
+        save();
+    }
+
+    /** Gasta, si llega. */
+    public boolean spend(final int amount) {
+        if (amount > credits) {
+            return false;
+        }
+        credits -= amount;
+        save();
+        return true;
+    }
+
+    /** Anyade una reliquia. Las repetidas no se apilan: no haria nada. */
+    public boolean addRelic(final AscentRelic relic) {
+        if (relic == null || relics.contains(relic.getId())) {
+            return false;
+        }
+        relics.add(relic.getId());
+        save();
+        return true;
+    }
+
+    /**
+     * Quita una reliquia.
+     *
+     * <p>La quitan la fragua ({@code AscentEvent}), que refunde una comun en
+     * una rara, "Dejarla" en el premio (27-10-2026), que deshace la que se
+     * apunto al verla, y venderla en la tienda ({@code AscentShop.sellRelic},
+     * el mismo dia). Ningun otro camino, a proposito: una reliquia perdida
+     * sin haberlo pedido seria el peor tipo de sorpresa — pasan mucho rato en
+     * pantalla y se cuenta con ellas.
+     *
+     * @return {@code true} si la llevabas y ya no
+     */
+    public boolean removeRelic(final AscentRelic relic) {
+        if (relic == null || !relics.remove(relic.getId())) {
+            return false;
+        }
+        save();
+        return true;
+    }
+
+    /** Las reliquias que llevas, ya resueltas contra el catalogo. */
+    public List<AscentRelic> relics() {
+        final List<AscentRelic> out = new ArrayList<>();
+        for (final String id : relics) {
+            final AscentRelic r = AscentRelics.byId(id);
+            // Una reliquia que ya no existe (se quito del catalogo entre
+            // versiones) se ignora en vez de reventar la run guardada.
+            if (r != null) {
+                out.add(r);
+            }
+        }
+        return out;
+    }
+
+    // ------------------------------------------------------------------
+    //  Consultas
+    // ------------------------------------------------------------------
+
+    /** De que expansiones salen las cartas de esta run. Nunca null. */
+    public AscentPool getPool() {
+        return pool;
+    }
+
+    public Mode getMode() {
+        return mode;
+    }
+
+    /**
+     * <b>Cuantas cartas se mueven de golpe en este modo.</b> 1 en Estandar, 2 en
+     * Commander.
+     *
+     * <h2>Por que existe, y por que en UN solo sitio</h2>
+     *
+     * <p>El mazo de Commander pasó a 60 cartas (§24.1) y eso, solo, hacía peor
+     * el bucle: una carta de premio dentro de sesenta no se nota como dentro de
+     * veinte, o sea que la run dejaba de <i>sentirse</i> mejorar — que es de lo
+     * unico que vive el modo. Decision del autor (05-09-2026): <i>"en Commander
+     * todo x2 respecto a cartas, que quitar quites 2 y anyadir anyadas 2"</i>.
+     * Si el mazo es el doble, lo que se mueve tiene que ser el doble.
+     *
+     * <p>Y vive <b>aqui</b>, no repartido: lo consultan los premios
+     * ({@link AscentRewards}), el descanso y la tienda ({@link AscentShop}).
+     * Con el numero escrito en tres sitios, cambiarlo obligaria a acordarse de
+     * los tres — y el que se quedara atras no daria ningun error, solo un modo
+     * que se comporta distinto segun por que puerta entres.
+     *
+     * <p>⚠️ Lo que <b>no</b> escala son los <b>eventos</b>: sus textos dicen el
+     * numero exacto ("quitas una carta de tu mazo"), y doblarlo por detras
+     * dejaria la frase mintiendo — que es justo la regla que separa un evento de
+     * una tragaperras (el plan de Ascenso).
+     */
+    public int cardBatch() {
+        return cardBatch(mode);
+    }
+
+    /** Igual, sin tener una run delante. */
+    public static int cardBatch(final Mode mode) {
+        return mode == Mode.COMMANDER ? 2 : 1;
+    }
+
+    public long getSeed() {
+        return seed;
+    }
+
+    /**
+     * Si se empezo desde un codigo o un reto y no al azar: entonces ganarla no
+     * sube la Ascension ({@link AscentUnlocks#recordWin(AscentRun)}).
+     */
+    /**
+     * Si la run lleva <b>mesas de cuatro</b>: nodos {@link AscentNode.Kind#MELEE}
+     * en el mapa y el jefe del acto 3 a cuatro ({@link #isFinalTable}).
+     */
+    public boolean isMelee() {
+        return melee;
+    }
+
+    /** Solo para los comprobadores: poner o quitar las mesas sin pasar por una receta. */
+    void setMeleeForTest(final boolean on) {
+        melee = mode == Mode.COMMANDER && on;
+    }
+
+    /**
+     * Si ese nodo es <b>la mesa del final</b>: el jefe del acto 3 de una run con
+     * mesas, que se juega a cuatro — tres jefes y tu (Ana, 27-10-2026). En
+     * modo infinito los jefes vuelven a ser 1 contra 1: el final de la run es
+     * el del acto 3.
+     */
+    public boolean isFinalTable(final AscentNode node) {
+        return melee && node != null && node.getKind() == AscentNode.Kind.BOSS
+                && act == ACTS && !endless;
+    }
+
+    public boolean isFromCode() {
+        return fromCode;
+    }
+
+    /** El codigo para compartir la run, o {@code null} si es de antes de que existiera. */
+    public String getCode() {
+        return code;
+    }
+
+    public int getAct() {
+        return act;
+    }
+
+    public int getLife() {
+        return life;
+    }
+
+    public int getMaxLife() {
+        return maxLife;
+    }
+
+    public int getCredits() {
+        return credits;
+    }
+
+    public int getAscension() {
+        return ascension;
+    }
+
+    public String getDeckName() {
+        return deckName;
+    }
+
+    public void setDeckName(final String deckName) {
+        this.deckName = deckName;
+        save();
+    }
+
+    /** Cuantos nodos llevas resueltos en este acto. */
+    public int getCleared() {
+        return clearedNodes.size();
+    }
+
+    /**
+     * Si la run esta ganada del todo (el jefe del acto 3 ha caido).
+     *
+     * <p>En modo infinito no lo esta nunca: ahi no se gana, se llega lejos.
+     */
+    public boolean isCompleted() {
+        return !endless && act >= ACTS && actCleared();
+    }
+
+    // ------------------------------------------------------------------
+    //  El modo infinito
+    // ------------------------------------------------------------------
+
+    /** Si la run sigue despues de ganarla. */
+    public boolean isEndless() {
+        return endless;
+    }
+
+    /**
+     * El nivel infinito en el que estas: 1 en el primer acto despues del jefe
+     * final, 2 en el siguiente... 0 si no es modo infinito. Es lo que endurece
+     * a los rivales ({@link AscentBattle}) y lo que se ensenya y se apunta.
+     */
+    public int endlessLevel() {
+        return endless ? Math.max(1, act - ACTS) : 0;
+    }
+
+    /** Si la victoria de esta run ya se ha apuntado. */
+    public boolean isVictoryRecorded() {
+        return victoryRecorded || endless;
+    }
+
+    /** Apunta que la victoria ya se ha contado (Ascension e hitos). */
+    public void markVictoryRecorded() {
+        victoryRecorded = true;
+        save();
+    }
+
+    /**
+     * Sigue la run despues de ganarla: el primer acto infinito.
+     *
+     * <p>Solo con la run ganada y sin haber entrado ya. Pasa por
+     * {@link #nextAct()}, asi que hace lo mismo que cualquier cambio de acto:
+     * mapa nuevo y vida llena; el mazo, las reliquias y los creditos se quedan.
+     *
+     * @return {@code false} si no se podia (la run no estaba ganada)
+     */
+    public boolean enterEndless() {
+        if (endless || !isCompleted()) {
+            return false;
+        }
+        endless = true;
+        victoryRecorded = true;
+        return nextAct();
+    }
+
+    private static void split(final String raw, final java.util.Collection<String> into) {
+        if (raw == null || raw.isBlank()) {
+            return;
+        }
+        for (final String part : raw.split(";")) {
+            if (!part.isBlank()) {
+                into.add(part.trim());
+            }
+        }
+    }
+
+    @Override
+    public String toString() {
+        return "Ascenso[" + mode + " acto " + act + (endless ? " (infinito " + endlessLevel() + ")" : "")
+                + " vida " + life + "/" + maxLife
+                + " creditos " + credits + " reliquias " + relics.size() + "]";
+    }
+}

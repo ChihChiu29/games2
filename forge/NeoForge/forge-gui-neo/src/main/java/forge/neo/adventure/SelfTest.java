@@ -1,0 +1,490 @@
+package forge.neo.adventure;
+
+import com.badlogic.gdx.Gdx;
+import forge.deck.Deck;
+import forge.deck.DeckgenUtil;
+import forge.game.GameRules;
+import forge.game.GameType;
+import forge.game.player.RegisteredPlayer;
+import forge.gamemodes.match.HostedMatch;
+import forge.model.FModel;
+import forge.player.GamePlayerUtil;
+
+import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.List;
+
+/**
+ * PRUEBA sin manos: con -Dneo.adventure.selftest=true, en cuanto el Adventure
+ * termina de cargar se lanza un duelo DESDE SU HILO, igual que haria su
+ * DuelScene, y se juega solo en nuestra mesa. Comprueba lo arriesgado: las
+ * dos librerias graficas a la vez, el cambio de GuiBase y la vuelta.
+ */
+final class SelfTest {
+
+    private SelfTest() {
+    }
+
+    static void arm() {
+        final String mode = System.getProperty("neo.adventure.selftest", "false");
+        if ("false".equals(mode)) {
+            return;
+        }
+        final Thread t = new Thread(() -> {
+            long t0 = System.currentTimeMillis();
+            while (true) {
+                try {
+                    if (Gdx.app != null && FModel.getMagicDb() != null && FModel.getPreferences() != null
+) {
+                        break;
+                    }
+                } catch (final Throwable e) {
+                    if (System.currentTimeMillis() - t0 > 60000) {
+                        NeoDuelBridge.log("autoprueba: el Adventure no termina de cargar: " + e);
+                        return;
+                    }
+                }
+                try {
+                    Thread.sleep(500);
+                } catch (final InterruptedException e) {
+                    return;
+                }
+            }
+            NeoDuelBridge.log("autoprueba: motor del Adventure cargado");
+            try {
+                Thread.sleep(5000);
+            } catch (final InterruptedException e) {
+                return;
+            }
+            NeoDuelBridge.log("autoprueba (" + mode + "): lanzando desde el hilo de libGDX");
+            Gdx.app.postRunnable("editor".equals(mode) ? SelfTest::editor
+                    : "starter".equals(mode) ? SelfTest::starter
+                    : "questlog".equals(mode) ? SelfTest::questLog
+                    : "anteduel".equals(mode) ? SelfTest::anteDuel
+                    : "duels".equals(mode) ? () -> duels(1) : SelfTest::duel);
+        }, "neo-adventure-selftest");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * El editor: se abre con el mazo elegido del jugador, se captura, se guarda
+     * un mazo de 20 Bosques (sin tener ninguno: tienen que salir copias "no
+     * vendibles", como en su editor) y se vuelve.
+     */
+    /**
+     * {@code -Dneo.adventure.selftest=questlog}: construye el libro de misiones
+     * (la tecla Q) y dice si ha podido. En espanyol reventaba al leer su diseno
+     * (ver UiFileClash); lo que se comprueba es que carga el diseno y no las
+     * misiones traducidas.
+     */
+    private static void questLog() {
+        try {
+            forge.adventure.scene.QuestLogScene.instance(null);
+            NeoDuelBridge.log("autoprueba questlog: libro de misiones OK (idioma "
+                    + forge.adventure.util.Config.instance().getLang() + ")");
+        } catch (final Throwable e) {
+            NeoDuelBridge.log("autoprueba questlog: FALLA: " + e);
+        }
+    }
+
+    private static void editor() {
+        final forge.deck.CardPool some = new forge.deck.CardPool();
+        for (final String n : new String[] {"Lightning Bolt", "Llanowar Elves", "Counterspell",
+                "Arcane Signet", "Swamp", "Serra Angel"}) {
+            final forge.item.PaperCard c = FModel.getMagicDb().getCommonCards().getCard(n);
+            if (c != null) {
+                some.add(c, 2);
+            }
+        }
+        forge.adventure.util.Current.player().addCards(some);
+        NeoDeckBridge.open(() -> NeoDuelBridge.log("autoprueba editor: VUELTA AL ADVENTURE, mazo = "
+                + forge.adventure.util.Current.player().getSelectedDeck().getName() + " con "
+                + forge.adventure.util.Current.player().getSelectedDeck().getMain().countAll()
+                + " cartas; Bosques en la coleccion = "
+                + forge.adventure.util.Current.player().getCards().countAll()
+                + "; GuiBase = " + forge.gui.GuiBase.getInterface().getClass().getSimpleName()));
+        final Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(Long.getLong("neo.adventure.snapshotMs", 8000));
+                final String file = System.getProperty("neo.adventure.snapshot");
+                // -Dneo.adventure.snapshotSize=1600x900: la ventana de la prueba
+                // sale del tamano de la del Adventure, que sin partida es diminuta.
+                final String size = System.getProperty("neo.adventure.snapshotSize");
+                if (file != null && size != null) {
+                    final String[] wh = size.split("x");
+                    javafx.application.Platform.runLater(() -> NeoWindow.resizeForTest(
+                            Double.parseDouble(wh[0]), Double.parseDouble(wh[1])));
+                    Thread.sleep(3000);
+                }
+                if (file != null) {
+                    javafx.application.Platform.runLater(() -> {
+                        try {
+                            forge.neo.Snapshots.writePng(NeoWindow.scene().snapshot(null), new java.io.File(file));
+                            NeoDuelBridge.log("autoprueba editor: captura en " + file);
+                        } catch (final Exception e) {
+                            NeoDuelBridge.log("no se pudo capturar: " + e);
+                        }
+                    });
+                    Thread.sleep(2000);
+                }
+                final Deck deck = new Deck("Mazo de prueba NeoForge");
+                deck.getMain().add(FModel.getMagicDb().getCommonCards().getCard("Forest"), 20);
+                NeoDeckBridge.lastContext.storage().add(deck);
+                NeoWindow.giveBack(() -> NeoDuelBridge.log("autoprueba editor: "
+                        + "mazo = " + forge.adventure.util.Current.player().getSelectedDeck().getName()
+                        + " (" + forge.adventure.util.Current.player().getSelectedDeck().getMain().countAll()
+                        + " cartas), cartas en la coleccion = "
+                        + forge.adventure.util.Current.player().getCards().countAll()
+                        + ", GuiBase = " + forge.gui.GuiBase.getInterface().getClass().getSimpleName()));
+            } catch (final Throwable e) {
+                NeoDuelBridge.log("autoprueba editor ha fallado: " + e);
+                e.printStackTrace();
+            }
+        }, "neo-adventure-selftest-editor");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * {@code -Dneo.adventure.selftest=duels} (+ {@code neo.adventure.duels=N}, 5
+     * de fabrica): N duelos seguidos, con la VRAM de JavaFX apuntada al empezar
+     * cada uno (la pone NeoDuelBridge) y al volver. Es la prueba de la pantalla
+     * en blanco del 23-09-2026, que salia "cada 3-5 duelos".
+     */
+    private static void duels(final int n) {
+        final int total = Integer.getInteger("neo.adventure.duels", 5);
+        duel(() -> {
+            NeoDuelBridge.log("autoprueba duels: " + n + " de " + total + " terminado | "
+                    + forge.neo.platform.PrismGuard.vram() + " | reparaciones "
+                    + forge.neo.platform.PrismGuard.repairs());
+            if (n < total) {
+                new Thread(() -> {
+                    try {
+                        Thread.sleep(3000);
+                    } catch (final InterruptedException e) {
+                        return;
+                    }
+                    Gdx.app.postRunnable(() -> duels(n + 1));
+                }, "neo-adventure-selftest-duels").start();
+            } else {
+                NeoDuelBridge.log("autoprueba duels: FIN");
+            }
+        });
+    }
+
+    private static void duel() {
+        duel(null);
+    }
+
+    /**
+     * {@code -Dneo.adventure.selftest=anteduel}: un duelo de VERDAD, por
+     * {@code DuelScene} (como al chocar con un enemigo en el mapa), con el ante
+     * encendido. Las otras autopruebas llaman a {@link NeoDuelBridge} directo y
+     * se saltan justo ese camino. Sale de la pantalla negra reportada en los
+     * eventos de la Aventura jugando con ante (29-09-2026): con ante,
+     * {@code DuelScene.GameEnd} ensenya "carta ganada/perdida" antes de volver.
+     * Con {@code -Dneo.adventure.auto=true} la mesa juega sola. Apunta cada 3 s
+     * en que escena y pantalla esta el Adventure y que ventanas tiene encima.
+     */
+    private static void anteDuel() {
+        new Thread(() -> {
+            try {
+                Gdx.app.postRunnable(() -> {
+                    final forge.adventure.data.DifficultyData diff =
+                            forge.adventure.util.Config.instance().getConfigData().difficulties[1];
+                    forge.adventure.world.WorldSave.generateNewWorld("Prueba ante", true, 0, 0,
+                            forge.card.ColorSet.fromNames("R".toCharArray()), diff,
+                            forge.adventure.util.AdventureModes.Standard, 0, null, 1234);
+                    final boolean ante = !"false".equals(System.getProperty("neo.adventure.ante"));
+                    FModel.getPreferences().setPref(forge.localinstance.properties.ForgePreferences.FPref.UI_ANTE, ante);
+                    NeoDuelBridge.log("autoprueba anteduel: mundo nuevo, ante " + (ante ? "encendido" : "apagado"));
+                });
+                Thread.sleep(15000);
+                // Que el Adventure haya terminado de arrancar: con un perfil
+                // nuevo tarda, y si el duelo empezaba antes, su arranque ponia
+                // la portada ENCIMA y dejaba el duelo en la pila de escenas.
+                for (int i = 0; i < 120 && forge.Forge.getCurrentScene() == null; i++) {
+                    Thread.sleep(1000);
+                }
+                Gdx.app.postRunnable(() -> {
+                    try {
+                        // -Dneo.adventure.enemy=Sliver Queen: un JEFE, que al ganarte
+                        // ensenya su frase (el caso de la pantalla negra).
+                        final String who = System.getProperty("neo.adventure.enemy", "Goblin");
+                        final forge.adventure.data.EnemyData data = new forge.adventure.data.EnemyData(
+                                forge.adventure.data.WorldData.getEnemy(who));
+                        // Al mejor de N, como los eventos (-Dneo.adventure.games=3).
+                        data.gamesPerMatch = Integer.getInteger("neo.adventure.games", data.gamesPerMatch);
+                        final forge.adventure.character.EnemySprite enemy = new forge.adventure.character.EnemySprite(data);
+                        // -Dneo.adventure.event=scene: el evento ENTERO, por su
+                        // pantalla (EventScene.startRound), que es quien apunta
+                        // el resultado de la ronda al volver.
+                        if ("scene".equals(System.getProperty("neo.adventure.event"))) {
+                            final forge.adventure.data.AdventureEventData ev = testEvent();
+                            ev.rounds = 1;
+                            ev.currentRound = 1;
+                            ev.eventStatus = forge.adventure.util.AdventureEventController.EventStatus.Started;
+                            testEvent = ev;
+                            final forge.adventure.scene.EventScene es = forge.adventure.scene.EventScene.instance(
+                                    forge.adventure.scene.GameScene.instance(), ev, null);
+                            forge.Forge.switchScene(es);
+                            es.startRound();
+                            NeoDuelBridge.log("autoprueba anteduel: entrando por EventScene.startRound");
+                            return;
+                        }
+                        final forge.adventure.scene.DuelScene ds = forge.adventure.scene.DuelScene.instance();
+                        // -Dneo.adventure.event=true: como un duelo de EVENTO
+                        // (draft, sellado), que es otro camino de DuelScene: su
+                        // GameType, su mazo registrado y su rival. El rival
+                        // lleva solo llanuras, para que la mesa sola GANE y se
+                        // vea que cuenta como victoria (Discord, 12-10-2026).
+                        ds.initDuels(forge.adventure.stage.WorldStage.getInstance().getPlayerSprite(), enemy,
+                                false, Boolean.getBoolean("neo.adventure.event") ? testEvent() : null);
+                        forge.Forge.switchScene(ds);
+                        NeoDuelBridge.log("autoprueba anteduel: entrando por DuelScene contra " + who);
+                    } catch (final Throwable e) {
+                        NeoDuelBridge.log("autoprueba anteduel: no se pudo entrar: " + e);
+                        e.printStackTrace();
+                    }
+                });
+                final long end = System.currentTimeMillis() + Long.getLong("neo.adventure.snapshotMs", 240000);
+                while (System.currentTimeMillis() < end) {
+                    Thread.sleep(3000);
+                    Gdx.app.postRunnable(() -> {
+                        final StringBuilder o = new StringBuilder();
+                        for (final forge.toolbox.FOverlay ov : forge.toolbox.FOverlay.getOverlays()) {
+                            o.append(ov.getClass().getSimpleName()).append(ov.isVisible() ? "(visible) " : "(oculta) ");
+                        }
+                        // Pulsa OK en el aviso de fin de duelo (jefe, ante), como
+                        // haria el jugador, para ver si despues se vuelve al mapa.
+                        final forge.toolbox.FOverlay top = forge.toolbox.FOverlay.getTopOverlay();
+                        if (top instanceof forge.toolbox.FOptionPane pane && top.isVisible()) {
+                            if (Boolean.getBoolean("neo.adventure.realClick")) {
+                                // Como un raton de verdad: por el InputProcessor que
+                                // tenga libGDX AHORA. setResult se salta justo eso, y
+                                // por eso no vio el OK muerto de "Card Gained"
+                                // (Reddit, 30-09-2026).
+                                realClickOk(pane);
+                            } else {
+                                NeoDuelBridge.log("autoprueba anteduel: pulso OK en el aviso");
+                                pane.setResult(0);
+                            }
+                        }
+                        final forge.adventure.data.AdventureEventData ev = testEvent;
+                        if (ev != null) {
+                            NeoDuelBridge.log("autoprueba anteduel: evento ganadas=" + ev.matchesWon
+                                    + " perdidas=" + ev.matchesLost + " estado=" + ev.eventStatus);
+                        }
+                        NeoDuelBridge.log("autoprueba anteduel: escena="
+                                + (forge.Forge.getCurrentScene() == null ? "null"
+                                : forge.Forge.getCurrentScene().getClass().getSimpleName())
+                                + " pantalla=" + (forge.Forge.getCurrentScreen() == null ? "null"
+                                : forge.Forge.getCurrentScreen().getClass().getSimpleName())
+                                + " encima=[" + o.toString().trim() + "]"
+                                + " GuiBase=" + forge.gui.GuiBase.getInterface().getClass().getSimpleName());
+                    });
+                }
+                NeoDuelBridge.log("autoprueba anteduel: FIN");
+            } catch (final Throwable e) {
+                NeoDuelBridge.log("autoprueba anteduel ha fallado: " + e);
+                e.printStackTrace();
+            }
+        }, "neo-adventure-selftest-ante").start();
+    }
+
+    /** El evento en curso de {@code -Dneo.adventure.event=scene}, para decir como va. */
+    private static volatile forge.adventure.data.AdventureEventData testEvent;
+
+    /** El evento de {@code -Dneo.adventure.event}: un rival de solo llanuras, al mejor de N. */
+    private static forge.adventure.data.AdventureEventData testEvent() {
+        final forge.adventure.data.AdventureEventData ev = new forge.adventure.data.AdventureEventData(1234L,
+                forge.adventure.util.AdventureEventController.EventFormat.Draft);
+        ev.eventRules = new forge.adventure.data.AdventureEventData.AdventureEventRules(
+                forge.adventure.util.AdventureEventController.EventFormat.Draft, 1f);
+        ev.eventRules.gamesPerMatch = Integer.getInteger("neo.adventure.games", ev.eventRules.gamesPerMatch);
+        ev.style = forge.adventure.util.AdventureEventController.EventStyle.Bracket;
+        ev.generateParticipants(1);
+        final Deck plains = new Deck("Solo llanuras");
+        plains.getMain().add(FModel.getMagicDb().getCommonCards().getCard("Plains"), 40);
+        ev.participants[0].setDeck(plains);
+        ev.nextOpponent = ev.participants[0];
+        ev.registeredDeck = (Deck) forge.adventure.util.Current.player().getSelectedDeck().copyTo("Prueba de evento");
+        NeoDuelBridge.log("autoprueba anteduel: duelo de EVENTO (" + ev.eventRules.gameType
+                + ", al mejor de " + ev.eventRules.gamesPerMatch + ", el rival solo con llanuras)");
+        return ev;
+    }
+
+    /** Pulsa el primer boton del aviso con un toque de verdad (touchDown + touchUp). */
+    private static void realClickOk(final forge.toolbox.FOptionPane pane) {
+        final forge.toolbox.FButton ok = firstButton(pane);
+        final com.badlogic.gdx.InputProcessor ip = Gdx.input.getInputProcessor();
+        final boolean forgeHasIt = ip == forge.Forge.getInputProcessor();
+        if (ok == null) {
+            NeoDuelBridge.log("autoprueba anteduel: el aviso no tiene boton");
+            return;
+        }
+        final int x = Math.round(ok.screenPos.x + ok.screenPos.width / 2);
+        final int y = Math.round(ok.screenPos.y + ok.screenPos.height / 2);
+        NeoDuelBridge.log("autoprueba anteduel: clic de verdad en '" + ok.getText() + "' (" + x + "," + y
+                + "); los clics los tiene " + (ip == null ? "nadie" : ip.getClass().getName())
+                + (forgeHasIt ? " = Forge" : " (NO Forge)"));
+        if (ip != null) {
+            ip.touchDown(x, y, 0, com.badlogic.gdx.Input.Buttons.LEFT);
+            ip.touchUp(x, y, 0, com.badlogic.gdx.Input.Buttons.LEFT);
+        }
+    }
+
+    private static forge.toolbox.FButton firstButton(final forge.toolbox.FContainer c) {
+        for (final forge.toolbox.FDisplayObject o : c.getChildren()) {
+            if (o instanceof forge.toolbox.FButton b && b.isVisible()) {
+                return b;
+            }
+            if (o instanceof forge.toolbox.FContainer inner) {
+                final forge.toolbox.FButton b = firstButton(inner);
+                if (b != null) {
+                    return b;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static void duel(final Runnable after) {
+        final EnumSet<GameType> variants = EnumSet.of(GameType.Adventure);
+        final Deck mine = DeckgenUtil.getRandomColorDeck(false);
+        final Deck theirs = DeckgenUtil.getRandomColorDeck(true);
+        final RegisteredPlayer human = RegisteredPlayer.forVariants(2, variants, mine, null, false, null, null);
+        human.setPlayer(GamePlayerUtil.getGuiPlayer());
+        human.setStartingLife(20);
+        final RegisteredPlayer ai = RegisteredPlayer.forVariants(2, variants, theirs, null, false, null, null);
+        ai.setPlayer(GamePlayerUtil.createAiPlayer("Goblin de prueba"));
+        ai.setStartingLife(20);
+        final List<RegisteredPlayer> players = new ArrayList<>();
+        players.add(ai);
+        players.add(human);
+        final GameRules rules = new GameRules(GameType.Adventure);
+        rules.setGamesPerMatch(1);
+        rules.setManaBurn(false);
+        rules.setWarnAboutAICards(false);
+        final HostedMatch hosted = new HostedMatch();
+        NeoDuelBridge.play(hosted, rules, variants, players, human, "Goblin de prueba",
+                () -> {
+                    // Lo que sostiene el bloque NEOFORGE-2 de DuelScene: al volver,
+                    // el juego ya es null (endCurrentGame) pero el match sigue y
+                    // sabe quien gano. Si esto dejara de ser cierto, el duelo de la
+                    // Aventura volveria a contar como derrota siempre.
+                    NeoDuelBridge.log("autoprueba: getGame() = " + hosted.getGame()
+                            + " / getMatch() = " + hosted.getMatch()
+                            + " / ganador = " + (hosted.getMatch() == null ? "?"
+                            : hosted.getMatch().getWinner())
+                            + " / gana el humano = " + (hosted.getMatch() != null
+                            && human == hosted.getMatch().getWinner()));
+                    NeoDuelBridge.log("autoprueba: VUELTA AL ADVENTURE en el hilo "
+                            + Thread.currentThread().getName() + ", GuiBase = "
+                            + forge.gui.GuiBase.getInterface().getClass().getSimpleName());
+                    if (after != null) {
+                        after.run();
+                    }
+                });
+    }
+
+
+    /**
+     * El mazo de salida (StarterDeck), sin manos. Primero, por cada color:
+     * cuantos comandantes de la lista ofrece y un mazo generado para uno de
+     * ellos. Despues crea un mundo nuevo en Commander negro como el boton de
+     * "nueva partida", captura la eleccion ({@code snapshot}), elige el primero
+     * y dice con que mazo se queda. No guarda partida.
+     */
+    private static void starter() {
+        new Thread(() -> {
+            for (final String l : new String[] {"W", "U", "B", "R", "G"}) {
+                final forge.card.ColorSet color = forge.card.ColorSet.fromNames(l.toCharArray());
+                final List<forge.item.PaperCard> pool = StarterDeck.pool(color);
+                final forge.item.PaperCard cmd = pool.get(0);
+                final Deck d = StarterDeck.generate(cmd, color);
+                NeoDuelBridge.log("autoprueba starter " + l + ": " + pool.size() + " comandantes; "
+                        + cmd.getName() + " -> " + (d == null ? "SIN MAZO" : d.getMain().countAll() + " cartas, "
+                        + d.getMain().toFlatList().stream().filter(c -> c.getRules().getType().isLand()).count()
+                        + " tierras"));
+                NeoDuelBridge.log("autoprueba starter " + l + ": otros tres "
+                        + StarterDeck.reroll(color, StarterDeck.options(color)) + "; buscar todos "
+                        + StarterDeck.search(color, "", false).size() + ", 'vampire' "
+                        + StarterDeck.search(color, "vampire", false).size() + ", de cualquier color "
+                        + StarterDeck.search(color, "", true).size());
+            }
+            // Uno multicolor, del buscador con "todos los colores".
+            final List<forge.item.PaperCard> multi = StarterDeck.search(
+                    forge.card.ColorSet.fromNames("B".toCharArray()), "esper", true);
+            if (!multi.isEmpty()) {
+                final forge.item.PaperCard m = multi.get(0);
+                final Deck d = StarterDeck.generate(m, m.getRules().getColorIdentity());
+                NeoDuelBridge.log("autoprueba starter multicolor: " + multi.size() + " 'esper'; " + m.getName()
+                        + " -> " + (d == null ? "SIN MAZO" : d.getMain().countAll() + " cartas"));
+            }
+            Gdx.app.postRunnable(() -> {
+                final forge.adventure.data.DifficultyData diff =
+                        forge.adventure.util.Config.instance().getConfigData().difficulties[1];
+                forge.adventure.world.WorldSave.generateNewWorld("Prueba", true, 0, 0,
+                        forge.card.ColorSet.fromNames("B".toCharArray()), diff,
+                        forge.adventure.util.AdventureModes.Commander, 0, null, 1234);
+                NeoDuelBridge.log("autoprueba starter: mundo nuevo con "
+                        + forge.adventure.util.Current.player().getSelectedDeck()
+                                .get(forge.deck.DeckSection.Commander).get(0).getName());
+            });
+            try {
+                Thread.sleep(Long.getLong("neo.adventure.snapshotMs", 8000));
+                final String size = System.getProperty("neo.adventure.snapshotSize");
+                if (size != null) {
+                    final String[] wh = size.split("x");
+                    javafx.application.Platform.runLater(() -> NeoWindow.resizeForTest(
+                            Double.parseDouble(wh[0]), Double.parseDouble(wh[1])));
+                    Thread.sleep(3000);
+                }
+                final String file = System.getProperty("neo.adventure.snapshot");
+                javafx.application.Platform.runLater(() -> {
+                    try {
+                        if (file != null) {
+                            forge.neo.Snapshots.writePng(NeoWindow.scene().snapshot(null), new java.io.File(file));
+                        }
+                        final javafx.scene.Parent root = NeoWindow.scene().getRoot();
+                        NeoDuelBridge.log("autoprueba starter: en pantalla " + root.getClass().getSimpleName());
+                        if (root instanceof CommanderPickScreen) {
+                            ((CommanderPickScreen) root).openSearchForTest();
+                        }
+                    } catch (final Exception e) {
+                        NeoDuelBridge.log("autoprueba starter: " + e);
+                    }
+                });
+                // El buscador de "elegir el mio": su captura, y se elige el
+                // primero de la lista (alfabetico: no suele ser de EDHREC).
+                Thread.sleep(2500);
+                javafx.application.Platform.runLater(() -> {
+                    try {
+                        if (file != null) {
+                            forge.neo.Snapshots.writePng(NeoWindow.scene().snapshot(null),
+                                    new java.io.File(file.replace(".png", "-buscar.png")));
+                        }
+                        final javafx.scene.Parent root = NeoWindow.scene().getRoot();
+                        if (root instanceof CommanderPickScreen) {
+                            ((CommanderPickScreen) root).pickSearchForTest(0);
+                        }
+                    } catch (final Exception e) {
+                        NeoDuelBridge.log("autoprueba starter: " + e);
+                    }
+                });
+                Thread.sleep(20000);
+                final forge.adventure.player.AdventurePlayer p = forge.adventure.util.Current.player();
+                final Deck d = p.getSelectedDeck();
+                NeoDuelBridge.log("autoprueba starter FINAL: " + d.getName() + " / comandante "
+                        + d.get(forge.deck.DeckSection.Commander).get(0).getName()
+                        + " / " + d.getMain().countAll() + " cartas / coleccion "
+                        + p.getCards().countAll() + " / identidad " + p.getColorIdentity());
+            } catch (final Throwable e) {
+                NeoDuelBridge.log("autoprueba starter ha fallado: " + e);
+                e.printStackTrace();
+            }
+        }, "neo-adventure-selftest-starter").start();
+    }
+}

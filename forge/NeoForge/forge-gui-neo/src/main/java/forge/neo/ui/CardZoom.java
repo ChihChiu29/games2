@@ -1,0 +1,1722 @@
+package forge.neo.ui;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
+import com.google.common.collect.Multiset;
+
+import forge.game.card.CardView;
+import forge.game.card.CardView.CardStateView;
+import forge.game.card.CounterType;
+import forge.game.keyword.KeywordView;
+import forge.game.player.PlayerView;
+import forge.game.zone.ZoneType;
+import forge.neo.NeoText;
+import forge.neo.card.CardNode;
+import forge.neo.card.CardText;
+import javafx.scene.Node;
+import javafx.scene.Parent;
+import javafx.scene.Scene;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.MouseButton;
+import javafx.scene.input.MouseEvent;
+import javafx.geometry.Pos;
+import javafx.scene.control.Label;
+import javafx.scene.layout.FlowPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
+import javafx.scene.layout.VBox;
+import javafx.scene.paint.Color;
+
+/**
+ * Ampliar una carta con el click derecho, en cualquier pantalla.
+ *
+ * <p>En la mesa esto ya existia y es el gesto que todo el mundo acaba usando:
+ * la carta a tamanyo de lectura, en el centro, y se cierra a la minima. Fuera
+ * de la mesa no estaba, y ahi las cartas son mucho mas pequenyas — el rival de
+ * un duelo, lo que sale de un sobre — asi que hace todavia mas falta.
+ *
+ * <p>La instalacion es de <b>una linea por pantalla</b> y no hay que enganchar
+ * carta por carta: se pone un filtro de raton en la pantalla entera y, al
+ * clicar con el derecho, se busca hacia arriba el {@link CardNode} que haya
+ * bajo el raton. Asi las cartas que aparecen despues (un sobre que se abre, una
+ * lista que se repinta) quedan cubiertas sin acordarse de nada.
+ *
+ * <p>La capa grande se monta cambiando la <b>raiz de la escena</b> por un
+ * {@link Layer} que lleva dentro la pantalla de antes. Es el mismo apanyo que
+ * usan los dialogos de {@code NeoApp}, y tiene dos ventajas: la pantalla de
+ * debajo no se entera de nada, y la carta puede ocupar toda la ventana aunque
+ * la pantalla sea un {@code BorderPane} sin capas.
+ */
+public final class CardZoom {
+
+    /** Si "Ver el texto de la carta" se abre solo (lo ultimo que hizo el jugador). */
+    static final String PLAIN_TEXT_OPEN = "zoomPlainTextOpen";
+
+
+    private CardZoom() {
+    }
+
+    /**
+     * Deja toda la pantalla lista para el click derecho.
+     *
+     * @param screen la pantalla entera, no una carta suelta
+     */
+    public static void install(final Region screen) {
+        if (screen == null) {
+            return;
+        }
+        screen.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> {
+            if (e.getButton() != MouseButton.SECONDARY) {
+                return;
+            }
+            final CardNode node = cardNodeAt(e.getTarget());
+            if (node != null && node.getCard() != null) {
+                final List<CardNode> ring = siblingsOf(node);
+                final int at = ring.indexOf(node);
+                if (at >= 0 && ring.size() > 1) {
+                    show(node, ring.size(), at, i -> ring.get(i).getCard());
+                } else {
+                    show(node, node.getCard());
+                }
+                e.consume();
+            }
+        });
+    }
+
+    /** La carta grande, ya. */
+    public static void show(final Node anchor, final CardView card) {
+        if (card == null) {
+            return;
+        }
+        show(anchor, 1, 0, i -> card);
+    }
+
+    /**
+     * La carta grande, <b>dentro de una lista que se recorre con la rueda</b>
+     * (y con las flechas).
+     *
+     * <p>Pedido en r/forgeMTG el 15-09-2026: en el Forge de siempre, con una
+     * carta ampliada, la rueda pasa a la siguiente de tu mazo — <i>"almost like
+     * sorting your own cards irl"</i>. Aqui habia que cerrar y ampliar la otra.
+     *
+     * <p>La carta se pide por posicion ({@code at}) y no en una lista ya hecha:
+     * en el deck builder cada {@code CardView} se fabrica desde la carta en
+     * papel, y fabricar sesenta para ensenyar una seria pagar sesenta.
+     *
+     * @param size  cuantas cartas hay en la lista
+     * @param index cual se ensenya primero
+     * @param at    la carta de cada posicion
+     */
+    public static void show(final Node anchor, final int size, final int index,
+                            final java.util.function.IntFunction<CardView> at) {
+        if (anchor == null || at == null || size <= 0 || index < 0 || index >= size) {
+            return;
+        }
+        final Scene scene = anchor.getScene();
+        if (scene == null) {
+            return;
+        }
+        final Parent root = scene.getRoot();
+        final Layer layer = root instanceof Layer ? (Layer) root : new Layer(scene, root);
+        layer.browse(size, index, at);
+    }
+
+    /**
+     * Las cartas "de al lado" de una carta: las de su misma lista.
+     *
+     * <p>La lista es el {@code ScrollPane} que la contiene — el catalogo, la
+     * coleccion, el mazo — y si no hay ninguno, la pantalla entera. En el orden
+     * del arbol, que es el orden en que se ven. Solo las visibles y con carta.
+     */
+    static List<CardNode> siblingsOf(final CardNode node) {
+        Node container = null;
+        for (Node n = node.getParent(); n != null; n = n.getParent()) {
+            if (n instanceof javafx.scene.control.ScrollPane sp && sp.getContent() != null) {
+                container = sp.getContent();
+                break;
+            }
+            if (n.getParent() == null) {
+                container = n;
+            }
+        }
+        final List<CardNode> out = new ArrayList<>();
+        collectCardNodes(container, out);
+        return out;
+    }
+
+    static void collectCardNodes(final Node n, final List<CardNode> out) {
+        if (n == null || !n.isVisible()) {
+            return;
+        }
+        if (n instanceof CardNode cn) {
+            if (cn.getCard() != null) {
+                out.add(cn);
+            }
+            return;
+        }
+        if (n instanceof Parent p) {
+            for (final Node child : p.getChildrenUnmodifiable()) {
+                collectCardNodes(child, out);
+            }
+        }
+    }
+
+    /** La carta a tamanyo de lectura: el alto de la ventana manda, no un fijo. */
+    private static double widthFor(final double sceneHeight) {
+        return Math.max(320, sceneHeight * 0.86) / CardNode.ASPECT;
+    }
+
+    /** Cuanto mide la ficha de estado respecto a la carta ampliada. */
+    private static final double SIDE_RATIO = 0.6;
+
+    /**
+     * La carta ampliada y, si hay algo que contar, su ficha de estado al lado.
+     *
+     * <p>Es publico porque la MESA amplia por su cuenta ({@code TableScreen}
+     * tiene su propia capa) y es justo donde mas falta hace: es la unica
+     * pantalla donde una carta tiene estado. Si esto viviera solo aqui, el
+     * arreglo se veria en todas partes MENOS donde se reporto el fallo — que es
+     * exactamente lo que hay que evitar cuando algo tiene que valer para todos
+     * los modos.
+     *
+     * @param bigWidth    ancho que tendria la carta sin ficha al lado
+     * @param sceneWidth  ancho de la ventana, para que quepan las dos
+     * @param onCardClick que hacer al clicar la carta grande (puede ser null)
+     */
+    public static Region compose(final CardView card, final double bigWidth,
+                                 final double sceneWidth,
+                                 final Runnable onCardClick) {
+        // La ficha ocupa a la derecha, asi que la carta encoge para que quepan
+        // las dos. Sin estado que contar no hay ficha, y entonces la carta
+        // ampliada se queda exactamente como estaba.
+        // `related` va FUERA de hasState a proposito: hasState exige estar en
+        // el campo de batalla, y "la tiene exiliada" se mira justamente
+        // desde el EXILIO. Dentro no se habria visto nunca.
+        final boolean side = hasState(card) || otherFace(card) != null
+                || !forge.neo.card.ChosenValues.of(card).isEmpty()
+                || related(card) != null || canReadLiveText(card)
+                || !keywordsOf(card).isEmpty() || hasPlainText(card)
+                || !tokensOf(card).isEmpty() || !spellbookOf(card).isEmpty()
+                || !forge.neo.card.AffectedBy.of(card).isEmpty();
+        double w = bigWidth;
+        if (side) {
+            w = Math.min(w, sceneWidth * 0.9 / (1 + SIDE_RATIO));
+        }
+        final CardNode big = new CardNode(w);
+        // Derecha SIEMPRE y sin pastillas: esta vista es para leerla.
+        big.setRotationEnabled(false);
+        big.setHoverEnabled(false);
+        big.setBadgesVisible(false);
+        if (side) {
+            // Los contadores van enumerados en la ficha, con su nombre entero:
+            // la pastilla encima del titulo aqui solo tapa.
+            big.setCountersVisible(false);
+        }
+        big.setCard(card);
+        if (onCardClick != null) {
+            big.setOnMouseClicked(e -> {
+                e.consume();
+                onCardClick.run();
+            });
+        }
+        // Un plano, un fenomeno o una batalla: en la mesa va de lado, como la
+        // carta fisica; aqui se gira la carta entera para leerla derecha. En un
+        // Group, que mide lo girado y no el marco de 5:7.
+        final javafx.scene.Group shown = new javafx.scene.Group(big);
+        big.setRotate(big.readRotationProperty().get());
+        big.readRotationProperty().addListener((o, was, now) -> big.setRotate(now.doubleValue()));
+        final Node refresh = underCard(card);
+        if (!side) {
+            // Sin ficha (una criatura sin texto, una basica), la edicion va
+            // debajo de la carta: es lo unico que habria al lado.
+            final Region edition = editionBlock(card, w, Pos.CENTER);
+            if (edition == null) {
+                return refresh == null ? new StackPane(shown) : withRefresh(shown, refresh);
+            }
+            final javafx.scene.layout.VBox under = new javafx.scene.layout.VBox(6, shown, edition);
+            under.setAlignment(Pos.CENTER);
+            return refresh == null ? new StackPane(under) : withRefresh(under, refresh);
+        }
+        // La ficha, con su PROPIO desplazamiento y nunca mas alta que la carta
+        // (Discord, 03-10-2026: "too many equipment and/or auras makes the
+        // rules text buttons and updated P/T and such appear off screen and
+        // I'm not seeing a way to scroll"). Era un VBox a pelo: con cuatro auras
+        // crecia mas que la ventana y lo de debajo se quedaba fuera. La rueda
+        // dentro desplaza la ficha y no pasa a la carta siguiente
+        // (isInsideScrollPane).
+        final double sideWidth = w * SIDE_RATIO;
+        final javafx.scene.control.ScrollPane sideScroll =
+                new javafx.scene.control.ScrollPane(statePanel(card, sideWidth));
+        sideScroll.getStyleClass().add("dialog-scroll");
+        sideScroll.setFitToWidth(true);
+        sideScroll.setHbarPolicy(javafx.scene.control.ScrollPane.ScrollBarPolicy.NEVER);
+        sideScroll.setPrefViewportWidth(sideWidth);
+        sideScroll.setMaxHeight(w * 7 / 5);
+        final HBox row = new HBox(w * 0.06, shown, sideScroll);
+        row.setAlignment(Pos.CENTER);
+        return refresh == null ? new StackPane(row) : withRefresh(row, refresh);
+    }
+
+    /** La carta (o carta y ficha) con el boton de volver a bajar debajo. */
+    private static Region withRefresh(final Node content, final Node refresh) {
+        final javafx.scene.layout.VBox box = new javafx.scene.layout.VBox(6, content, refresh);
+        box.setAlignment(Pos.CENTER);
+        return new StackPane(box);
+    }
+
+    /**
+     * "Volver a bajar la imagen": solo si Scryfall ya la tiene en HD
+     * ({@code CardImages.refreshFromScryfall}); si no, lo dice y no toca nada.
+     * No sale con la descarga de imagenes apagada ni para lo que no viene de
+     * Scryfall.
+     */
+    private static Node refreshButton(final CardView card) {
+        final String key = card == null || card.getCurrentState() == null ? null
+                : card.getCurrentState().getImageKey(null);
+        if (key == null || key.isEmpty() || !forge.model.FModel.getPreferences().getPrefBoolean(
+                forge.localinstance.properties.ForgePreferences.FPref.UI_ENABLE_ONLINE_IMAGE_FETCHER)) {
+            return null;
+        }
+        final javafx.scene.control.Button b = new javafx.scene.control.Button(
+                forge.neo.NeoText.get("zoom.refreshArt"));
+        b.getStyleClass().addAll("segment", "zoom-refresh-art");
+        b.setId("zoom-refresh-art");
+        b.setTooltip(new javafx.scene.control.Tooltip(forge.neo.NeoText.get("zoom.refreshArt.tip")));
+        b.setOnAction(e -> {
+            e.consume();
+            b.setDisable(true);
+            b.setText(forge.neo.NeoText.get("zoom.refreshArt.checking"));
+            forge.neo.card.CardImages.refreshFromScryfall(key, r -> {
+                b.setText(forge.neo.NeoText.get("zoom.refreshArt." + r.name().toLowerCase(java.util.Locale.ROOT)));
+                // Se puede volver a intentar si no ha salido; si ha salido, ya esta.
+                b.setDisable(r == forge.neo.card.CardImages.Refresh.UPDATED);
+            });
+        });
+        // Clicar el boton no es clicar "fuera": que no cierre la ampliacion.
+        b.addEventHandler(javafx.scene.input.MouseEvent.MOUSE_CLICKED, javafx.scene.input.MouseEvent::consume);
+        return b;
+    }
+
+    /**
+     * Si esta carta tiene algo que contar que la imagen NO cuenta.
+     *
+     * <p>La imagen ensenya lo IMPRESO y nada mas. En la mesa una criatura puede
+     * llevar contadores, danyo marcado y auras encima, y entonces lo impreso es
+     * justo lo que no hay que creerse: caso reportado jugando, una criatura que
+     * ponia 0/7 en la carta, 44/46 en la mesa, y ni un sitio donde ver de donde
+     * salia la diferencia. Fuera de la mesa — el catalogo, un sobre — no hay
+     * estado que contar y la carta ampliada se queda como estaba.
+     */
+    private static boolean hasState(final CardView card) {
+        if (card == null || card.getZone() != ZoneType.Battlefield) {
+            return false;
+        }
+        final CardStateView st = card.getCurrentState();
+        return st != null
+                && (st.isCreature()
+                    || card.getDamage() > 0
+                    || (card.getCounters() != null && !card.getCounters().isEmpty())
+                    || (card.getAttachedCards() != null && !card.getAttachedCards().isEmpty())
+                    || !heldBy(card).isEmpty());
+    }
+
+    /**
+     * De que expansion es la impresion que se ve: el codigo arriba, que cabe
+     * siempre, y el nombre debajo, que puede ocupar dos lineas ("Dungeons &
+     * Dragons: Adventures in the Forgotten Realms"). Lo calcula
+     * {@link forge.neo.card.PrintingLabel}, que es Java puro y tambien lo usa
+     * Android.
+     *
+     * @return null si la carta no tiene (una ficha, una carta boca abajo)
+     */
+    private static Region editionBlock(final CardView card, final double width, final Pos align) {
+        final CardStateView st = card == null ? null : card.getCurrentState();
+        final forge.neo.card.PrintingLabel p = st == null ? null
+                : forge.neo.card.PrintingLabel.of(st.getImageKey(null));
+        if (p == null) {
+            return null;
+        }
+        final Label code = new Label(p.code);
+        code.getStyleClass().addAll("zoom-edition", "zoom-edition-code");
+        UiScale.fixedFont(code, 12);
+        final VBox box = new VBox(1, code);
+        if (p.name != null) {
+            final Label name = new Label(p.name);
+            name.getStyleClass().add("zoom-edition");
+            UiScale.fixedFont(name, 12);
+            name.setWrapText(true);
+            name.setMaxWidth(width);
+            // Las dos cosas: la del texto partido en lineas y la del Label en
+            // su ancho. Con solo la primera, una linea sola se iba a la izquierda.
+            final boolean centered = align == Pos.CENTER;
+            name.setTextAlignment(centered
+                    ? javafx.scene.text.TextAlignment.CENTER : javafx.scene.text.TextAlignment.RIGHT);
+            name.setAlignment(centered ? Pos.CENTER : Pos.CENTER_RIGHT);
+            box.getChildren().add(name);
+        }
+        box.setAlignment(align);
+        box.setMaxWidth(Double.MAX_VALUE);
+        box.setId("zoom-edition");
+        return box;
+    }
+
+    /**
+     * Lo ELEGIDO para la carta, con su rotulo: "Tipo de criatura: Elf".
+     * Discord, 13-10-2026 (Herald's Horn, Roaming Throne). En la mesa sale el
+     * valor solo, como etiqueta; aqui, con lo que es. Ver
+     * {@link forge.neo.card.ChosenValues}.
+     *
+     * @return null si no se ha elegido nada
+     */
+    private static Region chosenBlock(final CardView card, final double width) {
+        final java.util.List<forge.neo.card.ChosenValues.Entry> all = forge.neo.card.ChosenValues.of(card);
+        if (all.isEmpty()) {
+            return null;
+        }
+        final Label caption = new Label(NeoText.get("zoom.chosen"));
+        caption.getStyleClass().add("zoom-head");
+        UiScale.fixedFont(caption, 12);
+        final VBox box = new VBox(2, caption);
+        for (final forge.neo.card.ChosenValues.Entry e : all) {
+            final Label l = new Label(NeoText.get("chosen." + e.kind.name().toLowerCase(java.util.Locale.ROOT),
+                    e.value));
+            l.getStyleClass().add("zoom-line");
+            UiScale.fixedFont(l, 13);
+            l.setWrapText(true);
+            l.setMaxWidth(width);
+            box.getChildren().add(l);
+        }
+        return box;
+    }
+
+    /**
+     * "Le afecta": cada carta de otro que le prohibe u obliga algo, con lo que
+     * hace, y quien la provoca. Discord, 23-10-2026: *"cannot be activated,
+     * source: Collector Ouphe"*.
+     *
+     * @return null si nada le afecta
+     */
+    static Region affectedBlock(final CardView card, final double width) {
+        final java.util.List<forge.neo.card.AffectedBy.Line> all = forge.neo.card.AffectedBy.of(card);
+        if (all.isEmpty()) {
+            return null;
+        }
+        final Label caption = new Label(NeoText.get("affected.title"));
+        caption.getStyleClass().add("zoom-head");
+        UiScale.fixedFont(caption, 12);
+        final VBox box = new VBox(3, caption);
+        for (final forge.neo.card.AffectedBy.Line l : all) {
+            final Label line = new Label(l.text().contains(l.source()) ? l.text() : l.source() + ": " + l.text());
+            line.getStyleClass().addAll("zoom-line", "affected-line");
+            UiScale.fixedFont(line, 13);
+            line.setWrapText(true);
+            line.setMaxWidth(width);
+            box.getChildren().add(line);
+        }
+        return box;
+    }
+
+    /** Lo que de verdad es esta carta ahora mismo, al lado de la ampliada. */
+    private static Region statePanel(final CardView card, final double width) {
+        final VBox box = new VBox(10);
+        box.getStyleClass().add("zoom-state");
+        box.setPrefWidth(width);
+        box.setMinWidth(width);
+        box.setMaxWidth(width);
+        box.setAlignment(Pos.TOP_LEFT);
+        // Que mida lo que ocupe su contenido y no lo que mida la carta: desde
+        // que el panel sale para CUALQUIER permanente en juego (por el boton
+        // de "ver el texto actual"), lo normal es que lleve dos lineas, y un
+        // panel del alto de la carta con dos lineas dentro es un agujero.
+        box.setMaxHeight(Region.USE_PREF_SIZE);
+
+        // LA EDICION, arriba a la derecha: donde una carta de verdad lleva el
+        // simbolo de la expansion (Discord, 13-10-2026: "Is there a way to view
+        // edition on the card info?"). Va lo primero porque es de la carta, no
+        // de lo que le pasa en la mesa.
+        final Region edition = editionBlock(card, width - 34, Pos.TOP_RIGHT);
+        if (edition != null) {
+            box.getChildren().add(edition);
+        }
+
+        final CardStateView st = card.getCurrentState();
+        if (st != null && st.isCreature()) {
+            box.getChildren().add(ptBlock(card, st));
+        }
+
+        final Region counters = countersBlock(card);
+        if (counters != null) {
+            box.getChildren().add(counters);
+        }
+
+        final Region chosen = chosenBlock(card, width);
+        if (chosen != null) {
+            box.getChildren().add(chosen);
+        }
+
+        // Lo que OTRAS cartas le hacen (Collector Ouphe, Arrest, provocar):
+        // la carta no lo dice. Ver forge.neo.card.AffectedBy.
+        final Region affected = affectedBlock(card, width);
+        if (affected != null) {
+            box.getChildren().add(affected);
+        }
+
+        final int dmg = card.getDamage();
+        if (dmg > 0) {
+            final Label l = new Label(NeoText.get("zoom.damage", String.valueOf(dmg)));
+            l.getStyleClass().addAll("zoom-line", "zoom-damage");
+            UiScale.fixedFont(l, 13);
+            box.getChildren().add(l);
+        }
+
+        final Region keywords = keywordsBlock(card, width);
+        if (keywords != null) {
+            box.getChildren().add(keywords);
+        }
+
+        final Region attached = attachedBlock(card, width);
+        if (attached != null) {
+            box.getChildren().add(attached);
+        }
+
+        final Region other = otherFaceBlock(card, width);
+        if (other != null) {
+            box.getChildren().add(other);
+        }
+
+        final Region held = heldBlock(card, width);
+        if (held != null) {
+            box.getChildren().add(held);
+        }
+
+        final Region rel = relatedBlock(card, width);
+        if (rel != null) {
+            box.getChildren().add(rel);
+        }
+
+        // Y si es una copia, la carta de verdad que hay debajo (CopyOf).
+        final Region real = originalBlock(card, width);
+        if (real != null) {
+            box.getChildren().add(real);
+        }
+
+        final Region live = liveTextBlock(card, width);
+        if (live != null) {
+            box.getChildren().add(live);
+        }
+
+        final Region plain = plainTextBlock(card, width);
+        if (plain != null) {
+            box.getChildren().add(plain);
+        }
+
+        final Region tokens = tokensBlock(card, width);
+        if (tokens != null) {
+            box.getChildren().add(tokens);
+        }
+        // Y su spellbook, si es de Arena (Discord, 11-11-2026). Ver CardSpellbook.
+        final Region spellbook = cardsBlock(spellbookOf(card), "zoom.spellbook", width);
+        if (spellbook != null) {
+            box.getChildren().add(spellbook);
+        }
+        return box;
+    }
+
+    /**
+     * Las fichas que crea la carta, FUERA de una partida (la enciclopedia, el
+     * constructor): Discord, 23-10-2026, para ver si su imagen esta sin jugarla.
+     * Ver {@link forge.neo.card.CardTokens}. En la mesa no: alli las fichas ya
+     * estan en la mesa cuando importan, y esta capa es la de leer la carta.
+     */
+    private static java.util.List<CardView> tokensOf(final CardView card) {
+        if (card == null || card.getZone() != null || card.isToken() || card.getCurrentState() == null) {
+            return java.util.List.of();
+        }
+        final forge.item.PaperCard pc = TOKENS_PAPER.apply(card);
+        return pc == null ? java.util.List.of() : TOKENS.computeIfAbsent(pc, forge.neo.card.CardTokens::of);
+    }
+
+    /** Las fichas ya calculadas por carta: se pregunta en cada carta que pasa por la rueda. */
+    private static final java.util.Map<forge.item.PaperCard, java.util.List<CardView>> TOKENS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static final java.util.function.Function<CardView, forge.item.PaperCard> TOKENS_PAPER = cv -> {
+        try {
+            return forge.util.ImageUtil.getPaperCardFromImageKey(cv.getCurrentState().getImageKey(null));
+        } catch (final RuntimeException e) {
+            return null;
+        }
+    };
+
+    /** El spellbook de la carta, fuera de una partida, como las fichas. Ver {@link forge.neo.card.CardSpellbook}. */
+    private static java.util.List<CardView> spellbookOf(final CardView card) {
+        if (card == null || card.getZone() != null || card.isToken() || card.getCurrentState() == null) {
+            return java.util.List.of();
+        }
+        final forge.item.PaperCard pc = TOKENS_PAPER.apply(card);
+        return pc == null ? java.util.List.of() : SPELLBOOKS.computeIfAbsent(pc, forge.neo.card.CardSpellbook::of);
+    }
+
+    private static final java.util.Map<forge.item.PaperCard, java.util.List<CardView>> SPELLBOOKS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static Region tokensBlock(final CardView card, final double width) {
+        return cardsBlock(tokensOf(card), "zoom.tokens", width);
+    }
+
+    /** Una fila de cartas con su titulo, cada una ampliable: las fichas, el spellbook. */
+    private static Region cardsBlock(final java.util.List<CardView> tokens, final String titleKey,
+                                     final double width) {
+        if (tokens.isEmpty()) {
+            return null;
+        }
+        final Label title = new Label(NeoText.get(titleKey) + (tokens.size() > 1 ? " (" + tokens.size() + ")" : ""));
+        title.getStyleClass().add("zoom-head");
+        UiScale.fixedFont(title, 12);
+        final javafx.scene.layout.FlowPane row = new javafx.scene.layout.FlowPane(8, 8);
+        row.setPrefWrapLength(width);
+        final double each = Math.min(width * 0.46, width / Math.min(tokens.size(), 3) - 8);
+        for (final CardView t : tokens) {
+            final CardNode node = new CardNode(each);
+            node.setRotationEnabled(false);
+            node.setHoverEnabled(false);
+            node.setCard(t);
+            // Un boton y no la carta pelada: en esta capa solo los controles
+            // reciben el clic (isInteractiveTarget); lo demas la cierra.
+            final javafx.scene.control.Button b = new javafx.scene.control.Button(null, node);
+            b.getStyleClass().add("zoom-token");
+            b.setStyle("-fx-background-color: transparent; -fx-padding: 0;");
+            b.setTooltip(new javafx.scene.control.Tooltip(t.getCurrentState() == null ? t.getName()
+                    : CardText.nameOf(t.getCurrentState())));
+            b.setOnAction(e -> {
+                e.consume();
+                show(b, tokens.size(), tokens.indexOf(t), tokens::get);
+            });
+            row.getChildren().add(b);
+        }
+        final VBox box = new VBox(6, title, row);
+        box.setAlignment(Pos.TOP_LEFT);
+        return box;
+    }
+
+    /**
+     * Lo de debajo de la carta: "Usar mi propia imagen" si no tiene (Discord,
+     * 23-10-2026), con DONDE se guardaria, y "Volver a bajar la imagen".
+     */
+    private static Node underCard(final CardView card) {
+        final Node own = ownImageButton(card);
+        final Node refresh = refreshButton(card);
+        if (own == null) {
+            return refresh;
+        }
+        final VBox box = new VBox(4);
+        box.setAlignment(Pos.CENTER);
+        box.getChildren().add(own);
+        if (refresh != null) {
+            box.getChildren().add(refresh);
+        }
+        return box;
+    }
+
+    /**
+     * "Usar mi propia imagen…": solo si la carta o ficha NO tiene imagen en el
+     * disco. Elige un JPG o PNG y lo deja donde la buscaria el juego
+     * ({@link forge.neo.card.OwnImage}); la ruta va escrita debajo, para quien
+     * prefiera ponerla a mano.
+     */
+    private static Node ownImageButton(final CardView card) {
+        final String key = card == null || card.getCurrentState() == null ? null
+                : card.getCurrentState().getImageKey(null);
+        final String where = forge.neo.card.OwnImage.shownPath(key);
+        if (where == null || forge.neo.card.CardImages.hasImageOnDisk(key)) {
+            return null;
+        }
+        final javafx.scene.control.Button b = new javafx.scene.control.Button(NeoText.get("zoom.ownImage"));
+        b.getStyleClass().addAll("segment", "zoom-refresh-art");
+        b.setId("zoom-own-image");
+        final Label path = new Label(NeoText.get("zoom.ownImage.path", where));
+        path.getStyleClass().addAll("zoom-line", "zoom-dim");
+        UiScale.fixedFont(path, 11);
+        path.setWrapText(true);
+        path.setMaxWidth(UiScale.px(420));
+        final java.io.File full = forge.neo.card.OwnImage.target(key, ".jpg");
+        if (full != null) {
+            path.setTooltip(new javafx.scene.control.Tooltip(full.getAbsolutePath()));
+        }
+        b.setOnAction(e -> {
+            e.consume();
+            final javafx.stage.FileChooser fc = new javafx.stage.FileChooser();
+            fc.setTitle(NeoText.get("zoom.ownImage"));
+            fc.getExtensionFilters().add(new javafx.stage.FileChooser.ExtensionFilter(
+                    "JPG / PNG", "*.jpg", "*.jpeg", "*.png"));
+            final java.io.File chosen = fc.showOpenDialog(b.getScene() == null ? null : b.getScene().getWindow());
+            if (chosen == null) {
+                return;
+            }
+            try {
+                final java.io.File done = forge.neo.card.CardImages.useOwnImage(key, chosen);
+                b.setText(NeoText.get(done == null ? "zoom.ownImage.failed" : "zoom.ownImage.done"));
+                b.setDisable(done != null);
+            } catch (final java.io.IOException ex) {
+                System.err.println("[neo-img] no se pudo copiar " + chosen + ": " + ex);
+                b.setText(NeoText.get("zoom.ownImage.failed"));
+            }
+        });
+        b.addEventHandler(javafx.scene.input.MouseEvent.MOUSE_CLICKED, javafx.scene.input.MouseEvent::consume);
+        final VBox box = new VBox(2, b, path);
+        box.setAlignment(Pos.CENTER);
+        return box;
+    }
+
+    /**
+     * Las palabras clave que la carta tiene AHORA, sin repetir.
+     *
+     * <p>La logica vive en {@link forge.neo.card.CardKeywords}, que es Java
+     * puro: estaba aqui dentro y Android no podia usarla porque esta clase es
+     * JavaFX. Ver el javadoc de alli, que es donde esta explicado de donde
+     * salen y por que.
+     */
+    private static java.util.List<KeywordView> keywordsOf(final CardView card) {
+        return forge.neo.card.CardKeywords.of(card);
+    }
+
+    /**
+     * Las palabras clave, con su explicacion a un click.
+     *
+     * <p>Pedido por un jugador que empezaba: <i>poder pulsar las palabras clave
+     * de una carta y ver que significan</i>. Es el hueco mas grande que tenia
+     * esta interfaz para alguien nuevo — el texto de la carta dice
+     * "Vigilancia, dana letal" y da por sabido lo que son, y lo unico que
+     * habia para averiguarlo era salir del juego a buscarlo.
+     *
+     * <p>El texto sale del motor ({@code Keyword.getReminderText}), que trae el
+     * <b>oficial</b> de las ~200 palabras clave con su numero o su coste ya
+     * puestos. Escribirlo nosotros habria sido inventarse reglas, que es justo
+     * lo que este proyecto no hace.
+     *
+     * <p>Tres decisiones que no se ven leyendo el codigo:
+     *
+     * <ul>
+     *   <li><b>Una explicacion a la vez.</b> Una criatura puede llevar cinco
+     *       palabras clave, y las cinco desplegadas son un parrafo mas largo
+     *       que la carta: se lee la que se pregunta.</li>
+     *   <li><b>El rotulo dice que se clican.</b> Una pastilla no parece un
+     *       boton, y un gesto que no se descubre es como no tenerlo — la misma
+     *       leccion que el galon del stack.</li>
+     *   <li><b>Con una sola, sale abierta.</b> Ahi no hay nada que elegir, y
+     *       obligar a un click para leer la unica linea que hay es un tramite.</li>
+     * </ul>
+     *
+     * <p>El texto viene <b>en ingles</b> pase lo que pase: esta escrito a mano
+     * en el {@code enum} del motor y Forge no lo traduce en ninguno de sus diez
+     * idiomas. Ensenyarlo asi es mejor que no ensenyarlo, y el dia que el motor
+     * lo traduzca se traduce solo.
+     *
+     * @return null si la carta no tiene ninguna
+     */
+    private static Region keywordsBlock(final CardView card, final double width) {
+        final java.util.List<KeywordView> words = keywordsOf(card);
+        if (words.isEmpty()) {
+            return null;
+        }
+
+        final Label caption = new Label(NeoText.get("zoom.keywords"));
+        caption.getStyleClass().add("zoom-head");
+        UiScale.fixedFont(caption, 12);
+        caption.setWrapText(true);
+        caption.setMaxWidth(width);
+
+        final Label explain = new Label();
+        explain.getStyleClass().add("keyword-text");
+        explain.setWrapText(true);
+        explain.setMaxWidth(width);
+        explain.setMinHeight(Region.USE_PREF_SIZE);
+        explain.setVisible(false);
+        explain.setManaged(false);
+        // Los simbolos de mana como iconos («Prototype {1}{B}{B}»), igual que
+        // el texto de la carta de al lado (Discord, 11-11-2026).
+        ManaIcons.decorate(explain);
+
+        // El elegido, en una casilla: el manejador de cada pastilla necesita
+        // apagar la anterior, y de la anterior solo se sabe cuando ya se ha
+        // clicado.
+        final Label[] picked = new Label[1];
+
+        final FlowPane chips = new FlowPane(6, 5);
+        chips.setMaxWidth(width);
+        for (final KeywordView k : words) {
+            final Label chip = new Label(forge.neo.card.CardKeywords.title(k, card));
+            chip.getStyleClass().add("keyword-chip");
+            chip.setCursor(javafx.scene.Cursor.HAND);
+            ManaIcons.decorate(chip);
+            chip.setOnMouseClicked(e -> {
+                e.consume();
+                if (picked[0] == chip) {
+                    chip.pseudoClassStateChanged(KEYWORD_ON, false);
+                    picked[0] = null;
+                    explain.setVisible(false);
+                    explain.setManaged(false);
+                    return;
+                }
+                if (picked[0] != null) {
+                    picked[0].pseudoClassStateChanged(KEYWORD_ON, false);
+                }
+                chip.pseudoClassStateChanged(KEYWORD_ON, true);
+                picked[0] = chip;
+                explain.setText(forge.neo.card.CardKeywords.text(k, card));
+                explain.setVisible(true);
+                explain.setManaged(true);
+            });
+            chips.getChildren().add(chip);
+        }
+
+        if (words.size() == 1) {
+            final Label only = (Label) chips.getChildren().get(0);
+            only.pseudoClassStateChanged(KEYWORD_ON, true);
+            picked[0] = only;
+            explain.setText(forge.neo.card.CardKeywords.text(words.get(0), card));
+            explain.setVisible(true);
+            explain.setManaged(true);
+        }
+
+        final VBox box = new VBox(6, caption, chips, explain);
+        box.setAlignment(Pos.TOP_LEFT);
+        return box;
+    }
+
+    /** La pastilla que se esta leyendo ahora mismo. */
+    private static final javafx.css.PseudoClass KEYWORD_ON =
+            javafx.css.PseudoClass.getPseudoClass("on");
+
+    /** Solo en el campo de batalla: es donde el texto puede haber cambiado. */
+    private static boolean canReadLiveText(final CardView card) {
+        return card != null && card.getZone() == ZoneType.Battlefield
+                && !CardText.liveRulesOf(card.getCurrentState()).isEmpty();
+    }
+
+    /**
+     * "Ver el texto actual": lo que el motor dice que la carta hace AHORA.
+     *
+     * <p>Va <b>plegado y a peticion</b>, y las dos cosas importan:
+     *
+     * <ul>
+     *   <li><b>Plegado</b> porque en una carta normal es lo mismo que ya pone
+     *       la imagen — ensenyarlo siempre seria el texto repetido en todas las
+     *       cartas de la mesa, y ademas en ingles.</li>
+     *   <li><b>A peticion</b> porque no se puede saber si ha cambiado: el motor
+     *       no lo publica, y adivinarlo daba falsos positivos en media mesa
+     *       (ver {@code CardText.liveRulesOf}). Un boton no afirma nada; un
+     *       aviso automatico si, y se equivocaria.</li>
+     * </ul>
+     *
+     * <p>Es la unica forma de leer una criatura a la que le han
+     * <b>intercambiado el cuadro de texto</b> (<i>Deadpool, Trading Card</i>) o
+     * a la que se lo han <b>quitado entero</b> (<i>Song of the Dryads</i> sobre
+     * tu comandante): el arte sigue siendo el impreso y no va a cambiar.
+     */
+    private static Region liveTextBlock(final CardView card, final double width) {
+        final String live = CardText.liveRulesOf(card.getCurrentState());
+        if (live.isEmpty() || card.getZone() != ZoneType.Battlefield) {
+            return null;
+        }
+
+        final Label body = new Label(live);
+        body.getStyleClass().addAll("zoom-line", "zoom-live-text");
+        UiScale.fixedFont(body, 13);
+        body.setWrapText(true);
+        body.setMaxWidth(width);
+
+        // Un texto vivo puede ser largo (una criatura con tres auras encima):
+        // se le pone techo y se desplaza, en vez de estirar el panel fuera de
+        // la ventana. El techo es mas alto de lo que parece falta a primera
+        // vista a proposito: es texto robado de OTRA carta (Deadpool, Trading
+        // Card) y compite en legibilidad con la carta grande de al lado.
+        final javafx.scene.control.ScrollPane scroll =
+                new javafx.scene.control.ScrollPane(body);
+        scroll.getStyleClass().add("zoom-live-scroll");
+        scroll.setFitToWidth(true);
+        // Un alto PREFERIDO, no solo un tope: sin esto un ScrollPane vacio de
+        // instrucciones se queda con su alto por defecto (unas tres lineas) y
+        // el "mas grande" de setMaxHeight no se nota hasta que el texto es
+        // largo de verdad.
+        scroll.setPrefHeight(UiScale.px(210));
+        scroll.setMaxHeight(UiScale.px(340));
+        scroll.setVisible(false);
+        scroll.setManaged(false);
+
+        final javafx.scene.control.Button toggle =
+                new javafx.scene.control.Button(NeoText.get("zoom.liveTextShow"));
+        toggle.getStyleClass().add("zoom-live-toggle");
+        toggle.setMaxWidth(Double.MAX_VALUE);
+        toggle.setOnAction(e -> {
+            final boolean show = !scroll.isVisible();
+            scroll.setVisible(show);
+            scroll.setManaged(show);
+            // Con los simbolos de mana de Forge, como el texto de la otra
+            // cara (ver plainTextBlock).
+            if (show && scroll.getContent() == body && forge.neo.card.ManaSymbols.enabled()
+                    && forge.neo.card.ManaSymbols.hasSymbols(body.getText())) {
+                // Primero el ScrollPane: hasta que crea su piel, la etiqueta no
+                // cuelga de la escena y su applyCss no ve la hoja de estilos:
+                // copiaba el NEGRO de fabrica al abrir la ampliacion con el texto
+                // ya desplegado (Discord, 08-11-2026).
+                scroll.applyCss();
+                body.applyCss();
+                final javafx.scene.text.TextFlow flow = new javafx.scene.text.TextFlow();
+                flow.setMaxWidth(width);
+                ManaIcons.fill(flow, body.getText(), body.getFont(), body.getTextFill());
+                scroll.setContent(flow);
+            }
+            toggle.setText(NeoText.get(show ? "zoom.liveTextHide" : "zoom.liveTextShow"));
+            e.consume();
+        });
+
+        final VBox box = new VBox(6, toggle, scroll);
+        box.setAlignment(Pos.TOP_LEFT);
+        // Sin imagen, abierto: la carta grande no dice nada que leer (Discord,
+        // 11-11-2026, una Room sin arte).
+        if (noArt(card)) {
+            openWhenShown(box, scroll, toggle, null);
+        }
+        return box;
+    }
+
+    /**
+     * Si la carta no tiene imagen (ni en memoria ni en el disco): entonces lo
+     * que se ve es el respaldo, con nombre, coste y tipo pero sin texto, y el
+     * texto de la carta se abre solo (Discord, 11-11-2026: «View card text for
+     * Room cards if the art has not loaded»).
+     */
+    static boolean noArt(final CardView card) {
+        if (Boolean.getBoolean("neo.images.none")) {
+            return card != null;
+        }
+        try {
+            final CardStateView st = card == null ? null : card.getCurrentState();
+            final String key = st == null ? null : st.getImageKey(null);
+            return key != null && !key.isEmpty() && forge.neo.card.CardImages.peek(key) == null
+                    && !forge.neo.card.CardImages.hasImageOnDisk(key);
+        } catch (final RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** Abre el bloque (pulsa su boton) en cuanto este en la escena. */
+    private static void openWhenShown(final VBox box, final javafx.scene.Node scroll,
+                                      final javafx.scene.control.Button toggle, final boolean[] opening) {
+        box.sceneProperty().addListener(new javafx.beans.value.ChangeListener<>() {
+            @Override
+            public void changed(final javafx.beans.value.ObservableValue<? extends javafx.scene.Scene> o,
+                                final javafx.scene.Scene was, final javafx.scene.Scene now) {
+                if (now != null) {
+                    box.sceneProperty().removeListener(this);
+                    if (!scroll.isVisible()) {
+                        if (opening != null) {
+                            opening[0] = true;
+                        }
+                        toggle.fire();
+                        if (opening != null) {
+                            opening[0] = false;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /** Si hay texto impreso que ofrecer en plano: casi siempre que sí. */
+    private static boolean hasPlainText(final CardView card) {
+        if (card == null) {
+            return false;
+        }
+        final CardStateView st = card.getCurrentState();
+        return st != null && !CardText.rulesOf(st).isEmpty();
+    }
+
+    /**
+     * "Ver el texto de la carta": lo IMPRESO, en texto plano y en tu idioma.
+     *
+     * <p>{@link #liveTextBlock} contesta "¿ha cambiado el texto?" y por eso
+     * solo aparece en el campo de batalla. Esto contesta otra pregunta
+     * distinta — "no puedo leer lo que pone ahi" — y por eso vale en
+     * <b>cualquier zona</b>: el catalogo, un sobre, la mano, la mesa.
+     *
+     * <p>Pedido jugando con una impresion de coleccionista (arte de pagina
+     * entera, con la caligrafia japonesa del propio arte encima del
+     * recuadro de reglas): ilegible aunque se juegue en ingles, porque el
+     * arte no es texto en ningun idioma. El nombre y el texto salen de
+     * {@link CardText}, que traduce por el nombre <b>interno</b> de la
+     * carta — la impresion da igual.
+     *
+     * <p>Plegado por lo mismo que {@link #liveTextBlock}: en una carta
+     * normal es el mismo texto que ya se lee en la imagen, y ensenyarlo
+     * siempre seria repetirlo en todas las cartas de la mesa.
+     */
+    /** Nombre y coste, tipo, texto y P/T de una cara, como se lee en la carta. */
+    private static String faceText(final CardStateView st) {
+        final StringBuilder text = new StringBuilder();
+        final String name = CardText.nameOf(st);
+        if (!name.isEmpty()) {
+            text.append(name);
+        }
+        final String cost = st.getManaCost() == null ? "" : st.getManaCost().toString();
+        if (!cost.isEmpty()) {
+            if (text.length() > 0) {
+                text.append("   ");
+            }
+            text.append(cost);
+        }
+        final String type = CardText.typeOf(st);
+        if (!type.isEmpty()) {
+            if (text.length() > 0) {
+                text.append('\n');
+            }
+            text.append(type);
+        }
+        if (text.length() > 0) {
+            text.append("\n\n");
+        }
+        text.append(CardText.rulesOf(st));
+        if (st.isCreature()) {
+            text.append("\n\n").append(st.getPower()).append('/').append(st.getToughness());
+        }
+        return text.toString();
+    }
+
+    private static Region plainTextBlock(final CardView card, final double width) {
+        final CardStateView st = card.getCurrentState();
+        if (st == null) {
+            return null;
+        }
+        final String rules = CardText.rulesOf(st);
+        if (rules.isEmpty()) {
+            return null;
+        }
+
+        final StringBuilder text = new StringBuilder(faceText(st));
+        // Y LA OTRA CARA, debajo (Discord, 23-10-2026: "showed the back side
+        // too, just in case the back side image is not loading"): si su imagen
+        // no llega, en "Otra cara" solo salen el nombre, el tipo y la P/T.
+        // otherFace ya guarda lo boca abajo que no te toca ver.
+        final CardStateView back = otherFace(card);
+        if (back != null && !CardText.rulesOf(back).isEmpty()) {
+            text.append("\n\n——  ").append(NeoText.get("zoom.otherFace"))
+                    .append("  ——\n\n").append(faceText(back));
+        }
+
+        final Label body = new Label(text.toString());
+        body.getStyleClass().addAll("zoom-line", "zoom-live-text");
+        UiScale.fixedFont(body, 13);
+        body.setWrapText(true);
+        body.setMaxWidth(width);
+
+        final javafx.scene.control.ScrollPane scroll =
+                new javafx.scene.control.ScrollPane(body);
+        scroll.getStyleClass().add("zoom-live-scroll");
+        scroll.setFitToWidth(true);
+        scroll.setPrefHeight(UiScale.px(240));
+        scroll.setMaxHeight(UiScale.px(380));
+        scroll.setVisible(false);
+        scroll.setManaged(false);
+
+        final boolean[] opening = {false};
+        final javafx.scene.control.Button toggle =
+                new javafx.scene.control.Button(NeoText.get("zoom.plainTextShow"));
+        toggle.getStyleClass().add("zoom-live-toggle");
+        toggle.setMaxWidth(Double.MAX_VALUE);
+        toggle.setOnAction(e -> {
+            final boolean show = !scroll.isVisible();
+            scroll.setVisible(show);
+            scroll.setManaged(show);
+            // Con los simbolos de mana de Forge (itch.io, 06-11-2026): ya en la
+            // escena, la etiqueta sabe su letra y su color, y el TextFlow los
+            // copia. Una vez: luego ya es el TextFlow lo que se ensenya.
+            if (show && scroll.getContent() == body && forge.neo.card.ManaSymbols.enabled()
+                    && forge.neo.card.ManaSymbols.hasSymbols(body.getText())) {
+                // Primero el ScrollPane: hasta que crea su piel, la etiqueta no
+                // cuelga de la escena y su applyCss no ve la hoja de estilos:
+                // copiaba el NEGRO de fabrica al abrir la ampliacion con el texto
+                // ya desplegado (Discord, 08-11-2026).
+                scroll.applyCss();
+                body.applyCss();
+                final javafx.scene.text.TextFlow flow = new javafx.scene.text.TextFlow();
+                flow.setMaxWidth(width);
+                ManaIcons.fill(flow, body.getText(), body.getFont(), body.getTextFill());
+                scroll.setContent(flow);
+            }
+            toggle.setText(NeoText.get(show ? "zoom.plainTextHide" : "zoom.plainTextShow"));
+            // Se recuerda (Discord, 07-11-2026: "add toggable option to show
+            // text by default"), como la vista de texto de Android: quien lo
+            // abre una vez lo tiene abierto en las siguientes.
+            if (!opening[0]) {
+                forge.neo.NeoSettings.setBool(PLAIN_TEXT_OPEN, show);
+                forge.neo.NeoSettings.save();
+            }
+            e.consume();
+        });
+
+        final VBox box = new VBox(6, toggle, scroll);
+        box.setAlignment(Pos.TOP_LEFT);
+        // Abierto si se dejo abierto la ultima vez, o si la carta no tiene
+        // imagen (Discord, 11-11-2026): ya en la escena, que el TextFlow con
+        // simbolos copia la letra del CSS. Abrirlo solo no cambia el ajuste.
+        if (forge.neo.NeoSettings.getBool(PLAIN_TEXT_OPEN, false) || noArt(card)) {
+            openWhenShown(box, scroll, toggle, opening);
+        }
+        return box;
+    }
+
+    /**
+     * La carta con la que esta atada, y por que.
+     *
+     * <p>Tres relaciones que el motor publica desde siempre y que no se
+     * veian en ninguna parte:
+     *
+     * <ul>
+     *   <li><b>Emparejada</b> ({@code getPairedWith}) — almas gemelas. Las
+     *       dos criaturas se dan algo mientras sigan emparejadas, y cual es
+     *       la otra no estaba escrito por ningun sitio.</li>
+     *   <li><b>Es una copia de</b> ({@code getCloneOrigin}) — un clon
+     *       ensenya la carta copiada, asi que sin esto no hay forma de
+     *       saber cual de las dos criaturas iguales es la de verdad.</li>
+     *   <li><b>La tiene exiliada</b> ({@code getExiledWith}) — el inverso
+     *       de "se lleva exiliado": estas mirando la carta desterrada y lo
+     *       que quieres saber es que hay que matar para recuperarla.</li>
+     * </ul>
+     *
+     * @return la clave del texto y la carta, o null si no hay relacion
+     */
+    private static Object[] related(final CardView card) {
+        if (card == null) {
+            return null;
+        }
+        try {
+            if (card.getPairedWith() != null) {
+                return new Object[] {"zoom.pairedWith", card.getPairedWith()};
+            }
+            if (card.getCloneOrigin() != null) {
+                return new Object[] {"zoom.cloneOf", card.getCloneOrigin()};
+            }
+            if (card.getExiledWith() != null) {
+                return new Object[] {"zoom.exiledWith", card.getExiledWith()};
+            }
+        } catch (final RuntimeException e) {
+            return null;
+        }
+        return null;
+    }
+
+    /**
+     * La carta de verdad debajo de una copia (Discord, 13-11-2026): la de
+     * Sculpting Steel o True Polymorph, que es la que vuelve si vuelve del
+     * cementerio. Ver {@link forge.neo.card.CopyOf}.
+     */
+    private static Region originalBlock(final CardView card, final double width) {
+        final CardView real = forge.neo.card.CopyOf.original(card);
+        if (real == null) {
+            return null;
+        }
+        final Label title = new Label(NeoText.get("zoom.realCard"));
+        title.getStyleClass().add("zoom-head");
+        UiScale.fixedFont(title, 12);
+        final CardNode node = new CardNode(width * 0.66);
+        node.setRotationEnabled(false);
+        node.setHoverEnabled(false);
+        node.setCard(real);
+        final Label name = new Label(CardText.nameOf(real.getCurrentState()));
+        name.getStyleClass().addAll("zoom-line", "zoom-dim");
+        UiScale.fixedFont(name, 13);
+        name.setWrapText(true);
+        name.setMaxWidth(width);
+        final VBox box = new VBox(6, title, node, name);
+        box.setAlignment(Pos.TOP_LEFT);
+        return box;
+    }
+
+    private static Region relatedBlock(final CardView card, final double width) {
+        final Object[] rel = related(card);
+        if (rel == null) {
+            return null;
+        }
+        final CardView other = (CardView) rel[1];
+        final Label title = new Label(NeoText.get((String) rel[0]));
+        title.getStyleClass().add("zoom-head");
+        UiScale.fixedFont(title, 12);
+
+        final CardNode node = new CardNode(width * 0.66);
+        node.setRotationEnabled(false);
+        node.setHoverEnabled(false);
+        node.setCard(other);
+
+        final Label name = new Label(other.getCurrentState() == null
+                ? other.getName() : CardText.nameOf(other.getCurrentState()));
+        name.getStyleClass().addAll("zoom-line", "zoom-dim");
+        UiScale.fixedFont(name, 13);
+        name.setWrapText(true);
+        name.setMaxWidth(width);
+
+        final VBox box = new VBox(6, title, node, name);
+        box.setAlignment(Pos.TOP_LEFT);
+        return box;
+    }
+
+    /**
+     * Lo que esta carta se llevo, y devolvera si se va.
+     *
+     * <p>Es media Commander: {@code Fiend Hunter}, {@code Grasp of Fate},
+     * {@code Leyline Binding}... exilian algo "hasta que esto salga del campo".
+     * El motor lleva la cuenta ({@code getUntilLeavesBattlefield}, y
+     * {@code getExiledCards} para lo exiliado sin mas) y nosotros no la
+     * ensenyabamos: veias una carta en el exilio y no habia forma de saber
+     * quien la retenia, ni si te compensaba matar tu propio encantamiento.
+     */
+    private static java.util.List<CardView> heldBy(final CardView card) {
+        final java.util.List<CardView> out = new java.util.ArrayList<>();
+        if (card == null) {
+            return out;
+        }
+        try {
+            for (final CardView cv : card.getUntilLeavesBattlefield()) {
+                out.add(cv);
+            }
+            for (final CardView cv : card.getExiledCards()) {
+                if (!out.contains(cv)) {
+                    out.add(cv);
+                }
+            }
+        } catch (final RuntimeException e) {
+            return out;
+        }
+        return out;
+    }
+
+    private static Region heldBlock(final CardView card, final double width) {
+        final java.util.List<CardView> held = heldBy(card);
+        if (held.isEmpty()) {
+            return null;
+        }
+        final VBox box = new VBox(6);
+        final Label title = new Label(NeoText.get("zoom.holding"));
+        title.getStyleClass().add("zoom-head");
+        UiScale.fixedFont(title, 12);
+        box.getChildren().add(title);
+
+        final FlowPane flow = new FlowPane(8, 8);
+        final double w = held.size() > 2 ? width * 0.46 : width * 0.66;
+        for (final CardView cv : held) {
+            final CardNode n = new CardNode(w);
+            n.setRotationEnabled(false);
+            n.setHoverEnabled(false);
+            n.setCard(cv);
+            final Label name = new Label(cv.getCurrentState() == null
+                    ? cv.getName() : CardText.nameOf(cv.getCurrentState()));
+            name.getStyleClass().addAll("zoom-line", "zoom-dim");
+            UiScale.fixedFont(name, 13);
+            name.setWrapText(true);
+            name.setMaxWidth(w);
+            flow.getChildren().add(new VBox(3, n, name));
+        }
+        box.getChildren().add(flow);
+        return box;
+    }
+
+    /**
+     * La OTRA cara, si la carta tiene dos.
+     *
+     * <p>Una carta que se transforma, una de dos caras modal, una partida: el
+     * motor publica las dos caras ({@code getAlternateState},
+     * {@code getLeftSplitState} / {@code getRightSplitState}) y nosotros solo
+     * ensenyabamos la de arriba. Para decidir si lanzar una MDFC por la cara de
+     * tierra hay que <b>ver</b> la cara de tierra, y no habia forma.
+     *
+     * @return null si la carta tiene una sola cara
+     */
+    /**
+     * Quien somos "nosotros" en la partida abierta ahora mismo.
+     *
+     * <p>Existe por UNA cosa: {@code Card.getAlternateState()} devuelve la cara
+     * de VERDAD de una carta boca abajo (morfo, manifestado) sin mirar quien
+     * pregunta — es asi para que TU propio morfo se pueda leer con el click
+     * derecho, pero sin este guardia el mismo camino ensenyaria el morfo DEL
+     * RIVAL, que es justo la informacion que el juego esconde. La comprobacion
+     * de verdad la hace el motor ({@code CardView.canFaceDownBeShownToAny},
+     * la MISMA que usa {@code AbstractGuiGame} para decidir que arte mandar);
+     * aqui solo hace falta pasarle quien mira. Se pone al abrir cada partida
+     * ({@code NeoMatchUI.openView}, principio 8 de las notas de diseño) y por eso
+     * vale para las cuatro formas de arrancar una: menu, aventura, partida
+     * privada y los caminos de prueba.
+     *
+     * <p>En observador ({@code Mode.OBSERVE}, sin asiento propio) queda
+     * vacio, y {@code canFaceDownBeShownToAny(vacio)} devuelve {@code true}
+     * (mismo criterio del motor): mirar sin jugar SI ensenya los boca abajo,
+     * que es justo lo que hace falta para verificar con capturas.
+     */
+    private static volatile Iterable<PlayerView> localViewers = java.util.Collections.emptyList();
+
+    public static void setLocalViewers(final Iterable<PlayerView> viewers) {
+        localViewers = viewers == null ? java.util.Collections.emptyList() : viewers;
+    }
+
+    /** Los mismos "nosotros", para pintar boca arriba lo que podemos mirar ({@code CardNode}). */
+    public static Iterable<PlayerView> localViewers() {
+        return localViewers;
+    }
+
+    private static CardStateView otherFace(final CardView card) {
+        if (card == null) {
+            return null;
+        }
+        // Boca abajo y NO nuestra: el motor no protege esto por su cuenta
+        // (ver el porque en el javadoc de localViewers), asi que el guardia
+        // va aqui.
+        if (card.isFaceDown() && !card.canFaceDownBeShownToAny(localViewers)) {
+            return null;
+        }
+        try {
+            final CardStateView current = card.getCurrentState();
+            // En una carta partida las dos mitades son "la otra": se ensenya la
+            // que no se este viendo ya.
+            if (card.isSplitCard() && card.hasRightSplitState()) {
+                final CardStateView right = card.getRightSplitState();
+                return right != null && right != current ? right : card.getLeftSplitState();
+            }
+            final CardStateView alt = card.getAlternateState();
+            return alt != null && alt != current ? alt : null;
+        } catch (final RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static Region otherFaceBlock(final CardView card, final double width) {
+        final CardStateView face = otherFace(card);
+        if (face == null) {
+            return null;
+        }
+        // Una criatura que SE PREPARA tiene su propio bloque: su hechizo no es
+        // "la otra cara", y ademas ya se lee entero en la carta grande.
+        if (isPreparedCard(card)) {
+            return preparedBlock(card, width);
+        }
+        final VBox box = new VBox(6);
+        final Label title = new Label(NeoText.get("zoom.otherFace"));
+        title.getStyleClass().add("zoom-head");
+        UiScale.fixedFont(title, 12);
+
+        final double w = width * 0.72;
+        final CardNode node = new CardNode(w);
+        node.setRotationEnabled(false);
+        node.setHoverEnabled(false);
+        node.setBadgesVisible(false);
+        node.setCountersVisible(false);
+        node.setFace(card, face);
+
+        final Label name = new Label(CardText.nameOf(face));
+        name.getStyleClass().addAll("zoom-line", "zoom-dim");
+        UiScale.fixedFont(name, 13);
+        name.setWrapText(true);
+        name.setMaxWidth(width);
+
+        box.getChildren().addAll(title, node, name);
+        box.setAlignment(Pos.TOP_LEFT);
+        return box;
+    }
+
+    /**
+     * El hechizo de una criatura que <b>se prepara</b>, y como lanzarlo.
+     *
+     * <p><b>Sin repetir la carta.</b> Estas 54 se imprimen con el hechizo en un
+     * recuadro al lado del texto, o sea que la carta grande de la izquierda ya
+     * lo ensenya entero y legible: poner al lado una miniatura de la MISMA
+     * carta no anyade nada y encima obliga a leerla dos veces.
+     *
+     * <p>Y sin el nombre suelto, que ademas saldria <b>en ingles</b>: Forge
+     * traduce los nombres de carta desde {@code res/languages/cardnames-*.txt}
+     * y ahi solo esta la criatura, no su cara de hechizo. En la imagen de la
+     * carta si sale traducido, porque es la impresion de Scryfall en tu idioma
+     * — asi que un rotulo en ingles justo debajo de esa imagen se lee como un
+     * fallo nuestro.
+     *
+     * <p>Lo que si hace falta es lo unico que no esta impreso: si esta
+     * preparada <b>ahora</b> y que hay que hacer para lanzarlo.
+     */
+    private static Region preparedBlock(final CardView card, final double width) {
+        final VBox box = new VBox(6);
+        final Label title = new Label(NeoText.get("zoom.preparedSpell"));
+        title.getStyleClass().add("zoom-head");
+        UiScale.fixedFont(title, 12);
+
+        final boolean ready = card.getPreparedSpell() != null;
+        final Label how = new Label(NeoText.get(
+                ready ? "zoom.preparedNow" : "zoom.preparedNot"));
+        how.getStyleClass().addAll("zoom-line", ready ? "zoom-ready" : "zoom-dim");
+        UiScale.fixedFont(how, 13);
+        how.setWrapText(true);
+        how.setMaxWidth(width);
+        how.setMinHeight(Region.USE_PREF_SIZE);
+
+        box.getChildren().addAll(title, how);
+        box.setAlignment(Pos.TOP_LEFT);
+        return box;
+    }
+
+    /**
+     * Si esta carta lleva un hechizo dentro que se lanza <b>preparandose</b>.
+     *
+     * <p>Estructural a proposito: {@code hasPreparedSpell()} mira si la carta
+     * TIENE cara de hechizo, no si esta preparada ahora. Es lo que hace falta
+     * para rotular: en la mano o en el catalogo no hay nada preparado y la cara
+     * de al lado sigue sin ser "la otra cara".
+     */
+    private static boolean isPreparedCard(final CardView card) {
+        try {
+            return card != null && card.hasPreparedSpell();
+        } catch (final RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** La P/T de ahora, y debajo la impresa cuando no coinciden. */
+    private static Region ptBlock(final CardView card, final CardStateView st) {
+        final VBox box = new VBox(2);
+        final int pow = st.getPower();
+        final int tou = st.getToughness();
+        final Label now = new Label(pow + "/" + tou);
+        now.getStyleClass().add("zoom-pt");
+        UiScale.fixedFont(now, 30);
+
+        final int[] printed = CardNode.printedPowerToughness(st);
+        final boolean up = printed != null && (pow > printed[0] || tou > printed[1]);
+        final boolean down = printed != null && (pow < printed[0] || tou < printed[1]);
+        now.pseudoClassStateChanged(BUFFED, up && !down);
+        now.pseudoClassStateChanged(WEAKENED, down);
+        box.getChildren().add(now);
+
+        if (printed != null && (printed[0] != pow || printed[1] != tou)) {
+            final Label was = new Label(NeoText.get("zoom.printed",
+                    printed[0] + "/" + printed[1]));
+            was.getStyleClass().addAll("zoom-line", "zoom-dim");
+            UiScale.fixedFont(was, 13);
+            box.getChildren().add(was);
+        }
+        if (card.getDamage() > 0 && card.getLethalDamage() <= 0) {
+            final Label lethal = new Label(NeoText.get("zoom.lethal"));
+            lethal.getStyleClass().addAll("zoom-line", "zoom-damage");
+            UiScale.fixedFont(lethal, 13);
+            box.getChildren().add(lethal);
+        }
+        return box;
+    }
+
+    private static final javafx.css.PseudoClass BUFFED =
+            javafx.css.PseudoClass.getPseudoClass("buffed");
+    private static final javafx.css.PseudoClass WEAKENED =
+            javafx.css.PseudoClass.getPseudoClass("weakened");
+
+    /**
+     * Los contadores, con el color y el nombre que dice el motor.
+     *
+     * <p>El {@code CounterType} trae los dos, asi que no hay lista fija: un
+     * contador raro sale igual de bien que un +1/+1.
+     */
+    private static Region countersBlock(final CardView card) {
+        final Multiset<CounterType> all = card.getCounters();
+        if (all == null || all.isEmpty()) {
+            return null;
+        }
+        final FlowPane flow = new FlowPane(6, 6);
+        final List<CounterType> types = new ArrayList<>(all.elementSet());
+        types.sort(Comparator.comparing(CounterType::getName));
+        for (final CounterType t : types) {
+            final Label pill = new Label(t.getCounterOnCardDisplayName() + "  x" + all.count(t));
+            pill.getStyleClass().add("zoom-counter");
+            final Color bg = Color.rgb(t.getRed(), t.getGreen(), t.getBlue());
+            pill.setStyle("-fx-background-color:" + web(bg) + ";"
+                    + "-fx-text-fill:" + (luminance(bg) > 0.55 ? "#101418" : "white") + ";");
+                    UiScale.fixedFont(pill, 13);
+            flow.getChildren().add(pill);
+        }
+        return flow;
+    }
+
+    /**
+     * Lo que lleva encima: auras, equipo, fortificaciones.
+     *
+     * <p>Aqui se ven a tamanyo de LEER, que es lo que en la mesa no cabe. Da
+     * igual de quien sean: el motor publica lo enganchado a una carta lo
+     * controle quien lo controle.
+     */
+    private static Region attachedBlock(final CardView card, final double width) {
+        final java.util.Collection<CardView> on = card.getAttachedCards();
+        if (on == null || on.isEmpty()) {
+            return null;
+        }
+        final VBox box = new VBox(6);
+        final Label title = new Label(NeoText.get("zoom.attached"));
+        title.getStyleClass().add("zoom-head");
+        UiScale.fixedFont(title, 12);
+        box.getChildren().add(title);
+
+        final FlowPane flow = new FlowPane(8, 8);
+        // Que salte de linea al ancho de la ficha: sin esto el FlowPane se
+        // quedaba con su ancho por defecto y las ponia una debajo de otra.
+        flow.setPrefWrapLength(width - 34);
+        // Dos por fila desde la tercera, con un pelo de margen para la barra
+        // de desplazamiento de la ficha. Mas pequenyas no: el nombre de debajo
+        // se partia a media palabra.
+        // El ancho que de verdad queda: el de la ficha menos su relleno y su
+        // borde (.zoom-state: 16 + 16 + 2), el hueco entre las dos (8) y algo
+        // de aire. Con un porcentaje no cabian dos y salian en columna.
+        final double inner = width - 34;
+        final double w = on.size() > 2 ? (inner - 12) / 2 : width * 0.66;
+        for (final CardView cv : on) {
+            final CardNode n = new CardNode(w);
+            n.setRotationEnabled(false);
+            n.setHoverEnabled(false);
+            n.setCard(cv);
+            final Label name = new Label(cv.getCurrentState() == null
+                    ? cv.getName() : CardText.nameOf(cv.getCurrentState()));
+            name.getStyleClass().addAll("zoom-line", "zoom-dim");
+            UiScale.fixedFont(name, 13);
+            name.setWrapText(true);
+            name.setMaxWidth(w);
+            final VBox one = new VBox(3, n, name);
+            one.setAlignment(Pos.TOP_CENTER);
+            flow.getChildren().add(one);
+        }
+        box.getChildren().add(flow);
+        return box;
+    }
+
+    private static String web(final Color c) {
+        return String.format("#%02X%02X%02X", (int) (c.getRed() * 255),
+                (int) (c.getGreen() * 255), (int) (c.getBlue() * 255));
+    }
+
+    private static double luminance(final Color c) {
+        return 0.299 * c.getRed() + 0.587 * c.getGreen() + 0.114 * c.getBlue();
+    }
+
+    /**
+     * La carta que tiene el ratón encima ahora mismo, o null si ninguna.
+     *
+     * <p>No hace falta llevar la cuenta del ratón a mano: {@code isHover()} ya
+     * es verdad exactamente en el nodo de debajo del cursor, así que basta con
+     * recorrer el árbol y preguntar. Lo usa el atajo de teclado <b>Z</b> — la
+     * misma ampliación que ya da el click derecho, pero sin soltar el ratón de
+     * donde está.
+     */
+    public static CardNode hoveredCardNode(final javafx.scene.Node root) {
+        if (root == null || !root.isHover()) {
+            return null;
+        }
+        if (root instanceof CardNode) {
+            return (CardNode) root;
+        }
+        if (root instanceof Parent) {
+            for (final Node child : ((Parent) root).getChildrenUnmodifiable()) {
+                final CardNode found = hoveredCardNode(child);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static CardNode cardNodeAt(final Object target) {
+        Node n = target instanceof Node ? (Node) target : null;
+        while (n != null) {
+            if (n instanceof CardNode cn) {
+                return cn;
+            }
+            n = n.getParent();
+        }
+        return null;
+    }
+
+    /**
+     * Si el click ha caido sobre un control de verdad (boton, scroll...) en
+     * vez de sobre la carta o el hueco vacio de alrededor.
+     *
+     * <p>Lo usa {@code Layer} para no cerrarse a si misma cuando el click es
+     * en realidad para el boton "Ver el texto actual" — o cualquier otro
+     * control que {@link #statePanel} anyada en el futuro. Publico porque
+     * {@code TableScreen} tiene su PROPIA capa de ampliacion (la de la mesa
+     * durante una partida) con el mismo filtro de "cerrar con cualquier
+     * click", y por tanto el mismo fallo.
+     */
+    /** Si la rueda cae dentro de un texto que rueda (el "texto actual"): ahi rueda el texto. */
+    private static boolean isInsideScrollPane(final Object target) {
+        for (Node n = target instanceof Node ? (Node) target : null; n != null; n = n.getParent()) {
+            if (n instanceof javafx.scene.control.ScrollPane) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static boolean isInteractiveTarget(final Object target) {
+        Node n = target instanceof Node ? (Node) target : null;
+        while (n != null) {
+            if (n instanceof javafx.scene.control.Control) {
+                return true;
+            }
+            n = n.getParent();
+        }
+        return false;
+    }
+
+    /**
+     * La capa: la pantalla de antes debajo y la carta encima.
+     *
+     * <p>Al cerrarse devuelve la raiz de la escena a como estaba. Se guarda el
+     * estilo de la raiz vieja porque ahi vive la escala de interfaz
+     * ({@code UiScale}): sin copiarlo, ampliar una carta cambiaria el tamanyo
+     * de letra de toda la pantalla.
+     */
+    private static final class Layer extends StackPane {
+        private final Scene scene;
+        private final Parent previous;
+        private final Overlay overlay = new Overlay();
+
+        /**
+         * La pantalla de debajo, del tamanyo de la ventana, como cuando era la
+         * raiz. Un {@code StackPane} respeta el alto MINIMO de sus hijos, y la
+         * del draft (el sobre mas la tira de lo que llevas) pide mas que la
+         * ventana: se centraba y se salia por arriba y por abajo, sin cabecera
+         * ni botones, y su scroll se quedaba movido al cerrar (13-11-2026,
+         * clic derecho en una carta del draft). La escena, en cambio, fuerza a
+         * su raiz al tamanyo de la ventana sin mirar el minimo.
+         */
+        @Override
+        protected void layoutChildren() {
+            super.layoutChildren();
+            previous.resizeRelocate(0, 0, getWidth(), getHeight());
+        }
+
+        Layer(final Scene scene, final Parent previous) {
+            this.scene = scene;
+            this.previous = previous;
+            setStyle(previous.getStyle());
+            overlay.setOnBackgroundClick(this::close);
+            // Un click en CUALQUIER sitio la cierra, y por eso va como filtro y
+            // no como manejador de fondo: el hueco que rodea a la carta lo
+            // ocupa un contenedor sin fondo, y un Region sin fondo no se puede
+            // clicar — ahi el click se perdia y parecia que solo cerraba
+            // clicando encima de la carta.
+            //
+            // EXCEPTO sobre un control de verdad. El "Ver el texto actual" de
+            // Deadpool vive dentro de esta misma capa (statePanel), y un
+            // filtro que consume TODO se adelanta a su propio boton: nunca
+            // llegaba a desplegarse, y cada click lo que hacia era cerrar la
+            // ampliacion entera. Reportado jugando: "el boton de leer el
+            // texto actual cierra la ventana en vez de ensenyarme el texto
+            // robado".
+            overlay.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> {
+                if (isInteractiveTarget(e.getTarget())) {
+                    return;
+                }
+                e.consume();
+                close();
+            });
+            getChildren().addAll(previous, overlay);
+            scene.setRoot(this);
+            // Si se cambia de pantalla con la ampliacion abierta, close() no
+            // llega a correr y el filtro de Escape se quedaba en la escena
+            // agarrado a la pantalla de debajo. Se quita al salir de la
+            // escena, pase lo que pase (la fuga del 25-09-2026).
+            sceneProperty().addListener((o, was, is) -> {
+                if (is == null) {
+                    scene.removeEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, escape);
+                }
+            });
+        }
+
+        private int size;
+        private int index;
+        private java.util.function.IntFunction<CardView> at;
+        /** Ultimo paso de rueda: un trackpad manda decenas de eventos por gesto. */
+        private long lastStep;
+
+        void browse(final int size, final int index,
+                    final java.util.function.IntFunction<CardView> at) {
+            this.size = size;
+            this.index = index;
+            this.at = at;
+            // Prueba sin raton: -Dneo.zoom.step=N avanza N cartas, como N
+            // pasos de rueda (ver la guía de pruebas).
+            final int steps = Integer.getInteger("neo.zoom.step", 0);
+            this.index = Math.max(0, Math.min(size - 1, index + steps));
+            showCurrent();
+            // Escape cierra, igual que en la mesa. Se quita antes de poner
+            // para no acumular uno por ampliacion, y al cerrar del todo.
+            scene.removeEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, escape);
+            scene.addEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, escape);
+        }
+
+        private void showCurrent() {
+            final CardView card = at.apply(index);
+            final Region big = compose(card, widthFor(scene.getHeight() * (size > 1 ? 0.95 : 1)),
+                    scene.getWidth(), null);
+            if (size <= 1) {
+                overlay.show(big);
+                return;
+            }
+            final Label hint = new Label(NeoText.get("zoom.browse", index + 1, size));
+            hint.getStyleClass().add("zoom-browse-hint");
+            hint.setMouseTransparent(true);
+            final VBox box = new VBox(8, big, hint);
+            box.setAlignment(Pos.CENTER);
+            box.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+            overlay.show(box);
+        }
+
+        /** Pasa a la siguiente (+1) o la anterior (-1). Sin dar la vuelta: al final se queda. */
+        private void step(final int delta) {
+            final int next = index + delta;
+            if (next < 0 || next >= size) {
+                return;
+            }
+            index = next;
+            showCurrent();
+        }
+
+        {
+            addEventFilter(javafx.scene.input.ScrollEvent.SCROLL, e -> {
+                if (size <= 1 || e.getDeltaY() == 0 || isInsideScrollPane(e.getTarget())) {
+                    return;
+                }
+                e.consume();
+                final long now = System.currentTimeMillis();
+                if (now - lastStep < 90) {
+                    return;
+                }
+                lastStep = now;
+                step(e.getDeltaY() < 0 ? 1 : -1);
+            });
+        }
+
+        private final javafx.event.EventHandler<javafx.scene.input.KeyEvent> escape = e -> {
+            if (e.getCode() == KeyCode.ESCAPE) {
+                e.consume();
+                close();
+            } else if (size > 1 && (e.getCode() == KeyCode.RIGHT || e.getCode() == KeyCode.DOWN)) {
+                e.consume();
+                step(1);
+            } else if (size > 1 && (e.getCode() == KeyCode.LEFT || e.getCode() == KeyCode.UP)) {
+                e.consume();
+                step(-1);
+            }
+        };
+
+        private void close() {
+            scene.removeEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, escape);
+            overlay.hide();
+            getChildren().remove(previous);
+            scene.setRoot(previous);
+        }
+    }
+}

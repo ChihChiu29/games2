@@ -1,0 +1,972 @@
+package forge.neo.ui;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+
+import forge.neo.NeoText;
+import forge.neo.look.LookItem;
+import forge.neo.look.NeoLook;
+import forge.neo.look.NeoMusic;
+import forge.sound.MusicPlaylist;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
+import javafx.scene.control.ScrollPane;
+import javafx.scene.control.TextField;
+import javafx.scene.image.Image;
+import javafx.scene.image.ImageView;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.FlowPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
+import javafx.scene.layout.VBox;
+import javafx.stage.FileChooser;
+
+/**
+ * Personalizacion: tu nombre y tu cara, los rivales, el tapete, las fundas y
+ * la musica.
+ *
+ * <p>Todo lo que se ve aqui se elige de una <b>rejilla que mezcla lo que trae
+ * Forge con lo que hayas traido tu</b>, sin distinguirlos: lo importado va
+ * primero — si te has molestado en traerlo, no puede quedar sepultado detras de
+ * ciento veintiseis — y de ahi para abajo, los de fabrica.
+ *
+ * <p>El modelo esta en {@link NeoLook} y {@link NeoMusic}; aqui solo se pinta.
+ *
+ * <p><b>Importar copia el fichero.</b> Se dice en la propia pantalla, porque es
+ * lo que evita la pregunta de "¿y si borro el PNG de Descargas?".
+ */
+public class LookScreen extends BorderPane {
+
+    /** Que pestanya se estaba mirando, para volver a ella. */
+    private static int lastTab;
+
+    private final Runnable onBack;
+    private final VBox content = new VBox(12);
+    private final HBox tabs = new HBox(6);
+    private final List<Button> tabButtons = new ArrayList<>();
+
+    /** Se avisa al salir por si hay que repintar la mesa (el tapete). */
+    private final Runnable onChanged;
+
+    public LookScreen(final Runnable onBack, final Runnable onChanged) {
+        this.onBack = onBack;
+        this.onChanged = onChanged;
+        getStyleClass().addAll("table-root", "home");
+
+        final Label title = new Label(NeoText.get("look.title"));
+        title.getStyleClass().add("home-title");
+        final Label sub = new Label(NeoText.get("look.subtitle"));
+        sub.getStyleClass().add("home-subtitle");
+
+        final VBox titles = new VBox(2, title, sub);
+        titles.setAlignment(Pos.CENTER_LEFT);
+
+        final Region gap = new Region();
+        HBox.setHgrow(gap, Priority.ALWAYS);
+        final HBox header = new HBox(14, titles, gap);
+        header.setAlignment(Pos.CENTER_LEFT);
+        header.setPadding(new Insets(22, 30, 6, 30));
+
+        tabs.setPadding(new Insets(0, 30, 8, 30));
+        tabs.setAlignment(Pos.CENTER_LEFT);
+        addTab(NeoText.get("look.tab.profile"), this::buildProfile);
+        addTab(NeoText.get("look.tab.rivals"), this::buildRivals);
+        addTab(NeoText.get("look.tab.playmat"), this::buildPlaymats);
+        addTab(NeoText.get("look.tab.sleeves"), this::buildSleeves);
+        addTab(NeoText.get("look.tab.music"), this::buildMusic);
+
+        setTop(new VBox(header, tabs));
+
+        content.setPadding(new Insets(4, 30, 24, 30));
+        setCenter(content);
+        // Volver, abajo a la derecha: el mismo sitio en todas las pantallas
+        // (las notas de diseño, principio 12). Antes iba en la cabecera.
+        setBottom(BackBar.of(onBack));
+
+        // -Dneo.look.tab=N abre una pestanya concreta: es la unica forma de
+        // capturar las de dentro sin poder clicar.
+        final int forced = Integer.getInteger("neo.look.tab", -1);
+        select(forced >= 0 ? Math.min(forced, tabButtons.size() - 1)
+                : Math.min(lastTab, tabButtons.size() - 1));
+    }
+
+    // ---------------------------------------------------------------
+    // Pestanyas
+    // ---------------------------------------------------------------
+
+    private final List<Runnable> builders = new ArrayList<>();
+
+    private void addTab(final String label, final Runnable builder) {
+        final int index = tabButtons.size();
+        final Button b = new Button(label);
+        b.getStyleClass().add("segment");
+        b.setMinWidth(Region.USE_PREF_SIZE);
+        b.setOnAction(e -> select(index));
+        tabButtons.add(b);
+        builders.add(builder);
+        tabs.getChildren().add(b);
+    }
+
+    private void select(final int index) {
+        lastTab = Math.max(0, index);
+        for (int i = 0; i < tabButtons.size(); i++) {
+            tabButtons.get(i).pseudoClassStateChanged(SELECTED, i == lastTab);
+        }
+        content.getChildren().clear();
+        builders.get(lastTab).run();
+    }
+
+    /** Lo ultimo que no se pudo hacer con la musica, para poder decirlo. */
+    private String musicProblem;
+
+    private static final javafx.css.PseudoClass SELECTED =
+            javafx.css.PseudoClass.getPseudoClass("selected");
+
+    private static final javafx.css.PseudoClass PICKED =
+            javafx.css.PseudoClass.getPseudoClass("picked");
+
+    // ---------------------------------------------------------------
+    // 1. Perfil: tu nombre y tu cara
+    // ---------------------------------------------------------------
+
+    private void buildProfile() {
+        final TextField name = new TextField(NeoLook.playerName());
+        name.setPromptText(NeoText.get("look.name.hint"));
+        name.getStyleClass().add("text-input");
+        name.setPrefColumnCount(18);
+        name.textProperty().addListener((o, was, is) -> NeoLook.setPlayerName(is));
+
+        final HBox nameRow = new HBox(12, caption(NeoText.get("look.name")), name);
+        nameRow.setAlignment(Pos.CENTER_LEFT);
+
+        content.getChildren().addAll(nameRow,
+                caption(NeoText.get("look.avatar")),
+                picker(NeoLook.avatars(), NeoLook.AVATAR, 74, true,
+                        NeoLook.avatarsDir(), NeoText.get("look.avatar.size")));
+    }
+
+    // ---------------------------------------------------------------
+    // 2. Rivales
+    // ---------------------------------------------------------------
+
+    /**
+     * Los nombres de las IAs.
+     *
+     * <p>Se ensenyan cuatro huecos porque Commander se juega hasta a cuatro y
+     * el numero de rivales se elige en otra pantalla: rellenar solo los que hay
+     * ahora obligaria a volver aqui cada vez que cambias de partida.
+     */
+    private void buildRivals() {
+        final Label hint = new Label(NeoText.get("look.rivals.hint"));
+        hint.getStyleClass().add("home-subtitle");
+        hint.setWrapText(true);
+        hint.setMaxWidth(UiScale.px(620));
+        hint.setMinHeight(Region.USE_PREF_SIZE);
+        content.getChildren().add(hint);
+
+        content.getChildren().add(nameModeRow());
+
+        final Label aiHint = new Label(NeoText.get("look.rivals.aiHint"));
+        aiHint.getStyleClass().add("home-subtitle");
+        aiHint.setWrapText(true);
+        aiHint.setMaxWidth(UiScale.px(820));
+        aiHint.setMinHeight(Region.USE_PREF_SIZE);
+        content.getChildren().add(aiHint);
+
+        // Cada rival: su cara, su nombre y su forma de jugar (RivalSetup).
+        // Pedido en Discord el 02-10-2026: "profile pic, separate ai types for
+        // each rival, ai mode pool it can shuffle through".
+        final List<TextField> fields = new ArrayList<>();
+        final List<String> saved = NeoLook.aiNames();
+        final VBox rows = new VBox(8);
+        for (int i = 0; i < forge.neo.look.RivalSetup.SEATS; i++) {
+            final int rival = i;
+            final TextField f = new TextField(i < saved.size() ? saved.get(i) : "");
+            f.getStyleClass().add("text-input");
+            f.setPrefColumnCount(14);
+            f.setPromptText(NeoText.get("look.rivals.empty"));
+            fields.add(f);
+
+            final Label who = caption(NeoText.get("look.rival", i + 1));
+            who.setMinWidth(UiScale.px(70));
+            final HBox row = new HBox(12, who, rivalFaceButton(rival), rivalSleeveButton(rival), f,
+                    caption(NeoText.get("look.rivals.ai")), rivalAiChoice(rival));
+            row.setAlignment(Pos.CENTER_LEFT);
+            rows.getChildren().add(row);
+            // La rejilla de caras de ESTE rival, si esta abierta: justo debajo
+            // de su fila, para que se vea a quien se le esta poniendo.
+            if (openFaceRival == rival) {
+                rows.getChildren().add(rivalFaceGrid(rival));
+            }
+            if (openSleeveRival == rival) {
+                rows.getChildren().add(rivalSleeveGrid(rival));
+            }
+        }
+        content.getChildren().add(rows);
+        content.getChildren().add(poolRow());
+        content.getChildren().add(aiImportRow());
+
+        final Runnable save = () -> {
+            final List<String> names = new ArrayList<>();
+            for (final TextField f : fields) {
+                names.add(f.getText());
+            }
+            NeoLook.setAiNames(names);
+        };
+        for (final TextField f : fields) {
+            f.textProperty().addListener((o, was, is) -> save.run());
+        }
+
+        // Vaciarlos todos: la proxima partida vuelve a sortear nombres.
+        final Button clear = new Button(NeoText.get("look.rivals.reroll"));
+        clear.getStyleClass().add("btn-secondary");
+        clear.setMinWidth(Region.USE_PREF_SIZE);
+        clear.setOnAction(e -> {
+            for (final TextField f : fields) {
+                f.setText("");
+            }
+            NeoLook.setAiNames(List.of());
+            select(1);
+        });
+        content.getChildren().add(clear);
+    }
+
+    /**
+     * El rival cuya rejilla de caras esta abierta, o -1. Solo una a la vez.
+     * {@code -Dneo.look.rivalFace=N} la abre de salida, para capturarla.
+     */
+    private int openFaceRival = Integer.getInteger("neo.look.rivalFace", -1);
+
+    private static final double FACE_1080 = 40;
+
+    /** La cara del rival, redonda; al clicarla se abre (o se cierra) su rejilla. */
+    private Region rivalFaceButton(final int rival) {
+        final double size = UiScale.px(FACE_1080);
+        final StackPane face = new StackPane();
+        face.getStyleClass().add("look-tile");
+        face.setPrefSize(size, size);
+        face.setMinSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+        face.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+        face.pseudoClassStateChanged(PICKED, openFaceRival == rival);
+        final LookItem chosen = NeoLook.avatarById(forge.neo.look.RivalSetup.avatar(rival));
+        // Sin cara elegida sale la que le da la partida de siempre (la del
+        // hueco N de la hoja, ver NeoPlayers.ai), apagada: se ve que es
+        // automatica y se ve cual es.
+        final LookItem shown = chosen != null ? chosen : NeoLook.builtInAvatar(rival);
+        final Image image = shown == null ? null : shown.image();
+        if (image != null) {
+            final ImageView view = new ImageView(image);
+            view.setFitWidth(size - 4);
+            view.setFitHeight(size - 4);
+            view.setClip(new javafx.scene.shape.Circle((size - 4) / 2, (size - 4) / 2, (size - 4) / 2));
+            view.setOpacity(chosen != null ? 1 : 0.45);
+            face.getChildren().add(view);
+        } else {
+            final Label q = new Label("?");
+            q.getStyleClass().add("home-subtitle");
+            face.getChildren().add(q);
+        }
+        face.setCursor(javafx.scene.Cursor.HAND);
+        javafx.scene.control.Tooltip.install(face,
+                new javafx.scene.control.Tooltip(NeoText.get("look.rivals.face")));
+        face.setOnMouseClicked(e -> {
+            openFaceRival = openFaceRival == rival ? -1 : rival;
+            openSleeveRival = -1;
+            select(lastTab);
+        });
+        return face;
+    }
+
+    /** Las caras para un rival: "la de siempre" y todas las de Personalizar. */
+    private Region rivalFaceGrid(final int rival) {
+        final double size = UiScale.px(56);
+        final FlowPane grid = new FlowPane(8, 8);
+        grid.setAlignment(Pos.TOP_LEFT);
+        final String current = forge.neo.look.RivalSetup.avatar(rival);
+
+        // Sin estilo propio la etiqueta sale casi negra sobre la casilla.
+        final Label auto = new Label(NeoText.get("look.rivals.face.default"));
+        auto.getStyleClass().add("home-subtitle");
+        final StackPane none = new StackPane(auto);
+        none.getStyleClass().add("look-tile");
+        none.setPrefSize(size * 2, size);
+        none.setMinSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+        none.pseudoClassStateChanged(PICKED, current.isEmpty());
+        none.setCursor(javafx.scene.Cursor.HAND);
+        none.setOnMouseClicked(e -> pickRivalFace(rival, ""));
+        grid.getChildren().add(none);
+
+        for (final LookItem item : NeoLook.avatars()) {
+            final StackPane face = new StackPane();
+            face.getStyleClass().add("look-tile");
+            face.setPrefSize(size, size);
+            face.setMinSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+            face.pseudoClassStateChanged(PICKED, item.getId().equals(current));
+            final Image image = item.image();
+            if (image != null) {
+                final ImageView view = new ImageView(image);
+                view.setFitWidth(size - 6);
+                view.setFitHeight(size - 6);
+                view.setClip(new javafx.scene.shape.Circle((size - 6) / 2, (size - 6) / 2, (size - 6) / 2));
+                face.getChildren().add(view);
+            }
+            face.setCursor(javafx.scene.Cursor.HAND);
+            face.setOnMouseClicked(e -> pickRivalFace(rival, item.getId()));
+            grid.getChildren().add(face);
+        }
+
+        final ScrollPane scroll = new ScrollPane(grid);
+        scroll.getStyleClass().add("dialog-scroll");
+        scroll.setFitToWidth(true);
+        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        // Tres filas a la vista: son ciento treinta, y la pestanya tiene que
+        // seguir dejando ver al resto de rivales.
+        scroll.setPrefViewportHeight(size * 3 + 24);
+
+        final Label hint = new Label(NeoText.get("look.rivals.face.hint"));
+        hint.getStyleClass().add("home-subtitle");
+        hint.setWrapText(true);
+        hint.setMaxWidth(UiScale.px(820));
+        hint.setMinHeight(Region.USE_PREF_SIZE);
+        final VBox box = new VBox(6, scroll, hint);
+        box.setPadding(new Insets(0, 0, 6, UiScale.px(82)));
+        return box;
+    }
+
+    /**
+     * El rival cuya rejilla de fundas esta abierta, o -1. Una sola rejilla
+     * abierta a la vez, contando la de caras. {@code -Dneo.look.rivalSleeve=N}
+     * la abre de salida, para capturarla.
+     */
+    private int openSleeveRival = Integer.getInteger("neo.look.rivalSleeve", -1);
+
+    /**
+     * La funda del rival (Discord, 06-11-2026: <i>"fixed sleeves for each AI
+     * rival"</i>), con forma de carta; al clicarla se abre su rejilla. Sin
+     * elegir sale un "?": el motor le sortea una en cada partida.
+     */
+    private Region rivalSleeveButton(final int rival) {
+        final double h = UiScale.px(FACE_1080);
+        final double w = Math.round(h * 5 / 7);
+        final StackPane tile = new StackPane();
+        tile.getStyleClass().add("look-tile");
+        tile.setPrefSize(w, h);
+        tile.setMinSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+        tile.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+        tile.pseudoClassStateChanged(PICKED, openSleeveRival == rival);
+        final LookItem chosen = NeoLook.sleeveById(forge.neo.look.RivalSetup.sleeve(rival));
+        final Image image = chosen == null ? null : chosen.image();
+        if (image != null) {
+            final ImageView view = new ImageView(image);
+            view.setFitWidth(w - 4);
+            view.setFitHeight(h - 4);
+            tile.getChildren().add(view);
+        } else {
+            final Label q = new Label("?");
+            q.getStyleClass().add("home-subtitle");
+            tile.getChildren().add(q);
+        }
+        tile.setCursor(javafx.scene.Cursor.HAND);
+        javafx.scene.control.Tooltip.install(tile,
+                new javafx.scene.control.Tooltip(NeoText.get("look.rivals.sleeve")));
+        tile.setOnMouseClicked(e -> {
+            openSleeveRival = openSleeveRival == rival ? -1 : rival;
+            openFaceRival = -1;
+            select(lastTab);
+        });
+        return tile;
+    }
+
+    /** Las fundas para un rival: "al azar" y todas las de Personalizar. */
+    private Region rivalSleeveGrid(final int rival) {
+        final double h = UiScale.px(70);
+        final double w = Math.round(h * 5 / 7);
+        final FlowPane grid = new FlowPane(8, 8);
+        grid.setAlignment(Pos.TOP_LEFT);
+        final String current = forge.neo.look.RivalSetup.sleeve(rival);
+
+        final Label random = new Label(NeoText.get("look.rivals.sleeve.default"));
+        random.getStyleClass().add("home-subtitle");
+        final StackPane none = new StackPane(random);
+        none.getStyleClass().add("look-tile");
+        none.setPrefSize(w * 2, h);
+        none.setMinSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+        none.pseudoClassStateChanged(PICKED, current.isEmpty());
+        none.setCursor(javafx.scene.Cursor.HAND);
+        none.setOnMouseClicked(e -> pickRivalSleeve(rival, ""));
+        grid.getChildren().add(none);
+
+        for (final LookItem item : NeoLook.sleeves()) {
+            final StackPane tile = new StackPane();
+            tile.getStyleClass().add("look-tile");
+            tile.setPrefSize(w, h);
+            tile.setMinSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+            tile.pseudoClassStateChanged(PICKED, item.getId().equals(current));
+            final Image image = item.image();
+            if (image != null) {
+                final ImageView view = new ImageView(image);
+                view.setFitWidth(w - 6);
+                view.setFitHeight(h - 6);
+                tile.getChildren().add(view);
+            }
+            tile.setCursor(javafx.scene.Cursor.HAND);
+            tile.setOnMouseClicked(e -> pickRivalSleeve(rival, item.getId()));
+            grid.getChildren().add(tile);
+        }
+
+        final ScrollPane scroll = new ScrollPane(grid);
+        scroll.getStyleClass().add("dialog-scroll");
+        scroll.setFitToWidth(true);
+        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        scroll.setPrefViewportHeight(h * 2 + 16);
+        // Sin esto la pestanya la aplasta a media fila (la de caras cabe por
+        // poco; las fundas, mas altas, no).
+        scroll.setMinHeight(Region.USE_PREF_SIZE);
+
+        final Label hint = new Label(NeoText.get("look.rivals.sleeve.hint"));
+        hint.getStyleClass().add("home-subtitle");
+        hint.setWrapText(true);
+        hint.setMaxWidth(UiScale.px(820));
+        hint.setMinHeight(Region.USE_PREF_SIZE);
+        final VBox box = new VBox(6, scroll, hint);
+        box.setPadding(new Insets(0, 0, 6, UiScale.px(82)));
+        return box;
+    }
+
+    private void pickRivalSleeve(final int rival, final String id) {
+        forge.neo.look.RivalSetup.setSleeve(rival, id);
+        openSleeveRival = -1;
+        select(lastTab);
+    }
+
+    private void pickRivalFace(final int rival, final String id) {
+        forge.neo.look.RivalSetup.setAvatar(rival, id);
+        openFaceRival = -1;
+        select(lastTab);
+    }
+
+    /**
+     * La forma de jugar de un rival: la general, uno de los cuatro, al azar o,
+     * en otra fila, uno de los perfiles del jugador.
+     */
+    private Region rivalAiChoice(final int rival) {
+        final List<String> values = new ArrayList<>();
+        values.add("");
+        values.addAll(java.util.Arrays.asList(forge.neo.look.RivalSetup.PROFILES));
+        values.add(forge.neo.look.RivalSetup.RANDOM);
+        final String current = forge.neo.look.RivalSetup.mode(rival);
+        final VBox lines = new VBox(4);
+        final List<Button> buttons = new ArrayList<>();
+        for (final List<String> rowValues : HomeScreen.aiRows(values)) {
+            final HBox row = new HBox(4);
+            for (final String v : rowValues) {
+                final Button b = new Button(aiLabel(v));
+                b.getStyleClass().add("segment");
+                b.setMinWidth(Region.USE_PREF_SIZE);
+                b.pseudoClassStateChanged(SELECTED, v.equals(current));
+                b.setOnAction(e -> {
+                    forge.neo.look.RivalSetup.setMode(rival, v);
+                    for (final Button other : buttons) {
+                        other.pseudoClassStateChanged(SELECTED, other == b);
+                    }
+                });
+                buttons.add(b);
+                row.getChildren().add(b);
+            }
+            lines.getChildren().add(row);
+        }
+        return lines;
+    }
+
+    /**
+     * Como se llaman en la partida: estos, al azar en cada una o el de su
+     * comandante (Discord, 30-10-2026). Ver {@code NeoPlayers.nameInGame}.
+     */
+    private Region nameModeRow() {
+        final String[] values = {forge.neo.NeoSettings.AI_NAMES_SAVED,
+                forge.neo.NeoSettings.AI_NAMES_RANDOM, forge.neo.NeoSettings.AI_NAMES_COMMANDER};
+        final String current = forge.neo.NeoSettings.aiNames();
+        final HBox row = new HBox(4);
+        row.setAlignment(Pos.CENTER_LEFT);
+        final Label label = caption(NeoText.get("look.rivals.names"));
+        label.setMinWidth(Region.USE_PREF_SIZE);
+        final HBox gap = new HBox();
+        gap.setMinWidth(UiScale.px(8));
+        row.getChildren().addAll(label, gap);
+        final List<Button> buttons = new ArrayList<>();
+        for (final String v : values) {
+            final Button b = new Button(NeoText.get("look.rivals.names." + v));
+            b.getStyleClass().add("segment");
+            b.setMinWidth(Region.USE_PREF_SIZE);
+            b.pseudoClassStateChanged(SELECTED, v.equals(current));
+            b.setOnAction(e -> {
+                forge.neo.NeoSettings.set(forge.neo.NeoSettings.AI_NAMES, v);
+                forge.neo.NeoSettings.save();
+                for (final Button other : buttons) {
+                    other.pseudoClassStateChanged(SELECTED, other == b);
+                }
+            });
+            buttons.add(b);
+            row.getChildren().add(b);
+        }
+        final Label note = new Label(NeoText.get("look.rivals.names.note"));
+        note.getStyleClass().add("home-subtitle");
+        note.setWrapText(true);
+        note.setMaxWidth(UiScale.px(820));
+        note.setMinHeight(Region.USE_PREF_SIZE);
+        return new VBox(6, row, note);
+    }
+
+    /** "La general", "Al azar" o el nombre del perfil de Forge. */
+    static String aiLabel(final String value) {
+        if (value == null || value.isEmpty()) {
+            return NeoText.get("look.rivals.ai.general");
+        }
+        if (forge.neo.look.RivalSetup.RANDOM.equals(value)) {
+            return NeoText.get("look.rivals.ai.random");
+        }
+        return value;
+    }
+
+    /**
+     * La IA que dice el resumen de la pantalla de mazos. Si algun rival de los
+     * que se van a sentar lleva la suya, se dice: si no, la linea diria "IA
+     * Default" en una partida donde quiza nadie juega con Default.
+     */
+    static String aiSummary(final String general, final int opponents) {
+        for (int i = 0; i < opponents; i++) {
+            if (!forge.neo.look.RivalSetup.mode(i).isEmpty()) {
+                return NeoText.get("look.rivals.ai.someOwn", aiLabel(general));
+            }
+        }
+        return aiLabel(general);
+    }
+
+    /**
+     * Entre que perfiles se sortea "Al azar". Al menos uno siempre marcado.
+     * Aqui salen todos una vez, asi que es tambien donde se quita uno del
+     * jugador: clic derecho, como sus avatares y sus tapetes.
+     */
+    private Region poolRow() {
+        final List<String> pool = new ArrayList<>(forge.neo.look.RivalSetup.pool());
+        final VBox lines = new VBox(4);
+        for (final List<String> rowValues : HomeScreen.aiRows(
+                java.util.Arrays.asList(forge.neo.look.RivalSetup.PROFILES))) {
+            final HBox row = new HBox(4);
+            for (final String p : rowValues) {
+                final Button b = new Button(p);
+                b.getStyleClass().add("segment");
+                b.setMinWidth(Region.USE_PREF_SIZE);
+                b.pseudoClassStateChanged(SELECTED, pool.contains(p));
+                if (forge.neo.look.AiProfiles.isCustom(p)) {
+                    b.setOnMouseClicked(e -> {
+                        if (e.getButton() == javafx.scene.input.MouseButton.SECONDARY
+                                && forge.neo.look.AiProfiles.delete(p)) {
+                            aiStatus = NeoText.get("look.rivals.aiImport.removed", p);
+                            select(lastTab);
+                        }
+                    });
+                }
+                b.setOnAction(e -> {
+                    if (pool.contains(p)) {
+                        // El pozo no se puede quedar vacio: no habria entre que
+                        // sortear. El ultimo marcado no se desmarca.
+                        if (pool.size() > 1) {
+                            pool.remove(p);
+                        }
+                    } else {
+                        pool.add(p);
+                    }
+                    forge.neo.look.RivalSetup.setPool(pool);
+                    b.pseudoClassStateChanged(SELECTED, pool.contains(p));
+                });
+                row.getChildren().add(b);
+            }
+            lines.getChildren().add(row);
+        }
+        final HBox line = new HBox(12, caption(NeoText.get("look.rivals.pool")), lines);
+        line.setAlignment(Pos.TOP_LEFT);
+        line.setPadding(new Insets(6, 0, 0, 0));
+        return line;
+    }
+
+    /**
+     * Lo que dijo la ultima importacion (o el ultimo perfil quitado). Estatico
+     * porque importar rehace la pestanya entera ({@link #select}) y el aviso
+     * tiene que salir en la nueva.
+     */
+    private static String aiStatus;
+
+    /**
+     * Traer un perfil de IA de Forge (un {@code .ai}). Pedido en Discord el
+     * 14-10-2026: se habia dejado uno en la carpeta y "no aparece en la lista".
+     * Se copia ya limpio a los datos del jugador ({@link forge.neo.look.AiProfiles}),
+     * y desde ese momento sale en el menu, en cada rival y en el pozo.
+     */
+    private Region aiImportRow() {
+        final Button bring = new Button(NeoText.get("look.rivals.aiImport"));
+        bring.getStyleClass().add("btn-secondary");
+        bring.setMinWidth(Region.USE_PREF_SIZE);
+        bring.setOnAction(e -> {
+            final File chosen = choose(NeoText.get("look.choose.ai"),
+                    new FileChooser.ExtensionFilter(NeoText.get("look.filter.ai"), "*.ai", "*.txt"));
+            if (chosen == null) {
+                return;
+            }
+            aiStatus = importAi(chosen);
+            select(lastTab);
+        });
+
+        final Label hint = new Label(NeoText.get("look.rivals.aiImport.hint"));
+        hint.getStyleClass().add("home-subtitle");
+        hint.setWrapText(true);
+        hint.setMaxWidth(UiScale.px(820));
+        hint.setMinHeight(Region.USE_PREF_SIZE);
+
+        final VBox text = new VBox(4, hint);
+        if (aiStatus != null) {
+            final Label status = new Label(aiStatus);
+            status.getStyleClass().add("caption");
+            status.setWrapText(true);
+            status.setMaxWidth(UiScale.px(820));
+            status.setMinHeight(Region.USE_PREF_SIZE);
+            text.getChildren().add(status);
+            aiStatus = null;
+        }
+        final HBox line = new HBox(14, bring, text);
+        line.setAlignment(Pos.CENTER_LEFT);
+        line.setPadding(new Insets(6, 0, 0, 0));
+        return line;
+    }
+
+    /** Importa y devuelve lo que hay que decirle al jugador. */
+    static String importAi(final File chosen) {
+        try {
+            final forge.neo.look.AiProfiles.Imported r = forge.neo.look.AiProfiles.importFile(chosen);
+            if (r.name == null) {
+                return NeoText.get("look.rivals.aiImport.bad");
+            }
+            if (r.skipped.isEmpty()) {
+                return NeoText.get("look.rivals.aiImport.ok", r.name, r.settings);
+            }
+            return NeoText.get("look.rivals.aiImport.skipped", r.name, r.settings,
+                    r.skipped.size(), r.skipped.get(0));
+        } catch (final java.io.IOException | RuntimeException ex) {
+            System.err.println("[neo] no se ha podido importar el perfil de IA " + chosen + ": " + ex);
+            return NeoText.get("look.rivals.aiImport.bad");
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // 3. Tapete
+    // ---------------------------------------------------------------
+
+    private void buildPlaymats() {
+        content.getChildren().add(picker(NeoLook.playmats(), NeoLook.PLAYMAT, 150, false,
+                NeoLook.playmatsDir(), NeoText.get("look.playmat.size")));
+    }
+
+    // ---------------------------------------------------------------
+    // 4. Fundas
+    // ---------------------------------------------------------------
+    //
+    // Durante un tiempo esta pestanya NO estuvo, y por un motivo bueno: una
+    // funda solo se ve en el reverso de una carta boca abajo, y la mesa no
+    // pintaba ninguna. Un ajuste que no cambia nada de lo que ves es peor que
+    // no tenerlo (principio 1).
+    //
+    // Ya no es asi: el cementerio y el exilio de la mesa se pintan con la
+    // funda de su duenyo (TableBinder.sleeveOf -> PlayerField.setSleeveImage),
+    // y el motor le reparte una a cada IA (PlayerView.getSleeveIndex), asi que
+    // la tuya era la unica que no se podia elegir.
+
+    private void buildSleeves() {
+        final Label hint = new Label(NeoText.get("look.sleeves.hint"));
+        hint.getStyleClass().add("home-subtitle");
+        hint.setWrapText(true);
+        hint.setMaxWidth(UiScale.px(680));
+        hint.setMinHeight(Region.USE_PREF_SIZE);
+        content.getChildren().addAll(hint,
+                picker(NeoLook.sleeves(), NeoLook.SLEEVE, 100, false,
+                        NeoLook.sleevesDir(), NeoText.get("look.sleeve.size")));
+    }
+
+    /**
+     * Una rejilla de cosas para elegir, con su boton de importar.
+     *
+     * @param key    la clave de ajustes donde se guarda lo elegido
+     * @param round  el retrato va redondo; el tapete y la funda, rectangulares
+     * @param dir    donde se copia lo que se importe
+     * @param sizeHint que medidas conviene que tenga lo que traigas
+     */
+    private Region picker(final List<LookItem> items, final String key, final double tile1080,
+                          final boolean round, final File dir, final String sizeHint) {
+        // El tamanyo de casilla es de 1080p: en 2K crece como la letra.
+        final double tile = UiScale.px(tile1080);
+        final FlowPane grid = new FlowPane(10, 10);
+        grid.setAlignment(Pos.TOP_LEFT);
+
+        // Lo marcado tiene que ser lo que de verdad se esta usando, no lo que
+        // ponga el ajuste: sin ajuste puesto NeoLook se cae al primero de la
+        // lista, y si aqui no se marcaba nadie la pantalla decia que no habias
+        // elegido cuando si tenias uno puesto.
+        final String current = (NeoLook.PLAYMAT.equals(key) ? NeoLook.currentPlaymat()
+                : NeoLook.SLEEVE.equals(key) ? NeoLook.currentSleeve()
+                : NeoLook.currentAvatar()).getId();
+
+        for (final LookItem item : items) {
+            grid.getChildren().add(tile(item, key, current, tile, round, dir));
+        }
+
+        final ScrollPane scroll = new ScrollPane(grid);
+        scroll.getStyleClass().add("dialog-scroll");
+        scroll.setFitToWidth(true);
+        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        VBox.setVgrow(scroll, Priority.ALWAYS);
+
+        // El pie: importar, y las medidas. Decir el tamanyo ANTES de elegir el
+        // fichero ahorra la unica forma de equivocarse aqui.
+        final Button bring = new Button(NeoText.get("look.import"));
+        bring.getStyleClass().add("btn-primary");
+        bring.setMinWidth(Region.USE_PREF_SIZE);
+        bring.setOnAction(e -> {
+            final File chosen = chooseImage();
+            if (chosen == null) {
+                return;
+            }
+            final LookItem brought = NeoLook.importInto(dir, chosen);
+            if (brought != null) {
+                forge.neo.NeoSettings.set(key, brought.getId());
+                forge.neo.NeoSettings.save();
+                changed();
+                select(lastTab);
+            }
+        });
+
+        final Label hint = new Label(sizeHint);
+        hint.getStyleClass().add("home-subtitle");
+        hint.setWrapText(true);
+        hint.setMaxWidth(UiScale.px(620));
+        hint.setMinHeight(Region.USE_PREF_SIZE);
+
+        final HBox footer = new HBox(14, bring, hint);
+        footer.setAlignment(Pos.CENTER_LEFT);
+
+        final VBox box = new VBox(10, scroll, footer);
+        VBox.setVgrow(box, Priority.ALWAYS);
+        return box;
+    }
+
+    /** Una casilla de la rejilla. */
+    private Region tile(final LookItem item, final String key, final String current,
+                        final double size, final boolean round, final File dir) {
+        final StackPane face = new StackPane();
+        face.getStyleClass().add("look-tile");
+        face.setPrefSize(size, round ? size : size * 1.2);
+        face.setMinSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+        face.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+        face.pseudoClassStateChanged(PICKED, item.getId().equals(current));
+
+        if (item.isNone()) {
+            final Label none = new Label(NeoText.get("look.none"));
+            none.getStyleClass().add("home-subtitle");
+            face.getChildren().add(none);
+        } else {
+            final Image image = item.image();
+            if (image != null) {
+                final ImageView view = new ImageView(image);
+                view.setFitWidth(size - 6);
+                view.setFitHeight((round ? size : size * 1.2) - 6);
+                view.setPreserveRatio(false);
+                view.setSmooth(true);
+                if (round) {
+                    view.setClip(new javafx.scene.shape.Circle(
+                            (size - 6) / 2, (size - 6) / 2, (size - 6) / 2));
+                }
+                face.getChildren().add(view);
+            } else {
+                // Una imagen ilegible no puede dejar un hueco mudo: se dice.
+                final Label bad = new Label("?");
+                bad.getStyleClass().add("home-subtitle");
+                face.getChildren().add(bad);
+            }
+        }
+
+        face.setCursor(javafx.scene.Cursor.HAND);
+        face.setOnMouseClicked(e -> {
+            if (e.getButton() == javafx.scene.input.MouseButton.SECONDARY) {
+                // Click derecho sobre algo tuyo: borrarlo. Sobre algo de Forge
+                // no hace nada, que no es tuyo para borrarlo.
+                if (item.isImported() && NeoLook.delete(item)) {
+                    select(lastTab);
+                }
+                return;
+            }
+            forge.neo.NeoSettings.set(key, item.getId());
+            forge.neo.NeoSettings.save();
+            changed();
+            select(lastTab);
+        });
+        return face;
+    }
+
+    // ---------------------------------------------------------------
+    // 5. Musica
+    // ---------------------------------------------------------------
+
+    /**
+     * Que suena en los menus y que suena en la partida.
+     *
+     * <p>Cada pista se marca o se desmarca. <b>Sin marcar ninguna suenan las de
+     * Forge</b>, que es lo que pasa hoy y lo que tiene que seguir pasando si no
+     * tocas nada; en cuanto marcas una, suenan solo las marcadas.
+     */
+    private void buildMusic() {
+        final Label hint = new Label(NeoText.get("look.music.hint"));
+        hint.getStyleClass().add("home-subtitle");
+        hint.setWrapText(true);
+        hint.setMaxWidth(UiScale.px(680));
+        hint.setMinHeight(Region.USE_PREF_SIZE);
+        content.getChildren().add(hint);
+
+        if (musicProblem != null) {
+            final Label bad = new Label(musicProblem);
+            bad.getStyleClass().add("action-warning");
+            bad.setWrapText(true);
+            bad.setMaxWidth(UiScale.px(680));
+            bad.setMinHeight(Region.USE_PREF_SIZE);
+            content.getChildren().add(bad);
+        }
+
+        final HBox lists = new HBox(20,
+                musicList(MusicPlaylist.MENUS, NeoText.get("look.music.menus")),
+                musicList(MusicPlaylist.MATCH, NeoText.get("look.music.match")));
+        lists.setAlignment(Pos.TOP_LEFT);
+        VBox.setVgrow(lists, Priority.ALWAYS);
+        content.getChildren().add(lists);
+    }
+
+    private Region musicList(final MusicPlaylist list, final String label) {
+        final VBox rows = new VBox(4);
+
+        for (final NeoMusic.Track track : NeoMusic.tracks(list)) {
+            final Label name = new Label(track.getLabel());
+            name.getStyleClass().add("stack-spell");
+            name.setMaxWidth(Double.MAX_VALUE);
+            HBox.setHgrow(name, Priority.ALWAYS);
+
+            final Button toggle = new Button(NeoText.get(
+                    track.isEnabled() ? "look.music.on" : "look.music.off"));
+            toggle.getStyleClass().add("segment");
+            toggle.setMinWidth(Region.USE_PREF_SIZE);
+            toggle.pseudoClassStateChanged(SELECTED, track.isEnabled());
+            toggle.setOnAction(e -> {
+                // Un fallo aqui se VE. Antes se tiraba el resultado y la
+                // pantalla se repintaba igual: el boton seguia diciendo
+                // "Suena" y no habia forma de saber por que.
+                musicProblem = !NeoMusic.setEnabled(track, !track.isEnabled())
+                        ? NeoText.get("look.music.stuck", track.getLabel()) : null;
+                select(lastTab);
+            });
+
+            final HBox row = new HBox(8, name, toggle);
+            row.setAlignment(Pos.CENTER_LEFT);
+            row.getStyleClass().add("stack-strip");
+
+            if (track.isImported()) {
+                final Button del = new Button("x");
+                del.getStyleClass().add("segment");
+                del.setMinWidth(Region.USE_PREF_SIZE);
+                del.setOnAction(e -> {
+                    musicProblem = !NeoMusic.delete(track)
+                            ? NeoText.get("look.music.stuck", track.getLabel()) : null;
+                    select(lastTab);
+                });
+                row.getChildren().add(del);
+            }
+            rows.getChildren().add(row);
+        }
+
+        final ScrollPane scroll = new ScrollPane(rows);
+        scroll.getStyleClass().add("dialog-scroll");
+        scroll.setFitToWidth(true);
+        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        VBox.setVgrow(scroll, Priority.ALWAYS);
+
+        final Button bring = new Button(NeoText.get("look.import"));
+        bring.getStyleClass().add("btn-secondary");
+        bring.setMinWidth(Region.USE_PREF_SIZE);
+        bring.setOnAction(e -> {
+            final File chosen = chooseAudio();
+            if (chosen != null && NeoMusic.importTrack(list, chosen) != null) {
+                select(lastTab);
+            }
+        });
+
+        final VBox box = new VBox(8, caption(label), scroll, bring);
+        HBox.setHgrow(box, Priority.ALWAYS);
+        box.setPrefWidth(UiScale.px(340));
+        return box;
+    }
+
+    // ---------------------------------------------------------------
+    // El explorador de ficheros
+    // ---------------------------------------------------------------
+
+    private File chooseImage() {
+        return choose(NeoText.get("look.choose.image"),
+                new FileChooser.ExtensionFilter(NeoText.get("look.filter.image"),
+                        "*.png", "*.jpg", "*.jpeg", "*.gif", "*.bmp"));
+    }
+
+    private File chooseAudio() {
+        return choose(NeoText.get("look.choose.audio"),
+                new FileChooser.ExtensionFilter(NeoText.get("look.filter.audio"),
+                        NeoMusic.audioExtensions().toArray(new String[0])));
+    }
+
+    /**
+     * Abre el explorador del sistema.
+     *
+     * <p>Si algo fallara — sin ventana, un gestor de ficheros que no arranca —
+     * se devuelve null y no pasa nada: no importas y la pantalla sigue viva.
+     */
+    private File choose(final String title, final FileChooser.ExtensionFilter filter) {
+        try {
+            final FileChooser chooser = new FileChooser();
+            chooser.setTitle(title);
+            chooser.getExtensionFilters().add(filter);
+            return chooser.showOpenDialog(getScene() == null ? null : getScene().getWindow());
+        } catch (final RuntimeException e) {
+            System.err.println("[neo] no se ha podido abrir el explorador: " + e);
+            return null;
+        }
+    }
+
+    private void changed() {
+        if (onChanged != null) {
+            onChanged.run();
+        }
+    }
+
+    private static Label caption(final String text) {
+        final Label l = new Label(text);
+        l.getStyleClass().add("caption");
+        return l;
+    }
+
+    /** Las imagenes de las cartas llegan tarde; aqui no hay cartas, pero por si acaso. */
+    public void refreshArt() {
+        forge.neo.card.CardNode.refreshAllIn(this);
+    }
+
+    /** Para poder volver desde fuera. */
+    public void goBack() {
+        onBack.run();
+    }
+}

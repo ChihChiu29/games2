@@ -1489,16 +1489,19 @@ static bool ibm_show_context_menu(int gy, int gx, int scr_x, int scr_y)
 
 	case CTX_BFS_TRAVEL:
 		{
-			int step_dir = mouse_find_step(gy, gx);
+			int step_dir;
+			mouse_dest_y = gy;
+			mouse_dest_x = gx;
+			step_dir = mouse_find_step(gy, gx);
 			if (step_dir > 0)
 			{
-				mouse_dest_y = gy;
-				mouse_dest_x = gx;
 				command_dir = step_dir;
 				mouse_cmd_raw = TRUE;
 				Term_keypress('.');
 				return (TRUE);
 			}
+			mouse_dest_y = 0;
+			mouse_dest_x = 0;
 			return (FALSE);
 		}
 
@@ -2482,13 +2485,32 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 				Term_keypress('>');
 				return (TRUE);
 			}
-			dir = ibm_dir_from_delta(gy - p_ptr->py, gx - p_ptr->px);
-			if (dir > 0)
+			if (distance(p_ptr->py, p_ptr->px, gy, gx) == 1)
 			{
-				command_dir = dir;
-				mouse_cmd_raw = TRUE;
-				Term_keypress(';');
-				return (TRUE);
+				dir = ibm_dir_from_delta(gy - p_ptr->py, gx - p_ptr->px);
+				if (dir > 0)
+				{
+					command_dir = dir;
+					mouse_cmd_raw = TRUE;
+					Term_keypress(';');
+					return (TRUE);
+				}
+				return (FALSE);
+			}
+			{
+				int step_dir;
+				mouse_dest_y = gy;
+				mouse_dest_x = gx;
+				step_dir = mouse_find_step(gy, gx);
+				if (step_dir > 0)
+				{
+					command_dir = step_dir;
+					mouse_cmd_raw = TRUE;
+					Term_keypress('.');
+					return (TRUE);
+				}
+				mouse_dest_y = 0;
+				mouse_dest_x = 0;
 			}
 			return (FALSE);
 		}
@@ -2568,8 +2590,8 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 				Term_keypress('D');
 				return (TRUE);
 			}
-			/* Passable floor / trees / shop: step */
-			if (cave_floor_bold(gy, gx) || c_ptr->feat == FEAT_TREES || c_ptr->feat == FEAT_SHOP)
+			/* Passable terrain or shop: step */
+			if (player_can_enter(c_ptr->feat) || c_ptr->feat == FEAT_SHOP)
 			{
 				command_dir = dir;
 				mouse_cmd_raw = TRUE;
@@ -2589,24 +2611,28 @@ static bool ibm_handle_mouse_click(int mx, int my, int btn)
 		}
 
 		/* Left-click on a Distant Tile (dist > 1) */
-		if (c_ptr->m_idx > 0 && m_list[c_ptr->m_idx].ml)
+		if (c_ptr->m_idx > 0 && m_list[c_ptr->m_idx].ml &&
+		    is_friend(&m_list[c_ptr->m_idx]) < 0)
 		{
-			/* Distant visible monster: open Monster Context Menu */
+			/* Distant visible hostile monster: open Monster Context Menu */
 			return (ibm_show_context_menu(gy, gx, mx, my));
 		}
 
 		/* Try BFS pathfinding to (gy, gx) */
 		{
-			int step_dir = mouse_find_step(gy, gx);
+			int step_dir;
+			mouse_dest_y = gy;
+			mouse_dest_x = gx;
+			step_dir = mouse_find_step(gy, gx);
 			if (step_dir > 0)
 			{
-				mouse_dest_y = gy;
-				mouse_dest_x = gx;
 				command_dir = step_dir;
 				mouse_cmd_raw = TRUE;
 				Term_keypress('.');
 				return (TRUE);
 			}
+			mouse_dest_y = 0;
+			mouse_dest_x = 0;
 		}
 
 		/* If unreachable / unexplored wall, open Context Menu */

@@ -2003,6 +2003,7 @@ extern void dos_mouse_show(void);
 extern void dos_mouse_hide(void);
 extern void dos_mouse_set_range(int, int);
 extern int tty_mouse_menu_click(int, int, int);
+extern int tty_mouse_yn_click(int, int, int);
 extern int dos_mouse_available;
 #endif
 #endif

@@ -2252,7 +2252,7 @@ genl_player_setup(int screenheight)
            a - like 'y', but skips confirmation and starts game;
            q - quit
          */
-#if 1
+#if 0
         trimspaces(prompt); /* 'prompt' is constructed with trailing space */
         /* accept any character and do validation ourselves so that we can
            shorten prompt; it will be "Shall I pick ... for you? [ynaq] "

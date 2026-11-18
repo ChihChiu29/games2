@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
-# build.sh - Build NetHack 5.0 for DOS and package a zip suitable for DOSBox Pure
+# build.sh - Build NetHack 5.1 for DOS and package a zip suitable for DOSBox Pure
 # Includes DOSBOX.BAT at the root of the archive so DOSBox Pure launches
 # NETHACK.EXE automatically without prompting.
 
 set -euo pipefail
 
+VERSION="${1:-5.1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -d "${SCRIPT_DIR}/NetHack/src" ]; then
     NH_DIR="${SCRIPT_DIR}/NetHack"
-    OUT_ZIP="${SCRIPT_DIR}/nethack_dospure.zip"
+    REL_DIR="${SCRIPT_DIR}/release"
 elif [ -d "${SCRIPT_DIR}/src" ]; then
     NH_DIR="${SCRIPT_DIR}"
-    OUT_ZIP="${SCRIPT_DIR}/nethack_dospure.zip"
+    REL_DIR="${SCRIPT_DIR}/../release"
 else
     echo "Error: Could not locate NetHack source directory." >&2
     exit 1
 fi
+mkdir -p "${REL_DIR}"
+OUT_ZIP="${REL_DIR}/nh5_${VERSION}_dospure.zip"
 
 cd "${NH_DIR}"
 
@@ -43,7 +46,7 @@ if ! grep -q "CROSS_TO_MSDOS" Makefile 2>/dev/null; then
 fi
 
 # 4. Build and package DOS zip
-echo "==> Building NetHack 5.0 for MS-DOS..."
+echo "==> Building NetHack ${VERSION} for MS-DOS..."
 make -j"$(nproc)" CROSS_TO_MSDOS=1 package
 
 PKG_ZIP="${NH_DIR}/targets/msdos/NH501DOS.ZIP"

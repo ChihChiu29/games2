@@ -3771,7 +3771,8 @@ static void process_command(void)
 		/* Begin Running -- Arg is Max Distance */
 	case '.':
 		{
-			if (p_ptr->control || p_ptr->wild_mode) break;
+			extern int mouse_dest_y, mouse_dest_x;
+			if (p_ptr->control || (p_ptr->wild_mode && !(mouse_dest_y > 0 && mouse_dest_x > 0))) break;
 			do_cmd_run();
 			break;
 		}

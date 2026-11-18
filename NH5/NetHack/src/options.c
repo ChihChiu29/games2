@@ -431,7 +431,7 @@ ask_do_tutorial(void)
 {
     boolean dotut = flags.tutorial;
 
-    if (!opt_set_in_config[opt_tutorial]) {
+    if (flags.tutorial && !opt_set_in_config[opt_tutorial]) {
         winid win;
         menu_item *sel;
         anything any;

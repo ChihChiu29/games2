@@ -10,11 +10,11 @@
 /* CAUTION: Do not change the format of the next 2 lines without
  * adjusting the code for $PREFIX-Ver in DEVEL. */
 #define VERSION_MAJOR 5
-#define VERSION_MINOR 0
+#define VERSION_MINOR 1
 /*
  * PATCHLEVEL is updated for each release.
  */
-#define PATCHLEVEL 1
+#define PATCHLEVEL 0
 /*
  * Incrementing EDITLEVEL can be used to force invalidation of old bones
  * and save files.

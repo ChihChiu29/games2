@@ -369,6 +369,186 @@ removetopl(int n)
 
 extern char erase_char; /* from xxxtty.c; don't need kill_char */
 
+#ifdef MSDOS
+#define MAX_YN_BTNS 12
+static struct {
+    char key;
+    const char *suffix;
+    int col_start;
+    int col_end;
+} yn_ui_btns[MAX_YN_BTNS];
+static int yn_ui_nbtns = 0;
+static int yn_ui_row = -1;
+static int yn_ui_max_row = 0;
+static boolean yn_ui_active = FALSE;
+
+static void
+draw_yn_ui(const char *resp, const char *respbuf)
+{
+    struct WinDesc *cw = wins[WIN_MESSAGE];
+    const char *p;
+    boolean is_yn_family = TRUE;
+    int i, col, btn_row, bdr_row, prompt_col, prompt_row;
+
+    yn_ui_nbtns = 0;
+    yn_ui_active = FALSE;
+    yn_ui_row = -1;
+    yn_ui_max_row = 0;
+
+    if (!cw || !ttyDisplay || !resp || !respbuf || !*respbuf)
+        return;
+
+    for (p = respbuf; *p; ++p) {
+        if (*p != ' ' && !strchr("ynqaNm?*", *p)) {
+            is_yn_family = FALSE;
+            break;
+        }
+    }
+
+    for (p = respbuf; *p && yn_ui_nbtns < MAX_YN_BTNS; ++p) {
+        char c = *p;
+        const char *sfx = "";
+
+        if (c == ' ')
+            continue;
+        if (resp == rightleftchars) {
+            if (c == 'r')
+                sfx = "ight";
+            else if (c == 'l')
+                sfx = "eft";
+        } else if (resp == hidespinchars) {
+            if (c == 'h')
+                sfx = "ide";
+            else if (c == 's')
+                sfx = "pin";
+        } else if (is_yn_family) {
+            switch (c) {
+            case 'y': sfx = "es"; break;
+            case 'n': sfx = "o"; break;
+            case 'q': sfx = "uit"; break;
+            case 'a': sfx = "ll"; break;
+            case 'N': sfx = "one"; break;
+            case 'm': sfx = "ore"; break;
+            case '?': sfx = "help"; break;
+            case '*': sfx = "all"; break;
+            default:  sfx = ""; break;
+            }
+        }
+        yn_ui_btns[yn_ui_nbtns].key = c;
+        yn_ui_btns[yn_ui_nbtns].suffix = sfx;
+        yn_ui_nbtns++;
+    }
+
+    if (yn_ui_nbtns == 0)
+        return;
+
+    prompt_col = cw->curx;
+    prompt_row = cw->cury;
+    btn_row = prompt_row + 1;
+    bdr_row = prompt_row + 2;
+    if (bdr_row >= (int) ttyDisplay->rows)
+        return;
+
+    /* Draw button row: │ yes │ no │ quit │ */
+    tty_curs(BASE_WINDOW, 1, btn_row);
+    col = 0;
+    for (i = 0; i < yn_ui_nbtns; ++i) {
+        const char *s = yn_ui_btns[i].suffix;
+        int need = 1 + 1 + 1 + (int) strlen(s) + 1;
+
+        if (col + need + 1 >= (int) ttyDisplay->cols) {
+            yn_ui_nbtns = i;
+            break;
+        }
+        term_start_color(CLR_CYAN);
+        (void) putchar('\xB3');
+        term_end_color();
+        col++;
+
+        yn_ui_btns[i].col_start = col;
+        (void) putchar(' ');
+        col++;
+
+        term_start_attr(ATR_BOLD);
+        term_start_color(CLR_YELLOW);
+        (void) putchar(yn_ui_btns[i].key);
+        term_end_color();
+        term_end_attr(ATR_BOLD);
+        col++;
+
+        if (*s) {
+            term_start_color(CLR_WHITE);
+            while (*s) {
+                (void) putchar(*s++);
+                col++;
+            }
+            term_end_color();
+        }
+        (void) putchar(' ');
+        col++;
+        yn_ui_btns[i].col_end = col - 1;
+    }
+    if (yn_ui_nbtns == 0) {
+        tty_curs(BASE_WINDOW, prompt_col + 1, prompt_row);
+        cw->curx = prompt_col;
+        cw->cury = prompt_row;
+        return;
+    }
+    term_start_color(CLR_CYAN);
+    (void) putchar('\xB3');
+    term_end_color();
+    col++;
+    ttyDisplay->curx = col;
+
+    /* Draw bottom border row: └─────┴────┴──────┘ */
+    tty_curs(BASE_WINDOW, 1, bdr_row);
+    col = 0;
+    term_start_color(CLR_CYAN);
+    for (i = 0; i < yn_ui_nbtns; ++i) {
+        int w = yn_ui_btns[i].col_end - yn_ui_btns[i].col_start + 1;
+        int k;
+
+        (void) putchar((i == 0) ? '\xC0' : '\xC1');
+        col++;
+        for (k = 0; k < w; ++k) {
+            (void) putchar('\xC4');
+            col++;
+        }
+    }
+    (void) putchar('\xD9');
+    col++;
+    term_end_color();
+    ttyDisplay->curx = col;
+
+    /* Restore cursor to end of prompt on prompt_row */
+    tty_curs(BASE_WINDOW, prompt_col + 1, prompt_row);
+    cw->curx = prompt_col;
+    cw->cury = prompt_row;
+    yn_ui_row = btn_row;
+    yn_ui_max_row = bdr_row;
+    yn_ui_active = TRUE;
+}
+
+int
+tty_mouse_yn_click(int cx, int cy, int btn)
+{
+    int i;
+
+    if (!yn_ui_active)
+        return -1;
+    if (btn == 2)
+        return '\033';
+    if (cy == yn_ui_row || cy == yn_ui_row + 1) {
+        for (i = 0; i < yn_ui_nbtns; ++i) {
+            if (cx >= yn_ui_btns[i].col_start
+                && cx <= yn_ui_btns[i].col_end)
+                return (int) (unsigned char) yn_ui_btns[i].key;
+        }
+    }
+    return 0;
+}
+#endif /* MSDOS */
+
 /* returns a single keystroke; also sets 'yn_number' */
 char
 tty_yn_function(
@@ -394,7 +574,9 @@ tty_yn_function(
     struct WinDesc *cw = wins[WIN_MESSAGE];
     boolean doprev = 0;
     char prompt[BUFSZ];
+    char respbuf[QBUFSZ];
 
+    respbuf[0] = '\0';
     yn_number = 0L;
     if (ttyDisplay->toplin == TOPLINE_NEED_MORE
         && (cw->flags & (WIN_STOP | WIN_NOSTOP)) != WIN_STOP)
@@ -403,7 +585,7 @@ tty_yn_function(
     ttyDisplay->toplin = TOPLINE_SPECIAL_PROMPT;
     ttyDisplay->inread++;
     if (resp) {
-        char *rb, respbuf[QBUFSZ];
+        char *rb;
 
         allow_num = (strchr(resp, '#') != 0);
         Strcpy(respbuf, resp);
@@ -427,6 +609,9 @@ tty_yn_function(
            trailing space is wanted here in case of reprompt */
         Strcat(prompt, " ");
         custompline(OVERRIDE_MSGTYPE | SUPPRESS_HISTORY, "%s", prompt);
+#ifdef MSDOS
+        draw_yn_ui(resp, respbuf);
+#endif
     } else {
         /* no restriction on allowed response, so always preserve case */
         /* preserve_case = TRUE; -- moot since we're jumping to the end */
@@ -443,12 +628,20 @@ tty_yn_function(
         if (q == '\020') { /* ctrl-P */
             if (iflags.prevmsg_window != 's') {
                 int sav = ttyDisplay->inread;
+#ifdef MSDOS
+                if (yn_ui_active && yn_ui_max_row > cw->cury)
+                    cw->cury = yn_ui_max_row;
+                yn_ui_active = FALSE;
+#endif
                 ttyDisplay->inread = 0;
                 (void) tty_doprev_message();
                 ttyDisplay->inread = sav;
                 tty_clear_nhwindow(WIN_MESSAGE);
                 cw->maxcol = cw->maxrow;
                 addtopl(prompt);
+#ifdef MSDOS
+                draw_yn_ui(resp, respbuf);
+#endif
             } else {
                 if (!doprev)
                     (void) tty_doprev_message(); /* need two initially */
@@ -461,10 +654,18 @@ tty_yn_function(
             /* BUG[?]: this probably ought to check whether the
                character which has just been read is an acceptable
                response; if so, skip the reprompt and use it. */
+#ifdef MSDOS
+            if (yn_ui_active && yn_ui_max_row > cw->cury)
+                cw->cury = yn_ui_max_row;
+            yn_ui_active = FALSE;
+#endif
             tty_clear_nhwindow(WIN_MESSAGE);
             cw->maxcol = cw->maxrow;
             doprev = 0;
             addtopl(prompt);
+#ifdef MSDOS
+            draw_yn_ui(resp, respbuf);
+#endif
             q = '\0'; /* force another loop iteration */
             continue;
         }
@@ -557,6 +758,11 @@ tty_yn_function(
     ttyDisplay->toplin = TOPLINE_NON_EMPTY;
     if (ttyDisplay->intr)
         ttyDisplay->intr--;
+#ifdef MSDOS
+    if (yn_ui_active && yn_ui_max_row > wins[WIN_MESSAGE]->cury)
+        wins[WIN_MESSAGE]->cury = yn_ui_max_row;
+    yn_ui_active = FALSE;
+#endif
     if (wins[WIN_MESSAGE]->cury)
         tty_clear_nhwindow(WIN_MESSAGE);
 

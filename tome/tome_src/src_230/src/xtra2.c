@@ -5093,8 +5093,12 @@ void verify_panel(void)
 	panel_row_min = prow_min;
 	panel_col_min = pcol_min;
 
-	/* Hack -- optional disturb on "panel change" */
-	if (disturb_panel && !center_player) disturb(0, 0);
+	/* Hack -- optional disturb on "panel change" (unless mouse BFS travel is active) */
+	{
+		extern int mouse_dest_y, mouse_dest_x;
+		if (disturb_panel && !center_player && !(mouse_dest_y > 0 && mouse_dest_x > 0))
+			disturb(0, 0);
+	}
 
 	/* Recalculate the boundaries */
 	panel_bounds();

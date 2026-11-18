@@ -419,7 +419,7 @@ static int optfn_##a(int, int, boolean, char *, char *);
            (char *)0)
 #endif
     NHOPTB(legacy, Advanced, 0, opt_out, set_in_config,
-           On, Yes, No, No, NoAlias, &flags.legacy, Term_False,
+           Off, Yes, No, No, NoAlias, &flags.legacy, Term_False,
            "show introductory message")
     NHOPTB(lit_corridor, Advanced, 0, opt_in, set_in_game,
            Off, Yes, No, No, NoAlias, &flags.lit_corridor, Term_False,
@@ -807,7 +807,7 @@ static int optfn_##a(int, int, boolean, char *, char *);
            (char *)0)
 #endif
     NHOPTB(tutorial, Advanced, 0, opt_out, set_in_config,
-           On, Yes, No, No, NoAlias, &flags.tutorial, Term_False,
+           Off, Yes, No, No, NoAlias, &flags.tutorial, Term_False,
            "ask if you want the tutorial")
     NHOPTB(use_darkgray, Advanced, 0, opt_out, set_in_config,
            On, Yes, No, No, NoAlias, &iflags.wc2_darkgray, Term_False,

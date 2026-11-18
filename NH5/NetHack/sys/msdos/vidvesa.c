@@ -2821,18 +2821,18 @@ static const struct {
     char key;
     const char *label;
 } vesa_dock_btns[VESA_DOCK_BTNS] = {
-    { 'i', 'i', "Inv"   },
-    { 'Z', 'Z', "Cast"  },
-    { 'z', 'z', "Zap"   },
-    { 'q', 'q', "Quaff" },
-    { 'r', 'r', "Read"  },
-    { 'e', 'e', "Eat"   },
-    { 'a', 'a', "Apply" },
-    { 'f', 'f', "Fire"  },
-    { 't', 't', "Throw" },
-    { 's', 's', "Srch"  },
-    { '.', '.', "Wait"  },
-    { '+', '+', "More"  }
+    { 'i', 'i', "nv"   },
+    { 'Z', 'Z', "cast" },
+    { 'z', 'z', "ap"   },
+    { 'q', 'q', "uaff" },
+    { 'r', 'r', "ead"  },
+    { 'e', 'e', "at"   },
+    { 'a', 'a', "pply" },
+    { 'f', 'f', "ire"  },
+    { 't', 't', "hrow" },
+    { 's', 's', "rch"  },
+    { '.', '.', "wait" },
+    { '+', '+', "more" }
 };
 
 void

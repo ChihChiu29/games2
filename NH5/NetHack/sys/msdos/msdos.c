@@ -123,6 +123,14 @@ tgetch(void)
                  * left-click acts as space (--More-- / text window) and
                  * right-click acts as ESC. */
                 if (ttyDisplay && ttyDisplay->inread > 0) {
+                    int ych = tty_mouse_yn_click(mcx, mcy, mev.pressed);
+
+                    if (ych > 0) {
+                        ch = (char) ych;
+                        break;
+                    } else if (ych == 0) {
+                        continue;
+                    }
                     if (mev.pressed == 2) {
                         ch = '\033';
                         break;
@@ -658,11 +666,17 @@ dos_poskey(coordxy *x, coordxy *y, int *mod)
 
             /* Yes/No or single-char prompt via yn_function() */
             if (ttyDisplay && ttyDisplay->inread > 0) {
+                int ych = tty_mouse_yn_click(mcx, mcy, mev.pressed);
+
+                if (ych == 0)
+                    continue;
                 dos_mouse_hide();
 #ifdef SIMULATE_CURSOR
                 if (iflags.grmode && cursor_flag)
                     HideCursor();
 #endif
+                if (ych > 0)
+                    return ych;
                 return (mev.pressed == 1) ? ' ' : '\033';
             }
 

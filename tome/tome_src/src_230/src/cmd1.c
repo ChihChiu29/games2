@@ -4624,30 +4624,57 @@ int mouse_dest_x = 0;
 static bool mouse_grid_passable(int y, int x)
 {
 	cave_type *c_ptr;
+	byte feat;
 	u32b f1;
 
 	if (!in_bounds(y, x)) return (FALSE);
 
 	if (p_ptr->wild_mode)
 	{
-		f1 = f_info[wild_map[y][x].feat].flags1;
-		if (f1 & FF1_WALL) return (FALSE);
+		feat = wild_map[y][x].feat;
+		f1 = f_info[feat].flags1;
+		if (f1 & (FF1_WALL | FF1_NO_WALK)) return (FALSE);
+		if (!player_can_enter(feat)) return (FALSE);
 		return (TRUE);
 	}
 
 	c_ptr = &cave[y][x];
 	if (c_ptr->m_idx && m_list[c_ptr->m_idx].ml) return (FALSE);
-	if (c_ptr->info & CAVE_TRDT) return (FALSE);
+	if ((c_ptr->info & CAVE_TRDT) && c_ptr->t_idx != 0) return (FALSE);
 
-	/* Unexplored grids cannot be pathed through unless adjacent */
-	if (!(c_ptr->info & CAVE_MARK) && !(c_ptr->info & CAVE_SEEN)) return (FALSE);
+	feat = c_ptr->mimic ? c_ptr->mimic : c_ptr->feat;
+	f1 = f_info[feat].flags1;
 
-	f1 = f_info[c_ptr->feat].flags1;
-	if (c_ptr->feat >= FEAT_DOOR_HEAD && c_ptr->feat <= FEAT_DOOR_TAIL) return (FALSE);
-	if ((f1 & FF1_WALL) && (c_ptr->feat != FEAT_TREES)) return (FALSE);
-	if (!cave_floor_grid(c_ptr) && (c_ptr->feat != FEAT_TREES)) return (FALSE);
+	if (feat >= FEAT_DOOR_HEAD && feat <= FEAT_DOOR_TAIL) return (FALSE);
+	if (feat == FEAT_SECRET || feat == FEAT_RUBBLE) return (FALSE);
+	if (feat == FEAT_SHOP || feat == FEAT_MON_TRAP) return (FALSE);
+	if (!player_can_enter(c_ptr->feat)) return (FALSE);
+
+	/* Avoid dangerous water/lava/fire unless the player can safely cross */
+	if (feat == FEAT_DEEP_WATER && !p_ptr->ffall && !p_ptr->fly) return (FALSE);
+	if ((feat == FEAT_SHAL_LAVA || feat == FEAT_DEEP_LAVA ||
+	     feat == FEAT_GREAT_FIRE || feat == FEAT_FIRE) &&
+	    !(p_ptr->resist_fire || p_ptr->immune_fire || p_ptr->oppose_fire || p_ptr->ffall || p_ptr->fly))
+		return (FALSE);
+
+	if ((f1 & FF1_WALL) && !player_can_enter(c_ptr->feat)) return (FALSE);
 
 	return (TRUE);
+}
+
+static bool mouse_grid_can_step_onto(int y, int x)
+{
+	if (mouse_grid_passable(y, x)) return (TRUE);
+	if (!p_ptr->wild_mode && in_bounds(y, x))
+	{
+		cave_type *c_ptr = &cave[y][x];
+		if (!(c_ptr->m_idx && m_list[c_ptr->m_idx].ml) &&
+		    c_ptr->feat == FEAT_SHOP)
+		{
+			return (TRUE);
+		}
+	}
+	return (FALSE);
 }
 
 int mouse_find_step(int ty, int tx)
@@ -4659,6 +4686,7 @@ int mouse_find_step(int ty, int tx)
 	int y0, x0, py_rel, px_rel, ty_rel, tx_rel;
 	int head, tail, i, best_dir = 0;
 	s16b best_d = 30000;
+	long best_euclid = 0x7FFFFFFFL;
 
 	if ((p_ptr->py == ty) && (p_ptr->px == tx)) return (0);
 
@@ -4714,22 +4742,93 @@ int mouse_find_step(int ty, int tx)
 		}
 	}
 
-	if (dist[py_rel][px_rel] == -1) return (0);
+	/* If destination is unreachable (e.g. wall or behind a closed door),
+	 * run a forward BFS from the player and pick the closest reachable tile. */
+	if (dist[py_rel][px_rel] == -1)
+	{
+		int best_ry = -1, best_rx = -1;
+		long best_target_d2 = (long)(py_rel - ty_rel) * (py_rel - ty_rel) +
+		                      (long)(px_rel - tx_rel) * (px_rel - tx_rel);
+		s16b best_steps = 30000;
+
+		for (i = 0; i < MOUSE_BFS_H; i++)
+		{
+			int j;
+			for (j = 0; j < MOUSE_BFS_W; j++) dist[i][j] = -1;
+		}
+
+		head = 0;
+		tail = 0;
+		dist[py_rel][px_rel] = 0;
+		qy[tail] = (byte)py_rel;
+		qx[tail] = (byte)px_rel;
+		tail++;
+
+		while (head < tail)
+		{
+			int cy = qy[head];
+			int cx = qx[head];
+			s16b cd = dist[cy][cx];
+			head++;
+
+			if (cd > 0)
+			{
+				long d2 = (long)(cy - ty_rel) * (cy - ty_rel) +
+				          (long)(cx - tx_rel) * (cx - tx_rel);
+				if (d2 < best_target_d2 || (d2 == best_target_d2 && cd < best_steps))
+				{
+					best_target_d2 = d2;
+					best_steps = cd;
+					best_ry = cy;
+					best_rx = cx;
+				}
+			}
+
+			for (i = 0; i < 8; i++)
+			{
+				int d = ortho_diag_dirs[i];
+				int ny = cy + ddy[d];
+				int nx = cx + ddx[d];
+				if (ny < 0 || ny >= MOUSE_BFS_H || nx < 0 || nx >= MOUSE_BFS_W) continue;
+				if (dist[ny][nx] != -1) continue;
+				if (!mouse_grid_passable(y0 + ny, x0 + nx)) continue;
+				dist[ny][nx] = cd + 1;
+				qy[tail] = (byte)ny;
+				qx[tail] = (byte)nx;
+				tail++;
+			}
+		}
+
+		if (best_ry != -1 && !(best_ry == py_rel && best_rx == px_rel))
+		{
+			if (mouse_dest_y == ty && mouse_dest_x == tx)
+			{
+				mouse_dest_y = y0 + best_ry;
+				mouse_dest_x = x0 + best_rx;
+			}
+			return mouse_find_step(y0 + best_ry, x0 + best_rx);
+		}
+		return (0);
+	}
 
 	for (i = 0; i < 8; i++)
 	{
 		int d = ortho_diag_dirs[i];
 		int ny = py_rel + ddy[d];
 		int nx = px_rel + ddx[d];
+		long euclid;
 		if (ny < 0 || ny >= MOUSE_BFS_H || nx < 0 || nx >= MOUSE_BFS_W) continue;
-		if (dist[ny][nx] >= 0 && dist[ny][nx] < best_d)
+		if (dist[ny][nx] < 0) continue;
+		if (ny == ty_rel && nx == tx_rel && !mouse_grid_can_step_onto(ty, tx))
 		{
-			if (ny == ty_rel && nx == tx_rel && !mouse_grid_passable(ty, tx))
-			{
-				/* Destination itself is a wall/closed door: stop adjacent to it */
-				return (0);
-			}
+			/* Destination itself is a wall/closed door/NPC: stop adjacent to it */
+			return (0);
+		}
+		euclid = (long)(ny - ty_rel) * (ny - ty_rel) + (long)(nx - tx_rel) * (nx - tx_rel);
+		if (dist[ny][nx] < best_d || (dist[ny][nx] == best_d && euclid < best_euclid))
+		{
 			best_d = dist[ny][nx];
+			best_euclid = euclid;
 			best_dir = d;
 		}
 	}

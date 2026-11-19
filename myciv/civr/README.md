@@ -1,0 +1,675 @@
+# Civilization Recomp
+
+**A static recompilation of Sid Meier's Civilization (1991) for modern Windows**
+
+> *"I've played a lot of Civilization in my time, I can tell you."*
+> — Literally everyone who has ever touched this game
+
+![Civilization title screen running natively via static recompilation](docs/screenshots/title.png)
+
+*The recompiled "Sid Meier's CIVILIZATION" title, decoded pixel-perfect and
+running natively on Windows 11. The full intro (logo → birth → credits, in color)
+plays, then New Game drives world generation, the sprite-sheet decode, and the
+civilization-select screen.*
+
+---
+
+## What Is This?
+
+This is a fan preservation project to bring the original **Sid Meier's Civilization** —
+the game that invented an entire genre, ruined millions of sleep schedules, and taught
+more people about the tech tree of human progress than any history class ever could —
+natively to Windows 11 via **static recompilation**.
+
+No emulation. No DOSBox wrapper. Just pure, native, one-more-turn glory running on
+modern hardware exactly as Sid intended (minus the 640K memory limit and IRQ conflicts).
+
+**This is an unauthorized fan project. We are not affiliated with Firaxis Games,
+Take-Two Interactive, or MicroProse.** We just think this game is a masterpiece that
+deserves to be preserved forever, turn after turn, civilization after civilization.
+
+### A Note About Sid Meier
+
+Sid Meier is one of the greatest game designers who has ever lived. With *Civilization*
+(1991), he and Bruce Shelley created something genuinely transcendent — a game that is
+simultaneously a toy, a puzzle, a strategy engine, a history lesson, and one of the most
+addictive pieces of software ever compiled. Meier's design philosophy of "interesting
+decisions" produced a game where every single turn matters and every choice echoes across
+millennia. The fact that we're still talking about (and playing) this game over 30 years
+later speaks to the brilliance of its design.
+
+The original *Civilization* was a product of MicroProse Software, the legendary studio
+co-founded by "Wild" Bill Stealey and Sid Meier. This project exists purely out of love
+and respect for their work, and a desire to ensure it remains playable forever.
+
+---
+
+## Why Static Recompilation?
+
+| Approach | How It Works | Trade-offs |
+|----------|-------------|------------|
+| **DOSBox** | Emulates entire x86 CPU + DOS + hardware | Works but adds overhead, input lag, scaling artifacts |
+| **Source Port** | Rewrite from scratch based on behavior | Massive effort, subtle differences from original |
+| **Static Recomp** | Translate original machine code to C, run natively | Preserves exact original logic, runs at native speed |
+
+Static recompilation gives us the best of all worlds: the *exact* game logic Sid wrote,
+compiled fresh for modern x86-64, with a thin hardware abstraction layer replacing the
+DOS/VGA/AdLib interfaces with SDL2.
+
+---
+
+## Binary Analysis
+
+### CIV.EXE — The Main Executable
+
+```
+================================================================
+  Sid Meier's Civilization (1991) - Binary Analysis
+  Compiled with Microsoft C 5.x (1988 Runtime)
+================================================================
+
+  File:              civ.exe (305,024 bytes / 297.9 KB)
+  Architecture:      16-bit x86 real mode (DOS)
+  Compiler:          Microsoft C 5.x (MSC 1988 Runtime Library)
+  Overlay Manager:   Microsoft C INT 3Fh
+
+  Resident Code:     ~174 KB (loaded at startup)
+  Overlay Modules:   23 modules (~124 KB demand-loaded)
+  Total Code:        ~298 KB
+
+  Entry Point:       CS:IP = 2A10:0010
+  Stack:             SS:SP = 3217:0080
+```
+
+### Overlay Module Map
+
+The game uses the **Microsoft C Overlay Manager** to fit ~298 KB of code into DOS
+memory constraints. Code is divided into a resident portion (always loaded) and 23
+overlay modules that are demand-loaded via `INT 3Fh` when called:
+
+```
+  Overlay   File Offset   Size      Functions   Call Sites
+  -------   -----------   --------  ---------   ----------
+  OVL 01    0x02B800       1.5 KB       1            1
+  OVL 02    0x02BE00       7.4 KB       4            4
+  OVL 03    0x02DC00       3.6 KB       6            8
+  OVL 04    0x02EC00       1.6 KB       4           18
+  OVL 05    0x02F400       8.3 KB       7           14
+  OVL 06    0x031600      10.4 KB       5           15
+  OVL 07    0x034000       8.2 KB       3            4
+  OVL 08    0x036200       7.0 KB       4           10
+  OVL 09    0x037E00       6.3 KB       3            5
+  OVL 10    0x039800       2.2 KB       2            2
+  OVL 11    0x03A200       4.4 KB       2            3
+  OVL 12    0x03B400       7.8 KB       6            9
+  OVL 13    0x03D400       2.9 KB       2            2
+  OVL 14    0x03E000       7.9 KB       8           16
+  OVL 15    0x040000       2.9 KB       2            2
+  OVL 16    0x040C00       1.8 KB       1            1
+  OVL 17    0x041400       4.6 KB       2            3
+  OVL 18    0x042800       6.7 KB       4            5
+  OVL 19    0x044400       8.2 KB       4            9
+  OVL 20    0x046600       6.0 KB       3            7
+  OVL 21    0x048000       1.5 KB       1           18
+  OVL 22    0x048800       5.3 KB       5            8
+  OVL 23    0x049E00       2.4 KB       4            4
+                           --------  ---------   ----------
+  Total:                  ~124 KB      83 funcs    168 calls
+```
+
+### DOS/BIOS Interface
+
+```
+  Interrupt   Service          Calls   Recompilation Target
+  ---------   -------          -----   --------------------
+  INT 21h     DOS API           120    Win32 API / C runtime
+  INT 3Fh     MSC Overlay       168    Direct function calls (resolved at recomp time)
+  INT 33h     Mouse driver        7    SDL2 mouse input
+  INT 16h     Keyboard BIOS       4    SDL2 keyboard input
+  INT 10h     Video BIOS          3    SDL2 / D3D11 rendering
+  INT 09h     Keyboard HW IRQ     3    SDL2 event loop
+  INT 08h     Timer IRQ            1    SDL2 timer / QueryPerformanceCounter
+```
+
+### Support Executables
+
+| File | Size | Purpose |
+|------|------|---------|
+| `egraphic.exe` | 11,584 B | EGA (16-color) graphics driver |
+| `mgraphic.exe` | 7,142 B | MCGA/VGA (256-color) graphics driver |
+| `tgraphic.exe` | 9,990 B | Tandy (16-color) graphics driver |
+| `misc.exe` | 980 B | Utility/launcher stub |
+
+### Game Data Files
+
+| Type | Count | Purpose |
+|------|-------|---------|
+| `.pic` | 106 | Images (title, units, terrain, cities, diplomacy, wonders) |
+| `.pal` | 38 | VGA/EGA palettes (256 or 16 color, 6-bit RGB) |
+| `.cvl` | 4 | Sound data (AdLib/SB/Tandy/IBM speaker) |
+| `.txt` | 10 | Game text (credits, help, intro, Civilopedia entries) |
+| `.cv` | 1 | Font data |
+| `.map` | 1 | Saved map data |
+| `.sve` | 1 | Saved game state |
+| `.dta` | 1 | Hall of Fame data |
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  Recompiled Game Code                │
+│         (civ.exe → C, resident + 23 overlays)       │
+├─────────────────────────────────────────────────────┤
+│                  DOS Compatibility Layer             │
+│    INT 21h → C runtime    Overlay mgr → direct call │
+│    File I/O → stdio       Memory → malloc/heap      │
+├───────────────┬───────────────┬──────────────────────┤
+│   Video HAL   │   Audio HAL   │     Input HAL        │
+│  VGA 320x200  │  AdLib OPL2   │  Mouse + Keyboard    │
+│  256-color    │  PC Speaker   │  INT 33h/16h → SDL2  │
+│  → SDL2/D3D11 │  → SDL2 Audio │                      │
+├───────────────┴───────────────┴──────────────────────┤
+│                     SDL2 / Win32                     │
+├──────────────────────────────────────────────────────┤
+│                    Windows 11 x64                    │
+└──────────────────────────────────────────────────────┘
+```
+
+---
+
+## Project Structure
+
+```
+civ/
+├── README.md                    # This file
+├── CMakeLists.txt               # Root build configuration (CMake 3.20+)
+├── civ.syms.toml                # Exported function symbol table
+├── .gitignore                   # Excludes game files and build output
+├── tools/                       # Reverse engineering & analysis tools
+│   ├── CMakeLists.txt
+│   ├── mzparse/                 # MZ header & overlay analyzer
+│   ├── ovldump/                 # Overlay module extractor
+│   ├── picdecode/               # .PIC/.PAL image format analyzer
+│   └── recomp/                  # Static recompilation toolchain
+│       ├── decode16.py          # 16-bit x86 instruction decoder
+│       ├── analyze.py           # Function boundary & call graph analyzer
+│       ├── lift.py              # x86-16 to C code lifter
+│       ├── lift_from_dump.py    # EXEPACK dump lifter (decompressed code)
+│       ├── recomp.py            # Main recompilation driver
+│       ├── map_thunks.py        # Overlay thunk table decoder (EXEPACK + 7-byte entries)
+│       ├── map_thunks2.py       # Thunk caller analysis & cross-overlay constraint solver
+│       └── parse_overlays.py    # Overlay MZ header parser & function finder
+├── include/                     # Public headers
+│   ├── recomp/
+│   │   ├── cpu.h                # CPU state struct (registers, flags, memory)
+│   │   └── dos_compat.h         # DOS API compatibility layer
+│   ├── hal/
+│   │   ├── video.h              # VGA Mode 13h emulation
+│   │   ├── input.h              # Keyboard & mouse HAL
+│   │   └── timer.h              # PIT timer emulation
+│   └── platform/
+│       └── sdl_platform.h       # SDL2 platform layer
+├── src/
+│   ├── main.c                   # Entry point & main game loop
+│   ├── recomp/
+│   │   ├── cpu.c                # CPU state management
+│   │   ├── dos_compat.c         # Full INT 21h/10h/16h/33h implementation
+│   │   └── startup.c            # MSC crt0 replacement
+│   ├── hal/
+│   │   ├── video.c              # VGA DAC palette, mode 13h, vsync
+│   │   ├── input.c              # Keyboard buffer, mouse state
+│   │   └── timer.c              # PIT timer tick emulation
+│   └── platform/
+│       └── sdl_platform.c       # SDL2 window, rendering, input events
+└── RecompiledFuncs/             # Auto-generated C output (gitignored)
+    ├── civ_recomp.h             # Master header (482 function declarations)
+    ├── civ_recomp_000..009.c    # Recompiled game code (132K lines)
+    ├── civ_dump_lifted.c        # Functions lifted from EXEPACK dump (171 funcs)
+    ├── civ_impl.c               # Hand-written implementations (tracked in git)
+    ├── civ_stubs.c              # Stub functions for unresolved symbols (auto-generated)
+    └── civ_aliases.c            # Overlay thunk aliases (auto-generated)
+```
+
+---
+
+## Building
+
+### Prerequisites
+
+- **CMake** 3.20+
+- **MSVC** (Visual Studio 2022) or **MinGW-w64**
+- **Python 3** (for recompilation toolchain)
+- **SDL2** via [vcpkg](https://github.com/microsoft/vcpkg): `vcpkg install sdl2:x64-windows`
+
+### Building
+
+```bash
+# Step 1: Run the recompiler (generates C files from CIV.EXE)
+py -3 tools/recomp/recomp.py path/to/CIV.EXE RecompiledFuncs
+
+# Step 2: Configure CMake with vcpkg
+cmake -B build -G "Visual Studio 17 2022" -A x64 \
+    -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+
+# Step 3: Build
+cmake --build build --config Release
+```
+
+### Running
+
+```bash
+# Run from the game data directory
+cd path/to/game/data
+path/to/build/Release/civ.exe --gamedir . --scale 3
+```
+
+### Running Analysis Tools
+
+```bash
+# Analyze the MZ executable structure
+build/Release/mzparse.exe path/to/civ.exe
+
+# Extract overlay modules
+build/Release/ovldump.exe path/to/civ.exe output_dir/
+
+# Analyze .PIC image files
+build/Release/picdecode.exe path/to/logo.pic
+```
+
+### Running the Recompiler
+
+```bash
+# Disassemble resident code
+py -3 tools/recomp/decode16.py path/to/civ.exe --resident
+
+# Disassemble overlay N
+py -3 tools/recomp/decode16.py path/to/civ.exe --overlay 5
+
+# Analyze function boundaries
+py -3 tools/recomp/analyze.py path/to/civ.exe -symbols civ.syms.toml
+
+# Full recompilation (generates C files)
+py -3 tools/recomp/recomp.py path/to/civ.exe RecompiledFuncs
+```
+
+---
+
+## Progress
+
+### Phase 0 — Binary Analysis & Documentation
+
+- [x] MZ header parsing and structure analysis
+- [x] Microsoft C overlay manager identification (INT 3Fh)
+- [x] Overlay module enumeration (23 modules, 83 functions)
+- [x] DOS interrupt surface mapping
+- [x] String table extraction (1,807 strings)
+- [x] Support executable identification
+- [x] Game data file inventory
+- [ ] .PIC image format reverse engineering
+- [ ] .CVL sound format reverse engineering
+- [ ] .CV font format analysis
+
+### Phase 1 — Recompilation Toolchain
+
+- [x] 16-bit x86 instruction decoder (full 8086/80186 opcode coverage)
+- [x] Function boundary detection (MSC 5.x prologue/epilogue patterns)
+- [x] Control flow analysis and call graph extraction
+- [x] x86-16 to C lifter (CPU state struct approach)
+- [x] MSC overlay call resolution (INT 3Fh -> direct C function calls)
+- [x] Segment:offset -> flat memory translation
+- [x] Port I/O lifting (IN/OUT -> port_in8/port_out8 dispatch)
+- [x] Batch compilation output (split across .c files)
+- [x] Symbol table export (TOML format)
+- [x] Stub generation for unresolved symbols
+- [x] EXEPACK dump lifter (`lift_from_dump.py`) — lifts functions from decompressed memory dump
+
+**Recompilation Results:**
+```
+  Functions:     482 resident/overlay + 190 dump-lifted = 672 total
+  Instructions:  106,935+ (resident/overlay)
+  Code bytes:    280,991 (274.4 KB) resident/overlay + dump-lifted code
+  Output:        ~150K lines of C across 10 recomp files + dump_lifted + impl + stubs
+  Errors:        0
+```
+
+### Phase 2 — DOS Compatibility Layer
+
+- [x] INT 21h replacement (file I/O: create/open/close/read/write/seek/delete)
+- [x] INT 21h memory management (alloc/free/resize paragraphs)
+- [x] INT 21h console I/O (char in/out, print string, input status)
+- [x] INT 21h system calls (date/time, DOS version, drive/directory, interrupt vectors)
+- [x] INT 10h Video BIOS (set mode, cursor, teletype, get mode)
+- [x] INT 16h Keyboard BIOS (read key, check key, shift flags)
+- [x] INT 33h Mouse Driver (reset, show/hide, position, range, handler)
+- [x] VGA Mode 13h framebuffer (320x200, 256 colors at A000:0000)
+- [x] VGA DAC palette emulation (ports 3C7/3C8/3C9 state machine)
+- [x] VGA input status register (port 3DA, vsync toggle)
+- [x] PIT timer emulation (ports 40h/43h, 18.2 Hz tick rate)
+- [x] Port I/O dispatch (VGA, PIT, PIC, keyboard ports)
+- [x] DOS path translation (game directory mapping)
+- [x] SDL2 platform layer (window, renderer, streaming texture)
+- [x] SDL2 event handling (keyboard scancode map, mouse, fullscreen toggle)
+- [x] SDL2 VGA rendering (indexed framebuffer -> RGBA palette conversion)
+- [x] MSC crt0 startup replacement (segment register initialization + data copy)
+- [x] Main entry point with frame-driven game loop
+- [x] **Full project compiles and links (zero errors, zero warnings)**
+
+### Phase 3 — Stub Resolution & Call Graph
+
+- [x] Traced MSC crt0 startup chain: `res_02A310` -> `ovl05_031396` (C main) -> `ovl21_048200` (game loop)
+- [x] Discovered CIV.EXE has **zero MZ relocations** — MSC overlay manager patches segments at runtime
+- [x] Reverse-engineered segment relocation formula: `file_off = seg*16 + off - 0x14`
+- [x] Far call resolution (CALL FAR seg:off -> known function): 1081+ calls resolved
+- [x] Stubs reduced from 553 -> 352 (36% reduction)
+- [x] Stub resolver tool (`resolve_stubs.py`) — maps unresolved names to existing functions
+- [x] Alias file (`civ_aliases.c`) — 79 wrapper functions for overlay/resident name mismatches
+
+### Phase 4 — Call Stack & Runtime Fixes
+
+- [x] Call stack return address simulation (NEAR: push 0 + sp+=2, FAR: push CS + push 0 + sp+=4)
+- [x] INT 10h rewrite (text mode cursor, mode get/set, character output)
+- [x] Text mode VGA rendering (0xB8000 write-through, 80x25 cell display)
+- [x] VGA mode detection (port 3DA status register emulation)
+- [x] BIOS data area setup (cursor position at 0040:0050, tick counter at 0040:006C)
+
+### Phase 5 — EXEPACK & Overlay Runtime
+
+- [x] EXEPACK decompression implemented (both in C runtime and Python analysis tools)
+- [x] Segment relocation applied after decompression (LOAD_SEG = 0x0100)
+- [x] DGROUP/BSS/stack initialization matching original crt0
+- [x] INT 3F inline overlay calls scanned (148 found in resident code)
+- [x] Title screen bypass (ovl02_02C200) -> "New Game" path
+- [x] Timer read (far_0000_0A40) -> BIOS tick counter from wall clock
+- [x] MSC 5.x heap allocator rewritten (correct free-list walking)
+- [x] Game reads king.txt successfully (4 fopen/fread/fclose cycles)
+- [x] Overlay thunk table structure decoded: 7-byte entries at offset 0x0761
+- [x] Thunk dual-mode design: JMP FAR (bytes 0-4) + CALL NEAR dispatcher (byte +5)
+- [x] Overlay function discovery: 155 functions across 23 modules (prologue scan + INT 3F)
+- [x] Cross-overlay caller constraint analysis for thunk mapping
+- [x] Fixed far_0000_07DF infinite recursion (corrected alias to ovl05_0307DA)
+- [x] LOMEM false alarm fixed (ovl02_02C200 returns AX=0x6000 for memory check)
+- [x] VGA mode 13h activation working
+- [ ] Complete thunk-to-overlay-function mapping (64 active EA entries -> 155 overlay functions)
+- [ ] Remaining stub resolution
+
+### Phase 6 — World Generation & Game Handler
+
+- [x] Terrain seed placement (ovl07_034D88) working
+- [x] Terrain growth scan loop working
+- [x] Jump Table 1 (terrain type assignment, 8 climate cases) reconstructed from binary
+- [x] Jump Table 2 (terrain feature placement, 14 cases) reconstructed from binary
+- [x] Continent placement (ovl07_034A5C) working — finds ocean tiles correctly
+- [x] Terrain detail pass (ovl07_034E33) working
+- [x] World generation animation skipped (ovl07_035B6E bypass)
+- [x] **Game handler reached (res_0022DA) — main game loop active**
+- [x] Keyboard input polling (KBHIT via SDL2)
+- [x] Timer speed multiplier (20x) for faster animation playback
+
+### Phase 7 — EXEPACK Code Lifting & CRT
+
+- [x] Decompressed memory dump tool (startup.c dumps civ_decompressed.bin at runtime)
+- [x] **lift_from_dump.py** — lifts functions from decompressed dump for EXEPACK-compressed code
+- [x] **175 functions lifted** from decompressed dump (display, map, CRT, game state, rendering)
+- [x] MSC 5.x CRT functions lifted (39 functions: _open, _read, _write, _lseek, file table mgmt)
+- [x] Display subsystem lifted (far_1DDE_* — 15 rendering/GFX context functions)
+- [x] Map display functions lifted (far_1B05_* — 25 map rendering functions)
+- [x] Game state functions lifted (far_15D8_* — 12 functions including main game state)
+- [x] Blit function implemented (far_0000_07ED — 8-arg rectangle copy between GFX pages)
+- [x] Climate/temperature stub (far_205A_2AC0 returns uniform climate for now)
+- [x] File access working (game opens and checks .pic, .cv, .exe files)
+- [x] **First pixels rendered** (nonzero framebuffer pixels detected in game loop)
+- [x] Near function lifting support added to lift_from_dump.py (NEAR_STUBS with is_far=False)
+- [x] Near-far alias pattern for conflicting functions (same code at same offset, different calling conventions)
+- [x] Resident rendering functions lifted: res_01C813, res_01C605, res_01D221 (NEAR)
+- [x] Pipeline improvements: recomp.py excludes dump-lifted funcs from stubs without affecting recomp output
+- [x] Thunk table deep analysis: 7-byte entries, overlay manager init at 0x0B60, descriptor patching
+- [x] **World gen hang fixed** — 6 bugs in ovl07_034412: 4 missing gotos, 2 broken jump tables
+- [x] Near-far alias pattern for conflicting functions
+
+### Phase 8 — World Gen Fix & Thunk Resolution
+
+- [x] **World generation completes successfully** (30-60 seconds depending on random seed)
+- [x] Fixed 4 missing `goto` statements (lifter converted `jmp` to comments)
+- [x] Fixed 2 broken indirect jump tables (CS:0x272 and CS:0x518)
+- [x] Removed ~20 lines of garbage code (jump table data decoded as x86 instructions)
+- [x] Created `patch_worldgen.py` for automatic post-recomp patching
+- [x] Auto-inject Space key to advance past "press any key" screens
+
+### Phase 9 — Thunk Resolution & Display
+
+- [x] Resolved 7 thunk table entries to overlay functions
+- [x] Lifted 16+ new functions from dump (display, CRT file I/O)
+- [x] Implemented `_aFchkstk` (far stack check) and buffer write subroutines
+- [x] Minimap rendering with page-flip animation working (10 BLIT operations)
+- [x] DELAY timing function active — game animates between frames
+
+### Phase 10 — File I/O Pipeline
+
+- [x] Hand-implemented fopen/fclose with MSC FILE struct setup
+- [x] Lifted file buffer fill function (`far_1FB6_0642`)
+- [x] Fixed 10 UNHANDLED indirect calls in PIC decoder (`call far [DS:E84A]`)
+- [x] Fixed `_dos_read` to handle FILE* as well as raw DOS handles
+- [x] Initialized CRT _lastiob and stack limit in startup
+- [x] **PIC file loading working** — sp299.pic and planet2.pic read successfully (512B chunks)
+- [x] 34 file open operations, 32 close operations in a single run
+- [x] Game progresses past civilization selection into new game setup
+- [x] FILE struct corruption fixed — moved FILE state to a host-side table, `fopen`
+      returns an opaque token (`0xF200 | slot*8`) instead of an in-DS FILE struct
+
+### Phase 12 — Overlay Thunk Bugs & Terrain Reveal
+
+- [x] **Fixed the civ-select infinite recursion** — `far_0000_076F` was wrongly
+      aliased to its own caller `ovl02_02CDD7` (the dialog), re-entering the whole
+      dialog 24×/cell and exhausting the stack. It's a screen-grab→sprite-handle
+      primitive; hand-implemented. planet2.pic opens dropped 32 → 0.
+- [x] **Reverse-engineered the overlay thunk-binding mechanism** — the `0x0761`
+      vectors are runtime-patched from per-overlay descriptors (`0x0B62` via DOS
+      `4B03`), so the naive "overlay functions in link order" alias map is
+      unreliable; suspect thunks must be verified by contract.
+- [x] **Un-stubbed `ovl07_035B6E`** (terrain-reveal state machine) via the project
+      lifter — fixed an infinite spin (**CPU 98% → ~8%**); the game now advances
+      past the reveal into world-gen map writes.
+
+### Phase 13 — Rendering On Screen
+
+- [x] Diagnosed the black-screen pipeline (mode 13h OK; `platform_render` correct)
+- [x] **Implemented the string renderer `far_0000_07F4`** (was mis-aliased to
+      `ovl05_0307DA`) as an 8×8 CP437 text blit — **real game text now renders on
+      screen** (verified: `_kills: NONE` in cyan via `PrintWindow`)
+- [x] Capture note: GDI `BitBlt` shows SDL's GPU window as black; use
+      `PrintWindow(PW_RENDERFULLCONTENT)` or the env-gated `CIV_RENDERDIAG` fb dump
+- [ ] Map tile / sprite blitter `far_0000_083F` (stub; reached only past the menu)
+- [ ] DAC palette upload (text shows via the default palette for now)
+
+### Phase 14 — Boot Flow & MSC CRT Text I/O
+
+- [x] Found the real boot flow (logos/title/menu) was *bypassed*, not missing —
+      un-bypassing `ovl02_02C200` runs the real intro (loads `logo.pic`,
+      `birth0/1.pic`, `credits.txt`)
+- [x] **Implemented the MSC 5.x CRT text-stream chain** (`getc` `res_021BC8`,
+      `ungetc` `far_215A_16DA`, width-check `res_021C22`, skip-ws `res_021BEC`,
+      scanf field reader `res_02178A`) against the host FILE table — the 79M-call
+      credits-parse spin is **gone**; `credits.txt` now parses
+- [x] **Fixed the bad-filename pointer bug** — stale `civ_dump_lifted.c` double-pushed
+      CS for the MSC `push cs; call near <far-func>` idiom, so `far_1F67_01AD` read
+      `cs` instead of the filename; `king.txt` now opens cleanly
+- [x] **Implemented `res_02120A` (MSC `_getbuf`)** so `king.txt`'s 512-byte FILE
+      buffer is allocated and the `getc` chain reads — the intro completes
+
+### Phase 15 — Color Rendering Pipeline (PIC → A0000 → palette)
+
+- [x] **PIC LZW pixel decoder un-stubbed** — `far_0000_11FA` delegated decode to
+      stubs; correct implementations existed under the overlay-lifted twin names
+      (`res_001284`/`0012F6`/`00124E`/`001205`); wired the delegations
+- [x] **Fixed PIC display routing** — `far_0000_07E6` (row blitter) was mis-aliased
+      to `ovl05_02FFC2`; hand-implemented as a proper DS:src → A0000 row copy
+- [x] **VGA palette loaded** — Civ PICs are LBM-style chunked; the `M0` (0x304D)
+      chunk is the 768-byte 6-bit RGB palette. Parse it at PIC open and upload to
+      the DAC → **the intro renders in full colour** (starfield, stars, red credits)
+- [x] **MCGA mode 13h presents A0000** (SDL keys off `mem[0x449]==0x13`)
+- [x] Screen-grab sprite pair (`far_0000_076F`/`083F` host sprite store; title menu
+      save/restore works)
+
+### Phase 16 — Real Main Menu, World-Gen Completion & Game Loop
+
+- [x] **LOMEM false alarm — real root cause fixed.** `far_0000_0768` (the
+      free-memory query that gates the `*LOMEM` warning in `res_001A66`) was
+      *mis-aliased to the title screen* `ovl02_02C200`. That hack only worked while
+      the title was stubbed (returned AX=0x6000); with the title un-bypassed it
+      returned a small AX → an empty `*LOMEM` dialog blocked startup. Fixed to report
+      ample memory → **the real main menu now builds** ("Start a New Game / Load /
+      EARTH / Customize World / View Hall of Fame")
+- [x] **New Game selection works** — the menu string is king.txt message-DB text
+      (`far_1F67_01AD` hash lookup → `0xC936`); selecting New Game sets `6AC2=0`
+- [x] **Terrain-reveal infinite spin fixed → world-gen completes.** `far_1DDE_007C`
+      (== `res_01DE5C`, a signed `clamp(v,lo,hi)`) was a wrong "delay returns arg3"
+      stub → set the reveal timer target to `0x7FFF` (~30 min) so `ovl07_035B6E`'s
+      reveal loop spun forever. Implemented the real clamp → **world-gen finishes**
+- [x] **The game's main loop runs** — `begin_frame`/yield/timer/input cycling,
+      mode 13h, palette `210/224`. Full flow works end-to-end:
+      **intro → menu → New Game → world-gen → game loop**
+- [ ] Map tile rendering — the in-game map is a solid fill; `far_0000_083F` (tile/
+      sprite blitter, ~64 callers) is still a stub
+- [x] **A Unicorn-engine harness** (`tools/recomp/uni_civ.py`, modeled on the bolo
+      recomp's `uni_*` tools) boots the *original* CIV.EXE headless — through EXEPACK,
+      the MSC crt0, the DOS memory manager, the INT 3Fh overlay manager and graphics-
+      driver loads — all the way to the rendered title screen, for ground-truth
+      observation (see `docs/UNI_HARNESS.md`)
+
+### Phase 17 — Sprite-Sheet Decode & Civilization Select
+
+- [x] **sp299.pic sprite-sheet LZW decode fixed.** The post-New-Game sprite sheet
+      corrupted `DS:0x686C` (the refill file token) → a `read handle 0` spin. Two bugs
+      in the core LZW byte decoder (`res_0012F6`), found by disassembling the original
+      (`@dump 0x12F6`, capstone): the **KwKwK** case walked the *not-yet-defined* dict
+      entry (`dx`) instead of the previous code (`[0x688A]`) → a self-referential
+      dictionary chain whose unbounded walk overran the decode stack (base `0x6A8D`,
+      grows down) into the state region and `0x686C`; and the `prev_code` save wrote
+      `code` instead of `cx`. Both fixed → the decode terminates cleanly
+- [x] **Civilization / difficulty-select screen reached.** With the decode fixed, the
+      game grabs the 41×58 leader-portrait sprites from the sheet, loads `arch.pic`
+      (throne room) + `back0a.pal`/`sp256.pal`, and builds the `*ARCH` select screen
+- [x] **PIC LZW decoder now pixel-perfect on large images.** A third decoder bug
+      surfaced via the title `logo.pic` (clean top, garbage lower half): the
+      dictionary-full reset wrongly called the full re-init (`0x124E`, which reads a
+      fresh stream word + reseeds the bit buffer) instead of the dict-only reset
+      (`0x1262`). That consumed an extra stream word mid-decode and desynced the
+      bitstream after the first dictionary overflow — corrupting every image large
+      enough to fill the 0x800-entry dictionary (logo / birth / title / arch).
+      Fixed → `logo.pic` decodes the full "Sid Meier's CIVILIZATION" wordmark cleanly
+- [x] **Deterministic New-Game repro** via `CIV_KEYSCRIPT=<chars>` (scripted getkey/
+      kbhit) — `CIV_KEYSCRIPT=N` reliably drives New Game → world-gen → sprite decode
+- [ ] Drive the civ-select screen → the real in-game loop (`res_0023F0`)
+- [ ] Map tile rendering (`far_0000_083F`)
+
+### Phase 17.5 — Gameplay
+
+- [x] Title screen + main menu (New Game / Load / Earth / Custom)
+- [ ] Map tile rendering
+- [ ] UI chrome rendering
+- [ ] City management / diplomacy / combat / tech tree / wonders
+- [ ] Save/load game state
+- [ ] Hall of Fame
+
+### Phase 18 — Audio & Polish
+
+- [ ] .CVL sound data loader
+- [ ] SDL2 audio output (AdLib OPL2 synthesis or PCM playback)
+- [ ] Integer scaling (1x, 2x, 3x, 4x)
+- [ ] Windowed / fullscreen toggle
+- [ ] Modern input improvements (scroll wheel for zoom, etc.)
+- [ ] Windows 11 installer / portable build
+
+---
+
+## Game Data — User Supplied
+
+**You must own a legitimate copy of Civilization.** Place the game files in a `game/`
+subdirectory (gitignored). The recompiled executable loads data from this directory
+at runtime.
+
+Required files:
+```
+game/
+├── civ.exe          # Original executable (for reference/verification)
+├── *.pic            # All image files
+├── *.pal            # All palette files
+├── *.cvl            # Sound data
+├── fonts.cv         # Font data
+├── *.txt            # Game text files
+├── fame.dta         # Hall of Fame
+└── civil0.map       # Default map
+```
+
+---
+
+## Technical Notes
+
+### Why Microsoft C 5.x?
+
+MicroProse was a Microsoft C shop in the late 80s/early 90s. The runtime signature
+`MS Run-Time Library - Copyright (c) 1988, Microsoft Corp` confirms MSC 5.x, which
+was the standard professional C compiler for DOS development at the time. This is
+consistent with other MicroProse titles of the era.
+
+### The Overlay Manager
+
+With only 640 KB of conventional memory, a ~298 KB game needed help. Microsoft C's
+overlay manager uses `INT 3Fh` as a software interrupt to demand-load code segments
+from disk. When the resident code calls an overlaid function, the overlay manager:
+
+1. Intercepts the `INT 3Fh` call
+2. Reads the overlay number and offset from the instruction stream
+3. Loads the overlay module from the EXE file into memory
+4. Transfers control to the target function
+
+For recompilation, this is actually a gift — every `INT 3Fh` call site is an explicit
+inter-module function call with a known target. We resolve these statically at recomp
+time into direct C function calls, eliminating the overlay manager entirely.
+
+### The Graphics Drivers
+
+Civilization ships with separate executables for different graphics hardware:
+- `egraphic.exe` — EGA (640x350, 16 colors or 320x200, 16 colors)
+- `mgraphic.exe` — MCGA/VGA (320x200, 256 colors)
+- `tgraphic.exe` — Tandy 1000 (320x200, 16 colors)
+
+The main `civ.exe` calls out to these as external processes for graphics initialization
+and rendering. For the recomp, we implement the VGA (256-color) path directly.
+
+---
+
+## Credits
+
+### Original Game
+
+- **Designed by** Sid Meier with Bruce Shelley
+- **Programming** by Sid Meier
+- **Computer Graphics** by Larry Coones, Michael Haire, Harry Teasley, Barbara Bents,
+  Todd Brizzi, Erroll Roberts, Chris Soares, Nicholas Rusko-Berger, Stacey Clark,
+  Brian Martel
+- **Original Music** by Jeffery L. Briggs
+- **Quality Assurance** by Al Roireau, Jerry Shaffirio, Mike Corcoran, Tim Train,
+  Michael Rea, Chris Clark, Michael Craighead, Nick Yuran, Paul Murphy
+- **Published by** MicroProse Software (1991)
+
+### This Project
+
+A [sp00nznet](https://github.com/sp00nznet) fan preservation project.
+Built with love, respect, and far too many turns.
+
+---
+
+## Legal
+
+This is an **educational and preservation project**. No original game code or assets
+are distributed in this repository. Users must supply their own legally obtained copy
+of Sid Meier's Civilization.
+
+Civilization is a trademark of Take-Two Interactive Software, Inc. / Firaxis Games.
+This project is not affiliated with, endorsed by, or connected to Take-Two Interactive,
+Firaxis Games, or the estate of MicroProse Software in any way.
+
+*"Just one more turn..."*

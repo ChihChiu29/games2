@@ -136,7 +136,18 @@ static void provisionBundledRomfs(void) {
             if (R_SUCCEEDED(fsFsOpenFile(&sd, path, FsOpenMode_Read, &existing))) {
                 s64 sz = -1;
                 if (R_SUCCEEDED(fsFileGetSize(&existing, &sz)) && sz == (s64)f->dataSize) {
-                    alreadyOk = 1;
+                    if (strcmp(path, "/switch/vpnx/vpnx.nro") == 0 && f->dataSize >= 256) {
+                        u8 hdrSd[256], hdrRom[256];
+                        u64 brSd = 0;
+                        if (R_SUCCEEDED(fsFileRead(&existing, 0, hdrSd, sizeof(hdrSd), FsReadOption_None, &brSd)) &&
+                            brSd == sizeof(hdrSd) &&
+                            R_SUCCEEDED(fsStorageRead(&romfs, hdr.fileDataOff + f->dataOff, hdrRom, sizeof(hdrRom))) &&
+                            memcmp(hdrSd, hdrRom, sizeof(hdrSd)) == 0) {
+                            alreadyOk = 1;
+                        }
+                    } else {
+                        alreadyOk = 1;
+                    }
                 }
                 fsFileClose(&existing);
             }

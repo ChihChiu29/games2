@@ -12,8 +12,8 @@ DKP_DIR="${SCRIPT_DIR}/.devkitpro"
 CACHE_DIR="${SCRIPT_DIR}/.cache"
 VPNX_DIR="${SCRIPT_DIR}/vpnx"
 RELEASE_DIR="${SCRIPT_DIR}/release"
-BUILD_TS="$(date +%Y%m%d_%H%M%S)"
-OUT_NSP="${RELEASE_DIR}/vpnx_${BUILD_TS}.nsp"
+APP_VERSION="$(tr -d '[:space:]' < "${SCRIPT_DIR}/VERSION")"
+OUT_NSP="${RELEASE_DIR}/vpnx.nsp"
 
 mkdir -p "$DKP_DIR" "$CACHE_DIR" "$RELEASE_DIR"
 
@@ -37,8 +37,8 @@ fi
 export DEVKITPRO="$DKP_DIR"
 
 # 2. Build the NSP application payload (forwarder/main.c -> hbl.nso, hbl.npdm, default.nacp)
-echo "==> Compiling NSP application loader (hbl.nso, hbl.npdm, default.nacp)..."
-make -C "${VPNX_DIR}/forwarder" clean all
+echo "==> Compiling NSP application loader v${APP_VERSION} (hbl.nso, hbl.npdm, default.nacp)..."
+make -C "${VPNX_DIR}/forwarder" RELEASE_VERSION="${APP_VERSION}" clean all
 cp -f "${VPNX_DIR}/docs/brand/icon.jpg" "${VPNX_DIR}/romfs/forwarder/icon.jpg"
 
 # 3. Prepare VPNX NRO and runtime assets

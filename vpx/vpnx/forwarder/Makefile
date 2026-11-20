@@ -34,6 +34,6 @@ $(OUT):
 	mkdir -p $@
 
 clean:
-	rm -f hbl.elf
+	rm -f hbl.elf $(OUT)/default.nacp
 
 .PHONY: all clean

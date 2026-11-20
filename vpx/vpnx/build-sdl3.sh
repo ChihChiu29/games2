@@ -7,6 +7,7 @@ export DEVKITPRO=${DEVKITPRO:-/opt/devkitpro}
 TC=$DEVKITPRO/cmake/Switch.cmake
 
 [ -d external/SDL-switch ] || git clone --depth 1 --branch switch-sdl-3.4 https://github.com/devkitPro/SDL.git external/SDL-switch
+(cd external/SDL-switch && git apply --check ../../patches/sdl3-switch.patch 2>/dev/null && git apply ../../patches/sdl3-switch.patch) || true
 
 cmake -S external/SDL-switch -B build/sdl3-switch -DCMAKE_TOOLCHAIN_FILE=$TC -DCMAKE_BUILD_TYPE=Release \
   -DSDL_STATIC=ON -DSDL_SHARED=OFF -DSDL_TESTS=OFF -DSDL_TEST_LIBRARY=OFF -DSDL_EXAMPLES=OFF -DSDL_INSTALL_TESTS=OFF \

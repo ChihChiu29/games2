@@ -120,6 +120,15 @@ void native_overlay_draw(uint8_t *buf, int W, int H, int ox, int oy)
     uint8_t yellow = nearest(63, 55, 0), grey = nearest(22, 22, 22);
     int city = city_screen_city();
     if (city >= 0) {
+        int gon = city_has_governor(city);
+        int gx = ox + GOV_BTN_X, gy = oy + GOV_BTN_Y;
+        uint8_t green = nearest(12, 48, 16);
+        fill(buf, W, H, gx, gy, GOV_BTN_W, GOV_BTN_H, gon ? green : grey);
+        fill(buf, W, H, gx, gy, GOV_BTN_W, 1, white);
+        const char *glabel = gon ? "GOV!" : "GOV";
+        text(buf, W, H, gx + (GOV_BTN_W - text_width(glabel)) / 2, gy + 1, glabel,
+             white);
+
         int on = city_produces_gold(city);
         int x = ox + GOLD_BTN_X, y = oy + GOLD_BTN_Y;
         fill(buf, W, H, x, y, GOLD_BTN_W, GOLD_BTN_H, on ? yellow : grey);

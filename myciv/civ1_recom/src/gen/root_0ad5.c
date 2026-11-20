@@ -3769,6 +3769,14 @@ L_142a:
 L_1433:
     /* 1433: mov word ptr [0x2f50], 1 */
     hook_build_menu();
+    {
+        int16_t gov_item = 0;
+        if (governor_pick_build(&gov_item)) {
+            AX = (uint16_t)gov_item;
+            WW(SS, BP - 0x134, AX);
+            goto L_1467;
+        }
+    }
     WW(DS, 0x2f50, 0x0001);
     /* 1439: mov ax, 8 */
     AX = 0x0008;

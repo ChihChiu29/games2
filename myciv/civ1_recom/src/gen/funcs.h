@@ -1302,3 +1302,4 @@ void tsound_0000_08bd(void);
 void tsound_0000_08c8(void);
 void tsound_0000_08e5(void);
 int map_click_select_unit(void);
+int governor_pick_build(int16_t *out);

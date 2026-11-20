@@ -2,7 +2,12 @@
 #pragma once
 #include <stdint.h>
 
-/* city screen "GOLD" button (game coordinates, 320x200 city screen) */
+/* city screen "GOLD" and "GOV" buttons (game coordinates, 320x200 city screen) */
+#define GOV_BTN_X 192
+#define GOV_BTN_Y 189
+#define GOV_BTN_W 42
+#define GOV_BTN_H 9
+
 #define GOLD_BTN_X 238
 #define GOLD_BTN_Y 189
 #define GOLD_BTN_W 44
@@ -17,6 +22,7 @@
 int city_screen_city(void);          /* city shown on the city screen or -1 */
 int city_menu_open(void);            /* 1 while "What shall we build?" is open */
 int city_produces_gold(int city);
+int city_has_governor(int city);
 void city_set_gold(int city, int on);
 void ovl_msg(const char *fmt, ...);
 int native_overlay_active(void);

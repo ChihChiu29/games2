@@ -12,7 +12,8 @@ DKP_DIR="${SCRIPT_DIR}/.devkitpro"
 CACHE_DIR="${SCRIPT_DIR}/.cache"
 VPNX_DIR="${SCRIPT_DIR}/vpnx"
 RELEASE_DIR="${SCRIPT_DIR}/release"
-OUT_NSP="${RELEASE_DIR}/vpnx.nsp"
+BUILD_TS="$(date +%Y%m%d_%H%M%S)"
+OUT_NSP="${RELEASE_DIR}/vpnx_${BUILD_TS}.nsp"
 
 mkdir -p "$DKP_DIR" "$CACHE_DIR" "$RELEASE_DIR"
 
@@ -126,5 +127,6 @@ done
 find "$STAGE_DIR" -name '.DS_Store' -delete
 echo "==> Bundled ${TABLE_COUNT} table package(s)."
 
-# 5. Build the final .nsp package under release/
+# 5. Build the final .nsp package under release/ and remove previous builds
 python3 "${SCRIPT_DIR}/build/build_nsp.py" "$DKP_DIR" "$VPNX_DIR" "$STAGE_DIR" "$OUT_NSP"
+find "$RELEASE_DIR" -maxdepth 1 -type f -name '*.nsp' ! -path "$OUT_NSP" -delete

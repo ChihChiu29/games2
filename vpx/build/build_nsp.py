@@ -142,11 +142,6 @@ def patch_npdm(npdm_bytes: bytes, tid: int) -> bytes:
     # Patch program_id in ACI0 (+0x10) and program_id_min/max in ACID (+0x210, +0x218)
     struct.pack_into("<Q", npdm, aci0_off + 0x10, tid)
     struct.pack_into("<QQ", npdm, acid_off + 0x210, tid, tid)
-    # Patch Atmosphere 1.8+ bit 19 in both KAC sections
-    aci_kac_off, aci_kac_sz = struct.unpack_from("<II", npdm, aci0_off + 0x30)
-    acid_kac_off, acid_kac_sz = struct.unpack_from("<II", npdm, acid_off + 0x230)
-    npdm_patch_kc(npdm, aci0_off + aci_kac_off, aci_kac_sz, 16, 1 << 19)
-    npdm_patch_kc(npdm, acid_off + acid_kac_off, acid_kac_sz, 16, 1 << 19)
     return bytes(npdm)
 
 

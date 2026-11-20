@@ -127,25 +127,37 @@ def recompile(exe_path: str, output_dir: str, funcs_per_file: int = 50):
     impl_funcs = set()  # Functions in civ_impl.c/civ_aliases.c (exclude from recomp output)
     dump_funcs = set()  # Functions in civ_dump_lifted.c (only exclude from stubs, NOT from recomp)
     alias_externs = set()
+    func_def_re = re.compile(r'^void\s+(\w+)\s*\(\s*CPU\s*\*\s*\w+\s*\)\s*(?:/\*.*?\*/\s*)?\{', re.MULTILINE | re.DOTALL)
+    func_call_re = re.compile(r'\b((?:far_|res_|ovl)[0-9A-Za-z_]+)\s*\(\s*cpu\s*\)')
+    alias_externs.add('far_1B05_17C3')  # used by patch_worldgen.py
     for impl_file in ['civ_impl.c', 'civ_aliases.c']:
         impl_path = os.path.join(output_dir, impl_file)
         if os.path.exists(impl_path):
             with open(impl_path, 'r') as f:
                 content = f.read()
-                for match in re.finditer(r'^void\s+(\w+)\s*\([^)]*\)\s*\{', content, re.MULTILINE):
+                for match in func_def_re.finditer(content):
                     impl_funcs.add(match.group(1))
                 for match in re.finditer(r'^extern\s+void\s+(\w+)\s*\(', content, re.MULTILINE):
                     alias_externs.add(match.group(1))
-    # Dump-lifted functions: exclude from stubs but NOT from recomp output
-    # (recomp output has better overlay-relative code; dump versions are fallback)
+                for match in func_call_re.finditer(content):
+                    alias_externs.add(match.group(1))
+    # Dump-lifted functions: exclude from stubs and deduplicate against impl/recomp
     dump_path = os.path.join(output_dir, 'civ_dump_lifted.c')
     if os.path.exists(dump_path):
         with open(dump_path, 'r') as f:
             content = f.read()
-            for match in re.finditer(r'^void\s+(\w+)\s*\([^)]*\)\s*\{', content, re.MULTILINE):
-                dump_funcs.add(match.group(1))
-            for match in re.finditer(r'^extern\s+void\s+(\w+)\s*\(', content, re.MULTILINE):
-                alias_externs.add(match.group(1))
+        already_defined = impl_funcs | all_names
+        for name in sorted(already_defined):
+            pattern = rf'\n/\* Function: {re.escape(name)}.*?\n\*/\nvoid {re.escape(name)}\(CPU \*cpu\)\n\{{.*?\n\}}\n'
+            content = re.sub(pattern, '\n', content, flags=re.DOTALL)
+        with open(dump_path, 'w') as f:
+            f.write(content)
+        for match in func_def_re.finditer(content):
+            dump_funcs.add(match.group(1))
+        for match in re.finditer(r'^extern\s+void\s+(\w+)\s*\(', content, re.MULTILINE):
+            alias_externs.add(match.group(1))
+        for match in func_call_re.finditer(content):
+            alias_externs.add(match.group(1))
     if impl_funcs:
         print(f"  Found {len(impl_funcs)} hand-written implementations to exclude from recomp files")
     if dump_funcs:

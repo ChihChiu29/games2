@@ -72,12 +72,15 @@
  * After decompression, the image expands to dest_len paragraphs.
  * Returns 0 on success, -1 on error.
  */
+static uint16_t g_detected_dgroup = CIV_LOAD_SEG + CIV_DGROUP;
+
 static int exepack_decompress(CPU *cpu)
 {
     uint8_t *image = cpu->mem + seg_off(CIV_LOAD_SEG, 0);
 
     /* Read EXEPACK header at CS paragraph * 16 within the loaded image */
-    uint32_t hdr_off = (uint32_t)EXEPACK_CS * 16;  /* offset from LOAD_SEG */
+    uint16_t exepack_cs = (cpu->cs > CIV_LOAD_SEG) ? (uint16_t)(cpu->cs - CIV_LOAD_SEG) : EXEPACK_CS;
+    uint32_t hdr_off = (uint32_t)exepack_cs * 16;  /* offset from LOAD_SEG */
 
     uint16_t real_ip      = *(uint16_t *)(image + hdr_off + 0);
     uint16_t real_cs      = *(uint16_t *)(image + hdr_off + 2);
@@ -189,6 +192,7 @@ static int exepack_decompress(CPU *cpu)
         for (int i = 0; i < 32; i++) {
             if (crt0[i] == 0xB8) {
                 uint16_t dgroup = *(uint16_t *)(crt0 + i + 1);
+                g_detected_dgroup = dgroup;
                 printf("[EXEPACK] crt0 DGROUP = 0x%04X (expected 0x%04X)\n",
                        dgroup, CIV_LOAD_SEG + CIV_DGROUP);
                 break;
@@ -360,4 +364,9 @@ void res_02A310(CPU *cpu)
 
     printf("[STARTUP] C main returned, setting halted flag\n");
     cpu->halted = 1;
+}
+
+void res_02A2E0(CPU *cpu)
+{
+    res_02A310(cpu);
 }

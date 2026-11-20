@@ -25,6 +25,7 @@ extern DosState *get_dos_state(CPU *cpu);
 
 /* Forward declarations for functions we reference */
 extern void res_020FA0(CPU *cpu);
+static uint32_t gfx_page_addr(uint16_t page);
 
 /* ─── MSC CRT: fopen / fclose ─── */
 /* Hand-implemented to bypass broken CRT internal FILE struct allocation.

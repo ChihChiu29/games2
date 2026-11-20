@@ -47,6 +47,127 @@ static void fix_nro_path(char* path) {
     }
 }
 
+static int build_romfs_path(const u8 *dirBuf, u64 dirTableSize, u32 dirOff, const char *leafName, u32 leafLen, char *outPath, size_t maxLen) {
+    u32 stack[16];
+    int depth = 0;
+    u32 cur = dirOff;
+    while (cur != 0 && cur + sizeof(romfs_dir) <= dirTableSize && depth < 16) {
+        stack[depth++] = cur;
+        const romfs_dir *d = (const romfs_dir *)(dirBuf + cur);
+        if (d->parent == cur) break;
+        cur = d->parent;
+    }
+    size_t pos = 0;
+    for (int i = depth - 1; i >= 0; i--) {
+        const romfs_dir *d = (const romfs_dir *)(dirBuf + stack[i]);
+        if (pos + 1 + d->nameLen >= maxLen) return 0;
+        outPath[pos++] = '/';
+        memcpy(outPath + pos, d->name, d->nameLen);
+        pos += d->nameLen;
+    }
+    if (leafLen > 0) {
+        if (pos + 1 + leafLen >= maxLen) return 0;
+        outPath[pos++] = '/';
+        memcpy(outPath + pos, leafName, leafLen);
+        pos += leafLen;
+    }
+    if (pos == 0) {
+        outPath[pos++] = '/';
+    }
+    outPath[pos] = '\0';
+    return 1;
+}
+
+static void ensure_parent_dirs(FsFileSystem *sd, char *filePath) {
+    for (char *p = filePath + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            fsFsCreateDirectory(sd, filePath);
+            *p = '/';
+        }
+    }
+}
+
+static void provisionBundledRomfs(void) {
+    FsStorage romfs;
+    if (R_FAILED(fsOpenDataStorageByCurrentProcess(&romfs))) {
+        return;
+    }
+    romfs_header hdr;
+    if (R_FAILED(fsStorageRead(&romfs, 0, &hdr, sizeof(hdr))) ||
+        hdr.headerSize != sizeof(romfs_header) ||
+        hdr.dirTableSize == 0 || hdr.fileTableSize == 0 ||
+        hdr.dirTableSize + hdr.fileTableSize > 0x400000 ||
+        g_heapSize < 0x800000) {
+        fsStorageClose(&romfs);
+        return;
+    }
+
+    u8 *dirBuf = (u8 *)g_heapAddr;
+    u8 *fileBuf = dirBuf + ((hdr.dirTableSize + 0x1F) & ~0x1FULL);
+    u8 *copyBuf = (u8 *)(((uintptr_t)fileBuf + hdr.fileTableSize + 0xFFF) & ~0xFFFULL);
+    const u64 copyBufSize = 0x200000;
+
+    if (R_FAILED(fsStorageRead(&romfs, hdr.dirTableOff, dirBuf, hdr.dirTableSize)) ||
+        R_FAILED(fsStorageRead(&romfs, hdr.fileTableOff, fileBuf, hdr.fileTableSize))) {
+        fsStorageClose(&romfs);
+        return;
+    }
+
+    FsFileSystem sd;
+    if (R_FAILED(fsOpenSdCardFileSystem(&sd))) {
+        fsStorageClose(&romfs);
+        return;
+    }
+
+    u64 pos = 0;
+    while (pos + sizeof(romfs_file) <= hdr.fileTableSize) {
+        const romfs_file *f = (const romfs_file *)(fileBuf + pos);
+        const u64 recSize = sizeof(romfs_file) + ((f->nameLen + 3) & ~3ULL);
+        if (pos + recSize > hdr.fileTableSize) break;
+
+        char path[FS_MAX_PATH];
+        if (f->nameLen > 0 &&
+            build_romfs_path(dirBuf, hdr.dirTableSize, f->parent, (const char *)f->name, f->nameLen, path, sizeof(path)) &&
+            strncmp(path, "/switch/", 8) == 0) {
+
+            int alreadyOk = 0;
+            FsFile existing;
+            if (R_SUCCEEDED(fsFsOpenFile(&sd, path, FsOpenMode_Read, &existing))) {
+                s64 sz = -1;
+                if (R_SUCCEEDED(fsFileGetSize(&existing, &sz)) && sz == (s64)f->dataSize) {
+                    alreadyOk = 1;
+                }
+                fsFileClose(&existing);
+            }
+
+            if (!alreadyOk) {
+                ensure_parent_dirs(&sd, path);
+                fsFsDeleteFile(&sd, path);
+                if (R_SUCCEEDED(fsFsCreateFile(&sd, path, (s64)f->dataSize, 0))) {
+                    FsFile out;
+                    if (R_SUCCEEDED(fsFsOpenFile(&sd, path, FsOpenMode_Write, &out))) {
+                        u64 written = 0;
+                        while (written < f->dataSize) {
+                            u64 chunk = f->dataSize - written;
+                            if (chunk > copyBufSize) chunk = copyBufSize;
+                            if (R_FAILED(fsStorageRead(&romfs, hdr.fileDataOff + f->dataOff + written, copyBuf, chunk))) break;
+                            if (R_FAILED(fsFileWrite(&out, (s64)written, copyBuf, chunk, FsWriteOption_None))) break;
+                            written += chunk;
+                        }
+                        fsFileFlush(&out);
+                        fsFileClose(&out);
+                    }
+                }
+            }
+        }
+        pos += recSize;
+    }
+
+    fsFsClose(&sd);
+    fsStorageClose(&romfs);
+}
+
 static void NX_NORETURN selfExit(void) {
     Result rc = smInitialize();
     if (R_FAILED(rc))
@@ -309,8 +430,8 @@ void NX_NORETURN loadNro(void) {
             }
         }
         if (!ok) {
-            strcpy(g_nextNroPath, "sdmc:/hbmenu.nro");
-            strcpy(g_nextArgv, "sdmc:/hbmenu.nro");
+            strcpy(g_nextNroPath, "sdmc:/switch/vpnx/vpnx.nro");
+            strcpy(g_nextArgv, "sdmc:/switch/vpnx/vpnx.nro");
         }
 
         strcpy(g_defaultNroPath, g_nextNroPath);
@@ -467,13 +588,14 @@ int main(int argc, char **argv) {
     (void)argv;
     memcpy(g_savedTls, (const u8*)armGetTls() + 0x100, 0x100);
     setupHbHeap();
+    provisionBundledRomfs();
     getOwnProcessHandle();
     getCodeMemoryCapability();
     loadNro();
 }
 
 u32 __nx_applet_type = AppletType_Application;
-u32 __nx_fs_num_sessions = 1;
+u32 __nx_fs_num_sessions = 3;
 
 void __libnx_initheap(void) {
     extern char* fake_heap_start;

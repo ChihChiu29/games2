@@ -149,7 +149,7 @@ DEFAULT_STUBS = [
     ('far_205A_08B4', 0x205A, 0x08B4),
     ('far_205A_08D4', 0x205A, 0x08D4),
     ('far_205A_1A62', 0x205A, 0x1A62),
-    ('far_205A_1B8C', 0x205A, 0x1B8C),
+    # ('far_205A_1B8C', 0x205A, 0x1B8C), # hand-implemented in civ_impl.c
     ('far_205A_1D5C', 0x205A, 0x1D5C),
     ('far_205A_1E20', 0x205A, 0x1E20),
     ('far_205A_1E92', 0x205A, 0x1E92),
@@ -343,13 +343,21 @@ def main():
             skipped += 1
             continue
 
-        # Verify prologue
+        # Verify prologue (with fallback for 475.01 vs 475.05 minor offset shifts)
         if dump_off + 3 <= len(dump):
             b = dump[dump_off:dump_off+3]
             if not (b[0] == 0x55 and b[1] == 0x8B and b[2] == 0xEC):
-                print(f"  {name}: no prologue at 0x{dump_off:06X} ({b.hex()}), skipping")
-                skipped += 1
-                continue
+                found_delta = None
+                for delta in (-2, -26, -32, 2, 12):
+                    cand = dump_off + delta
+                    if 0 <= cand <= len(dump) - 3 and dump[cand:cand+3] == b'\x55\x8b\xec':
+                        found_delta = delta
+                        dump_off = cand
+                        break
+                if found_delta is None:
+                    print(f"  {name}: no prologue at 0x{dump_off:06X} ({b.hex()}), skipping")
+                    skipped += 1
+                    continue
 
         # Find function end
         func_end = find_function_end(dump, dump_off, is_far=is_far)

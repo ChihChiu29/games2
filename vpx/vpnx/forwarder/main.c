@@ -357,9 +357,7 @@ void NX_NORETURN loadNro(void) {
         rw_size = header->segments[2].size + header->bss_size;
         rw_size = (rw_size+0xFFF) & ~0xFFF;
 
-        if (R_FAILED(rc = svcBreak(BreakReason_NotificationOnlyFlag | BreakReason_PreUnloadDll, g_nroAddr, g_nroSize))) {
-            diagAbortWithResult(rc);
-        }
+        (void)svcBreak(BreakReason_NotificationOnlyFlag | BreakReason_PreUnloadDll, g_nroAddr, g_nroSize);
 
         rc = svcUnmapProcessCodeMemory(
             g_procHandle, g_nroAddr + header->segments[0].file_off, ((u64) g_heapAddr) + header->segments[0].file_off, header->segments[0].size);
@@ -379,9 +377,7 @@ void NX_NORETURN loadNro(void) {
         if (R_FAILED(rc))
             diagAbortWithResult(MAKERESULT(Module_HomebrewLoader, 26));
 
-        if (R_FAILED(rc = svcBreak(BreakReason_NotificationOnlyFlag | BreakReason_PostUnloadDll, g_nroAddr, g_nroSize))) {
-            diagAbortWithResult(rc);
-        }
+        (void)svcBreak(BreakReason_NotificationOnlyFlag | BreakReason_PostUnloadDll, g_nroAddr, g_nroSize);
 
         g_nroAddr = g_nroSize = 0;
     } else {
@@ -444,9 +440,7 @@ void NX_NORETURN loadNro(void) {
         fix_nro_path(fixedNextNroPath);
 
         memcpy(g_argv, g_nextArgv, sizeof(g_argv));
-        if (R_FAILED(rc = svcBreak(BreakReason_NotificationOnlyFlag | BreakReason_PreLoadDll, (uintptr_t)g_argv, sizeof(g_argv)))) {
-            diagAbortWithResult(rc);
-        }
+        (void)svcBreak(BreakReason_NotificationOnlyFlag | BreakReason_PreLoadDll, (uintptr_t)g_argv, sizeof(g_argv));
 
         uint8_t *nrobuf = (uint8_t*) g_heapAddr;
         NroStart*  start  = (NroStart*)  (nrobuf + 0);
@@ -576,8 +570,7 @@ void NX_NORETURN loadNro(void) {
     g_nroAddr = (u64)map_addr;
     g_nroSize = nro_size;
 
-    if (R_FAILED(rc = svcBreak(BreakReason_NotificationOnlyFlag | BreakReason_PostLoadDll, g_nroAddr, nro_size)))
-        diagAbortWithResult(rc);
+    (void)svcBreak(BreakReason_NotificationOnlyFlag | BreakReason_PostLoadDll, g_nroAddr, nro_size);
 
     strcpy(g_nextArgv, EXIT_DETECTION_STR);
     nroEntrypointTrampoline(&entries[0], -1, g_nroAddr);

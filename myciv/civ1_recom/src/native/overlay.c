@@ -111,7 +111,7 @@ void ovl_msg(const char *fmt, ...)
 int native_overlay_active(void)
 {
     return city_screen_city() >= 0 || (msg[0] && now_us() < msg_until) ||
-           (realtime_on() && video_is_map()) || mp_overlay_active();
+           video_is_map() || mp_overlay_active();
 }
 
 void native_overlay_draw(uint8_t *buf, int W, int H, int ox, int oy)
@@ -128,19 +128,35 @@ void native_overlay_draw(uint8_t *buf, int W, int H, int ox, int oy)
         text(buf, W, H, x + (GOLD_BTN_W - text_width(label)) / 2, y + 1, label,
              on ? black : white);
     }
-    if (realtime_on() && video_is_map() && city < 0) {
-        /* turn clock at the bottom of the status panel */
-        int x = ox + 2, y = oy + H - 9, w = 76;
-        fill(buf, W, H, x, y, w, 8, black);
-        int p = realtime_progress() * (w - 26) / 1000;
-        fill(buf, W, H, x + 1, y + 1, p, 6, realtime_paused() ? grey : yellow);
-        char t[16];
-        int s10 = realtime_turn_secs10();
-        if (realtime_paused())
-            snprintf(t, sizeof t, "PAUSE");
-        else
-            snprintf(t, sizeof t, "%d.%ds", s10 / 10, s10 % 10);
-        text(buf, W, H, x + w - 24, y + 1, t, white);
+    if (video_is_map() && city < 0) {
+        /* clickable mode toggle / turn clock at the bottom of the status panel */
+        int x = ox + RT_BTN_X, y = oy + RT_BTN_Y(H);
+        int w = RT_BTN_W, h = RT_BTN_H;
+        if (!realtime_on()) {
+            fill(buf, W, H, x, y, w, h, grey);
+            fill(buf, W, H, x, y, w, 1, white);
+            fill(buf, W, H, x, y + h - 1, w, 1, black);
+            const char *label = "TURN-BASED";
+            text(buf, W, H, x + (w - text_width(label)) / 2, y + 2, label, white);
+        } else {
+            fill(buf, W, H, x, y, w, h, black);
+            fill(buf, W, H, x, y, w, 1, white);
+            char t[16];
+            int s10 = realtime_turn_secs10();
+            if (realtime_paused())
+                snprintf(t, sizeof t, "PAUSE");
+            else if (s10 == 30)
+                snprintf(t, sizeof t, "1X");
+            else if (s10 == 15)
+                snprintf(t, sizeof t, "2X");
+            else
+                snprintf(t, sizeof t, "%d.%ds", s10 / 10, s10 % 10);
+            int tw = text_width(t) + 4;
+            int bw = w - tw - 2;
+            int p = realtime_progress() * bw / 1000;
+            fill(buf, W, H, x + 1, y + 2, p, h - 3, realtime_paused() ? grey : yellow);
+            text(buf, W, H, x + w - tw + 2, y + 2, t, white);
+        }
     }
     mp_overlay_draw(buf, W, H, ox, oy, fill, text, white, black, yellow, grey);
     if (msg[0] && now_us() < msg_until) {

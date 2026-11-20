@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build.sh - Build Civilization (477) via civ1_recom for DOSBox Pure
+# build.sh - Build Civilization (478) via civ1_recom for DOSBox Pure
 #
 # 1. Compiles civ1_recom for DOS (DJGPP + embedded CWSDSTUB DPMI host) -> CIVR.EXE
 # 2. Packages release/civ_<version>_dospure.zip with original DOS game files
@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-VERSION="${1:-477}"
+VERSION="${1:-478}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORIG_ZIP="${SCRIPT_DIR}/original/civ1_dos.zip"
 RECOM_DIR="${SCRIPT_DIR}/civ1_recom"

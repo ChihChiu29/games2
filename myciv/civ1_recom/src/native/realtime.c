@@ -23,6 +23,7 @@
 #include "runtime.h"
 #include "addons.h"
 #include "video.h"
+#include "wide.h"
 #include "mp.h"
 
 #define UNIT(p, u) (0x90f4 + 0x600 * (p) + 12 * (u))
@@ -150,9 +151,42 @@ void realtime_order_wait(void)
     order_goto_mode = RW(SS, (uint16_t)(BP - 0x36)) != 0;
 }
 
+static void realtime_cycle(void)
+{
+    if (mp_in_game())
+        return;
+    if (!cfg.realtime) {
+        cfg.realtime = 1;
+        speed = 3;                  /* 3000 ms (1x) */
+        paused = 0;
+        elapsed_us = 0;
+        last_us = now_us();
+        ovl_msg("Real-Time: 1x (3.0s)");
+    } else if (turn_ms() > 1500) {
+        speed = 5;                  /* 1500 ms (2x) */
+        paused = 0;
+        elapsed_us = 0;
+        last_us = now_us();
+        ovl_msg("Real-Time: 2x (1.5s)");
+    } else {
+        cfg.realtime = 0;
+        paused = 0;
+        elapsed_us = 0;
+        ovl_msg("Turn-Based Mode");
+    }
+}
+
 int realtime_click(int x, int y)
 {
-    if (!realtime_on() || !video_is_map() || x < 80 || y < 8 || order_goto_mode ||
+    if (!video_is_map())
+        return 0;
+    if (!mp_in_game() &&
+        x >= RT_BTN_X && x < RT_BTN_X + RT_BTN_W &&
+        y >= RT_BTN_Y(g_scr_h) && y < RT_BTN_Y(g_scr_h) + RT_BTN_H) {
+        realtime_cycle();
+        return 1;
+    }
+    if (!realtime_on() || x < 80 || y < 8 || order_goto_mode ||
         order_unit < 0 || order_unit >= 128)
         return 0;
     int sx = ((x - 80) / 16 + VIEW_X) % MAP_W, sy = (y - 8) / 16 + VIEW_Y;

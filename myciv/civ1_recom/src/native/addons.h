@@ -8,6 +8,12 @@
 #define GOLD_BTN_W 44
 #define GOLD_BTN_H 9
 
+/* map screen real-time mode toggle button (bottom of left status panel) */
+#define RT_BTN_X 2
+#define RT_BTN_W 76
+#define RT_BTN_H 10
+#define RT_BTN_Y(h) ((h) - 11)
+
 int city_screen_city(void);          /* city shown on the city screen or -1 */
 int city_produces_gold(int city);
 void city_set_gold(int city, int on);

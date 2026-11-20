@@ -77,7 +77,7 @@ void f_1a19_000e(void)
     /* 0068: mov bx, ax */
     BX = AX;
     /* 006a: mov ax, word ptr [bx + 0x113e] */
-    AX = RW(DS, BX + 0x113e);
+    AX = (uint16_t)(RW(DS, BX + 0x113e) + unit_xp_atk((int16_t)RW(SS, BP + 0x6), (int16_t)RW(SS, BP + 0x8)));
     /* 006e: mov cl, 3 */
     CL = 0x03;
     /* 0070: shl ax, cl */
@@ -119,7 +119,7 @@ L_008d:
     /* 00a1: cwde */
     AX = (int16_t)(int8_t)AL;
     /* 00a2: imul word ptr [bx + 0x1140] */
-    IMUL16(RW(DS, BX + 0x1140), F_ALL);
+    IMUL16((uint16_t)(RW(DS, BX + 0x1140) + unit_xp_def((int16_t)RW(SS, BP + 0xa), (int16_t)RW(SS, BP + 0xc))), F_ALL);
     /* 00a6: mov cl, 3 */
     CL = 0x03;
     /* 00a8: shl ax, cl */
@@ -162,7 +162,7 @@ L_00c3:
     /* 00da: cwde */
     AX = (int16_t)(int8_t)AL;
     /* 00db: imul word ptr [bx + 0x1140] */
-    IMUL16(RW(DS, BX + 0x1140), 0);
+    IMUL16((uint16_t)(RW(DS, BX + 0x1140) + unit_xp_def((int16_t)RW(SS, BP + 0xa), (int16_t)RW(SS, BP + 0xc))), 0);
     /* 00df: imul cx */
     IMUL16(CX, 0);
     /* 00e1: cdq */
@@ -191,7 +191,7 @@ L_00e8:
     /* 00fc: cwde */
     AX = (int16_t)(int8_t)AL;
     /* 00fd: imul word ptr [bx + 0x1140] */
-    IMUL16(RW(DS, BX + 0x1140), 0);
+    IMUL16((uint16_t)(RW(DS, BX + 0x1140) + unit_xp_def((int16_t)RW(SS, BP + 0xa), (int16_t)RW(SS, BP + 0xc))), 0);
     /* 0101: shl ax, 1 */
     AX = AX << 1;
     /* 0103: shl ax, 1 */
@@ -1730,6 +1730,16 @@ L_08ff:
     /* 08ff: jmp 0xb1b */
     goto L_0b1b;
 L_0902:
+    if (unit_xp_consume_life((int16_t)RW(SS, BP + 0xa), (int16_t)RW(SS, BP + 0xc))) {
+        uint16_t ar = (uint16_t)(0x90f4 + 0x600 * (int16_t)RW(SS, BP + 0x6) + 12 * (int16_t)RW(SS, BP + 0x8));
+        uint8_t mv = RB(DS, (uint16_t)(ar + 4));
+        if (RB(DS, (uint16_t)(ar + 3)) == 0x0f) /* Bomber ends turn after attack */
+            WB(DS, (uint16_t)(ar + 4), 0);
+        else
+            WB(DS, (uint16_t)(ar + 4), mv > 3 ? (uint8_t)(mv - 3) : 0);
+        AX = 0xffff;
+        goto L_0b60;
+    }
     /* 0902: cmp word ptr [bp + 0xa], 0 */
     /* 0906: jne 0x953 */
     if ((uint16_t)RW(SS, BP + 0xa) != (uint16_t)0x0000) goto L_0953;
@@ -2076,6 +2086,8 @@ L_0ad2:
     CALLF(SEGR(0x0860), 0x0add, f_0860_0ee0);
     /* 0add: add sp, 4 */
     SP = ADD16(SP, 0x0004, F_ALL);
+    unit_xp_clear((int16_t)RW(SS, BP + 0xa), (int16_t)RW(SS, BP + 0xc));
+    unit_xp_on_win((int16_t)RW(SS, BP + 0x6), (int16_t)RW(SS, BP + 0x8));
     /* 0ae0: mov si, word ptr [bp + 6] */
     SI = RW(SS, BP + 0x6);
     /* 0ae3: mov cl, 4 */
@@ -2124,6 +2136,12 @@ L_0b03:
     IRQ_POLL();
     goto L_08f3;
 L_0b1b:
+    if (unit_xp_consume_life((int16_t)RW(SS, BP + 0x6), (int16_t)RW(SS, BP + 0x8))) {
+        uint16_t ar = (uint16_t)(0x90f4 + 0x600 * (int16_t)RW(SS, BP + 0x6) + 12 * (int16_t)RW(SS, BP + 0x8));
+        WB(DS, (uint16_t)(ar + 4), 0);
+        AX = 0xffff;
+        goto L_0b60;
+    }
     /* 0b1b: mov si, word ptr [bp + 0xa] */
     SI = RW(SS, BP + 0xa);
     /* 0b1e: mov cl, 4 */
@@ -2144,6 +2162,8 @@ L_0b1b:
     CALLF(SEGR(0x0860), 0x0b36, f_0860_0ee0);
     /* 0b36: add sp, 4 */
     SP += 0x0004;
+    unit_xp_clear((int16_t)RW(SS, BP + 0x6), (int16_t)RW(SS, BP + 0x8));
+    unit_xp_on_win((int16_t)RW(SS, BP + 0xa), (int16_t)RW(SS, BP + 0xc));
     /* 0b39: mov ax, 2 */
     AX = 0x0002;
     /* 0b3c: push ax */

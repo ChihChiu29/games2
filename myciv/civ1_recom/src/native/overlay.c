@@ -114,55 +114,121 @@ int native_overlay_active(void)
            video_is_map() || mp_overlay_active();
 }
 
+static void shadow_text(uint8_t *buf, int W, int H, int x, int y,
+                        const char *s, uint8_t fg, uint8_t sh)
+{
+    text(buf, W, H, x + 1, y + 1, s, sh);
+    text(buf, W, H, x, y, s, fg);
+}
+
+/* Draw a classic Civ1 3D beveled button (matching f_0d07_703b):
+   1px outer dark frame, top/left highlight bevel, bottom/right shadow bevel,
+   and centered text with 1px drop shadow. */
+static void civ_button(uint8_t *buf, int W, int H, int x, int y, int w, int h,
+                       uint8_t face, uint8_t hi, uint8_t lo, uint8_t border,
+                       const char *label, uint8_t fg, uint8_t sh)
+{
+    fill(buf, W, H, x, y, w, h, face);
+    /* top and left bevel */
+    fill(buf, W, H, x, y, w, 1, hi);
+    fill(buf, W, H, x, y, 1, h, hi);
+    /* bottom and right bevel */
+    fill(buf, W, H, x + 1, y + h - 1, w - 1, 1, lo);
+    fill(buf, W, H, x + w - 1, y + 1, 1, h - 1, lo);
+    /* subtle dark outer bottom/right drop line */
+    fill(buf, W, H, x + 1, y + h, w, 1, border);
+    fill(buf, W, H, x + w, y + 1, 1, h, border);
+    if (label && label[0]) {
+        int tx = x + (w - text_width(label)) / 2;
+        int ty = y + (h - 7) / 2;
+        if (sh != fg)
+            shadow_text(buf, W, H, tx, ty, label, fg, sh);
+        else
+            text(buf, W, H, tx, ty, label, fg);
+    }
+}
+
 void native_overlay_draw(uint8_t *buf, int W, int H, int ox, int oy)
 {
+    uint16_t saved_ds = DS;
+    DS = DGROUP;
     uint8_t white = nearest(63, 63, 63), black = nearest(0, 0, 0);
     uint8_t yellow = nearest(63, 55, 0), grey = nearest(22, 22, 22);
+    uint8_t lgrey = nearest(42, 42, 42), dgrey = nearest(14, 14, 14);
+    uint8_t blue = nearest(16, 20, 56), dblue = nearest(0, 0, 32);
+    uint8_t lblue = nearest(34, 42, 63);
+    uint8_t green = nearest(0, 36, 0), lgreen = nearest(20, 60, 20);
+    uint8_t gold = nearest(46, 34, 0);
+
     int city = city_screen_city();
     if (city >= 0) {
         int gon = city_has_governor(city);
-        int gx = ox + GOV_BTN_X, gy = oy + GOV_BTN_Y;
-        uint8_t green = nearest(12, 48, 16);
-        fill(buf, W, H, gx, gy, GOV_BTN_W, GOV_BTN_H, gon ? green : grey);
-        fill(buf, W, H, gx, gy, GOV_BTN_W, 1, white);
-        const char *glabel = gon ? "GOV!" : "GOV";
-        text(buf, W, H, gx + (GOV_BTN_W - text_width(glabel)) / 2, gy + 1, glabel,
-             white);
+        civ_button(buf, W, H, ox + GOV_BTN_X, oy + GOV_BTN_Y,
+                   GOV_BTN_W, GOV_BTN_H,
+                   gon ? green : blue,
+                   gon ? lgreen : lblue,
+                   gon ? black : dblue,
+                   black,
+                   gon ? "GOV!" : "GOV",
+                   gon ? yellow : white, black);
 
         int on = city_produces_gold(city);
-        int x = ox + GOLD_BTN_X, y = oy + GOLD_BTN_Y;
-        fill(buf, W, H, x, y, GOLD_BTN_W, GOLD_BTN_H, on ? yellow : grey);
-        fill(buf, W, H, x, y, GOLD_BTN_W, 1, white);
-        const char *label = on ? "GOLD!" : "GOLD";
-        text(buf, W, H, x + (GOLD_BTN_W - text_width(label)) / 2, y + 1, label,
-             on ? black : white);
+        civ_button(buf, W, H, ox + GOLD_BTN_X, oy + GOLD_BTN_Y,
+                   GOLD_BTN_W, GOLD_BTN_H,
+                   on ? gold : blue,
+                   on ? yellow : lblue,
+                   on ? black : dblue,
+                   black,
+                   on ? "GOLD!" : "GOLD",
+                   on ? yellow : white, black);
+
         if (on && !city_menu_open()) {
-            uint8_t dblue = nearest(0, 0, 28);
             /* cover old item name/icon between Buy and Change buttons */
             fill(buf, W, H, ox + 231, oy + 98, 85, 8, dblue);
             fill(buf, W, H, ox + 264, oy + 100, 29, 16, dblue);
-            text(buf, W, H, ox + 267, oy + 105, "GOLD", yellow);
-            /* label inside the production shields box */
+            shadow_text(buf, W, H, ox + 267, oy + 105, "GOLD", yellow, black);
+            /* classic beveled plaque inside the production shields box */
             fill(buf, W, H, ox + 232, oy + 120, 82, 24, dblue);
-            text(buf, W, H, ox + 232 + (82 - text_width("PRODUCING")) / 2, oy + 123,
-                 "PRODUCING", white);
-            text(buf, W, H, ox + 232 + (82 - text_width("GOLD")) / 2, oy + 133,
-                 "GOLD", yellow);
+            fill(buf, W, H, ox + 232, oy + 120, 82, 1, blue);
+            fill(buf, W, H, ox + 232, oy + 120, 1, 24, blue);
+            fill(buf, W, H, ox + 233, oy + 143, 81, 1, black);
+            fill(buf, W, H, ox + 313, oy + 121, 1, 23, black);
+            shadow_text(buf, W, H, ox + 232 + (82 - text_width("PRODUCING")) / 2,
+                        oy + 123, "PRODUCING", white, black);
+            shadow_text(buf, W, H, ox + 232 + (82 - text_width("GOLD")) / 2,
+                        oy + 133, "GOLD", yellow, black);
         }
     }
     if (video_is_map() && city < 0) {
+        /* active unit XP / Hero badge right above the mode toggle button */
+        int au = realtime_active_unit();
+        if (au >= 0 && au < 128) {
+            char badge[24];
+            int is_hero = 0;
+            int has = unit_xp_badge((int16_t)GW(0xe710), au, badge, sizeof badge, &is_hero);
+            if (has) {
+                int bx = ox + RT_BTN_X, by = oy + RT_BTN_Y(H) - 12;
+                civ_button(buf, W, H, bx, by, RT_BTN_W, 10,
+                           is_hero ? gold : dblue,
+                           is_hero ? yellow : lblue,
+                           black, black,
+                           badge, is_hero ? yellow : white, black);
+            }
+        }
         /* clickable mode toggle / turn clock at the bottom of the status panel */
         int x = ox + RT_BTN_X, y = oy + RT_BTN_Y(H);
         int w = RT_BTN_W, h = RT_BTN_H;
         if (!realtime_on()) {
-            fill(buf, W, H, x, y, w, h, grey);
-            fill(buf, W, H, x, y, w, 1, white);
-            fill(buf, W, H, x, y + h - 1, w, 1, black);
-            const char *label = "TURN-BASED";
-            text(buf, W, H, x + (w - text_width(label)) / 2, y + 2, label, white);
+            civ_button(buf, W, H, x, y, w, h,
+                       lgrey, white, dgrey, black,
+                       "TURN-BASED", black, black);
         } else {
-            fill(buf, W, H, x, y, w, h, black);
-            fill(buf, W, H, x, y, w, 1, white);
+            /* sunken bevel frame matching Civ1's stone side panel */
+            fill(buf, W, H, x, y, w, h, dblue);
+            fill(buf, W, H, x, y, w, 1, dgrey);
+            fill(buf, W, H, x, y, 1, h, dgrey);
+            fill(buf, W, H, x + 1, y + h - 1, w - 1, 1, white);
+            fill(buf, W, H, x + w - 1, y + 1, 1, h - 1, white);
             char t[16];
             int s10 = realtime_turn_secs10();
             if (realtime_paused())
@@ -174,17 +240,24 @@ void native_overlay_draw(uint8_t *buf, int W, int H, int ox, int oy)
             else
                 snprintf(t, sizeof t, "%d.%ds", s10 / 10, s10 % 10);
             int tw = text_width(t) + 4;
-            int bw = w - tw - 2;
+            int bw = w - tw - 3;
             int p = realtime_progress() * bw / 1000;
-            fill(buf, W, H, x + 1, y + 2, p, h - 3, realtime_paused() ? grey : yellow);
-            text(buf, W, H, x + w - tw + 2, y + 2, t, white);
+            if (p > 0) {
+                fill(buf, W, H, x + 2, y + 2, p, h - 4,
+                     realtime_paused() ? grey : yellow);
+                fill(buf, W, H, x + 2, y + h - 3, p, 1,
+                     realtime_paused() ? dgrey : gold);
+            }
+            shadow_text(buf, W, H, x + w - tw + 1, y + 2, t, white, black);
         }
     }
     mp_overlay_draw(buf, W, H, ox, oy, fill, text, white, black, yellow, grey);
     if (msg[0] && now_us() < msg_until) {
-        int w = text_width(msg) + 8;
+        int w = text_width(msg) + 10;
         int x = (W - w) / 2, y = 10;
-        fill(buf, W, H, x, y, w, 11, black);
-        text(buf, W, H, x + 4, y + 2, msg, yellow);
+        civ_button(buf, W, H, x, y, w, 11,
+                   dblue, lblue, black, black,
+                   msg, yellow, black);
     }
+    DS = saved_ds;
 }

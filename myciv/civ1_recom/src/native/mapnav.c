@@ -40,19 +40,16 @@ int mapnav_button(int b, int down, int x, int y)
         start_x = last_x = x;
         start_y = last_y = y;
         acc_x = acc_y = 0;
-        if (b == 0) {
-            held = 1;           /* decide on release: click or drag */
-            return 1;
-        }
-        return 0;               /* right button: the game gets it too */
+        held = 1;               /* decide on release: click or drag */
+        return 1;
     }
     if (b != drag_button)
         return 0;
     drag_button = -1;
-    if (b == 0 && held) {
+    if (held) {
         held = 0;
         if (!dragging)          /* it was a click after all */
-            mouse_deliver_click(0);
+            mouse_deliver_click(b);
         dragging = 0;
         return 1;
     }

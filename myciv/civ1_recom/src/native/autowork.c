@@ -280,6 +280,16 @@ void hook_unit_order_key(void)
     }
 }
 
+int autowork_cancel(int unit)
+{
+    if (unit >= 0 && unit < 128 && jobs[unit].active) {
+        jobs[unit].active = 0;
+        ovl_msg("Settlers: automation cancelled");
+        return 1;
+    }
+    return 0;
+}
+
 void autowork_save(void *fp)
 {
     FILE *f = fp;

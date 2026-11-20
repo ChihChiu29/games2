@@ -3772,8 +3772,11 @@ L_1433:
     {
         int16_t gov_item = 0;
         if (governor_pick_build(&gov_item)) {
+            WW(DS, 0x2f4c, 0x0000);
             AX = (uint16_t)gov_item;
             WW(SS, BP - 0x134, AX);
+            if ((uint16_t)AX == (uint16_t)0x0063)
+                goto L_145e;
             goto L_1467;
         }
     }

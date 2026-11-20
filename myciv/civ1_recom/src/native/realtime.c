@@ -150,6 +150,11 @@ void realtime_order_wait(void)
     order_goto_mode = RW(SS, (uint16_t)(BP - 0x36)) != 0;
 }
 
+int realtime_active_unit(void)
+{
+    return order_unit;
+}
+
 static void realtime_cycle(void)
 {
     if (mp_in_game())
@@ -206,22 +211,27 @@ int map_click_select_unit(void)
         uint16_t r = UNIT(player, best);
         WB(DS, r, GB(r) & ~0xcf);        /* clear sentry, fortify, settler work */
         WB(DS, (uint16_t)(r + 6), 0xff); /* clear goto */
+        autowork_cancel(best);
         return best;
     }
     if (cur_here)
         return -2;
     /* All friendly units on this tile have 0 moves left: wake standing orders */
+    int cancelled_auto = 0;
     for (int u = 0; u < 128; u++) {
         uint16_t r = UNIT(player, u);
         if (GB(r + UNIT_TYPE) == 0xff || GB(r + 1) != sx || GB(r + 2) != sy)
             continue;
+        if (autowork_cancel(u))
+            cancelled_auto = 1;
         if ((GB(r) & 0xcf) || GB(r + 6) != 0xff) {
             WB(DS, r, GB(r) & ~0xcf);
             WB(DS, (uint16_t)(r + 6), 0xff);
             woke_zero = 1;
         }
     }
-    ovl_msg(woke_zero ? "Unit awakened (0 moves left)" : "No moves left this turn");
+    if (!cancelled_auto)
+        ovl_msg(woke_zero ? "Unit awakened (0 moves left)" : "No moves left this turn");
     return -2;
 }
 

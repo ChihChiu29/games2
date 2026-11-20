@@ -142,7 +142,7 @@ L_00b9:
     /* 00c1: mov ax, 3 */
     AX = 0x0003;
     /* 00c4: imul word ptr [bx + 0x113a] */
-    IMUL16(RW(DS, BX + 0x113a), 0);
+    IMUL16((uint16_t)(RW(DS, BX + 0x113a) + unit_xp_mov((int16_t)RW(SS, BP + 0x6), (int16_t)RW(SS, BP - 0x32))), 0);
     /* 00c8: mov byte ptr [si - 0x6f08], al */
     WB(DS, SI - 0x6f08, AL);
     /* 00cc: mov al, 0x22 */

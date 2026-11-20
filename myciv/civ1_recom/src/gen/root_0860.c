@@ -2797,6 +2797,7 @@ void f_0860_0ee0(void)
     PUSH(DI);
     /* 0ee4: push si */
     PUSH(SI);
+    unit_xp_clear((int16_t)RW(SS, BP + 0x6), (int16_t)RW(SS, BP + 0x8));
     /* 0ee5: cmp word ptr [0x7058], 0 */
     /* 0eea: je 0xf16 */
     if ((uint16_t)RW(DS, 0x7058) == (uint16_t)0x0000) goto L_0f16;

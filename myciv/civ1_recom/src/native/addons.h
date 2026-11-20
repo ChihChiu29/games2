@@ -40,6 +40,7 @@ int realtime_progress(void);         /* 0..1000 of the turn used */
 int realtime_paused(void);
 int realtime_turn_secs10(void);      /* turn length in 1/10 s */
 void realtime_order_wait(void);
+int realtime_active_unit(void);
 int realtime_click(int x, int y);
 void realtime_apply_select(void);
 
@@ -59,5 +60,17 @@ void native_state_dump_to(const char *path);
 /* f is a FILE * (kept opaque so this header needs no system headers) */
 void native_save_state(void *f);
 void native_load_state(void *f);
+int autowork_cancel(int unit);
 void autowork_save(void *f);
 void autowork_load(void *f);
+
+/* unit XP & Hero upgrades (unitxp.c) */
+int unit_xp_atk(int p, int u);
+int unit_xp_def(int p, int u);
+int unit_xp_mov(int p, int u);
+void unit_xp_clear(int p, int u);
+int unit_xp_consume_life(int p, int u);
+void unit_xp_on_win(int p, int u);
+int unit_xp_badge(int p, int u, char *buf, int bufsz, int *is_hero);
+void unit_xp_save(void *f);
+void unit_xp_load(void *f);

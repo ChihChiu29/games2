@@ -178,7 +178,7 @@ if not target:
     print("FAIL: Eden window did not appear", file=sys.stderr)
     sys.exit(1)
 
-time.sleep(3)
+time.sleep(6)
 menu_nb, menu_rgb = snap(dpy, target[0], target[2], target[3], os.path.join(out_dir, "menu.png"))
 print(f"Menu screenshot: {out_dir}/menu.png (viewport non-black={menu_nb})", flush=True)
 
@@ -191,10 +191,16 @@ for s in sub:
 # 3. Wait for VPX to reach "playing" and emit at least one [perf] line
 reached_playing = False
 deadline = time.time() + load_timeout
+stdio_log = os.path.join(os.path.dirname(vpinball_log), "stdio.log")
+last_retry = time.time()
 while time.time() < deadline:
     if not pid_alive(epid):
         print("FAIL: Eden process exited unexpectedly", file=sys.stderr)
         sys.exit(1)
+    if not os.path.isfile(stdio_log) and time.time() - last_retry > 3.0:
+        for s in sub:
+            send_key(dpy, root, s[0], 0x0061)
+        last_retry = time.time()
     if os.path.isfile(vpinball_log):
         txt = open(vpinball_log, "r", errors="ignore").read()
         if "[perf]" in txt:
@@ -206,7 +212,7 @@ if not reached_playing:
     print(f"FAIL: Table did not reach gameplay within {load_timeout}s", file=sys.stderr)
     sys.exit(1)
 
-time.sleep(3)
+time.sleep(int(os.environ.get("PERF_WAIT", "3")))
 play_nb, play_rgb = snap(dpy, target[0], target[2], target[3], os.path.join(out_dir, "play.png"))
 print(f"Play screenshot: {out_dir}/play.png (viewport non-black={play_nb})", flush=True)
 x11.XCloseDisplay(dpy)
@@ -227,5 +233,5 @@ fi
 echo "==> BGFX / Window status:"
 grep -E "Window #0|BGFX initialized" "$SDMC_VPNX/stdio.log" || true
 echo "==> Perf:"
-grep "\[perf\]" "$SDMC_VPNX/vpinball.log" | tail -n 2 || true
+grep "\[perf\]" "$SDMC_VPNX/vpinball.log" || true
 echo "PASS: $NSP rendered menu and gameplay cleanly!"

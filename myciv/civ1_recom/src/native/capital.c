@@ -24,6 +24,17 @@
 static struct { uint8_t on, x, y, owner; } cap[128];
 static struct { uint8_t on, x, y, owner; } gov[128];
 static int screen_city = -1;
+static int last_cap_turn = -1;
+
+static void check_cap_new_game(void)
+{
+    int turn = (int16_t)GW(0x90f2);
+    if (turn == 0 && last_cap_turn > 0) {
+        memset(cap, 0, sizeof cap);
+        memset(gov, 0, sizeof gov);
+    }
+    last_cap_turn = turn;
+}
 
 int city_screen_city(void)
 {
@@ -32,12 +43,17 @@ int city_screen_city(void)
 
 int city_produces_gold(int c)
 {
+    check_cap_new_game();
     if (c < 0 || c >= 128 || !cap[c].on)
         return 0;
     uint16_t r = CITY(c);
     /* the flag belongs to the city that was there when it was set */
-    return cap[c].x == GB(r + CITY_X) && cap[c].y == GB(r + CITY_Y) &&
-           cap[c].owner == GB(r + CITY_OWNER);
+    if (cap[c].x != GB(r + CITY_X) || cap[c].y != GB(r + CITY_Y) ||
+        cap[c].owner != GB(r + CITY_OWNER)) {
+        cap[c].on = 0;
+        return 0;
+    }
+    return 1;
 }
 
 static void set_gold(int c, int on)
@@ -69,11 +85,16 @@ static void toggle(int c)
 
 int city_has_governor(int c)
 {
+    check_cap_new_game();
     if (c < 0 || c >= 128 || !gov[c].on)
         return 0;
     uint16_t r = CITY(c);
-    return gov[c].x == GB(r + CITY_X) && gov[c].y == GB(r + CITY_Y) &&
-           gov[c].owner == GB(r + CITY_OWNER);
+    if (gov[c].x != GB(r + CITY_X) || gov[c].y != GB(r + CITY_Y) ||
+        gov[c].owner != GB(r + CITY_OWNER)) {
+        gov[c].on = 0;
+        return 0;
+    }
+    return 1;
 }
 
 static void toggle_gov(int c)
@@ -248,9 +269,27 @@ int governor_pick_build(int16_t *out)
         }
     }
 
-    /* 4. All development buildings done: produce Gold */
+    /* 3b. If the build list is paginated (late game: 0x63 = "More..."),
+       silently advance to page 2 so we check all buildings before Gold. */
+    if (list_has(list, count, 0x63)) {
+        *out = 0x63;
+        menu_city = -1;
+        return 1;
+    }
+
+    /* 4. All development buildings done: produce Gold.
+       Pick a legal buildable item from the list (skipping GOLD_ITEM) as the
+       underlying build so turning Gold off later never builds a duplicate. */
     city_set_gold(city, 1);
-    *out = (int16_t)RW(SS, list);       /* keep current underlying build */
+    int16_t fallback = (int16_t)RW(SS, list);
+    for (int i = 1; i < count; i++) {
+        int16_t cand = (int16_t)RW(SS, (uint16_t)(list + 2 * i));
+        if (cand != GOLD_ITEM && cand != 0x62 && cand != 0x63) {
+            fallback = cand;
+            break;
+        }
+    }
+    *out = fallback;
     menu_city = -1;
     ovl_msg("Gov: Producing Gold");
     return 1;
@@ -309,12 +348,8 @@ static int key_filter(uint16_t key)
         return 1;
     if (screen_city < 0 && realtime_key(key))
         return 1;
-    if (screen_city >= 0 && (ascii == 'g' || ascii == 'G')) {
+    if (screen_city >= 0 && !city_menu_open() && (ascii == 'g' || ascii == 'G')) {
         toggle(screen_city);
-        return 1;
-    }
-    if (screen_city >= 0 && (ascii == 'm' || ascii == 'M')) {
-        toggle_gov(screen_city);
         return 1;
     }
     return 0;
@@ -324,7 +359,7 @@ static int mouse_filter(int button, int x, int y)
 {
     if (screen_city < 0 && button == 0 && realtime_click(x, y))
         return 1;
-    if (screen_city < 0 || button != 0)
+    if (screen_city < 0 || button != 0 || city_menu_open())
         return 0;
     if (x >= GOV_BTN_X && x < GOV_BTN_X + GOV_BTN_W &&
         y >= GOV_BTN_Y && y < GOV_BTN_Y + GOV_BTN_H) {
@@ -342,10 +377,11 @@ static int mouse_filter(int button, int x, int y)
 void native_save_state(void *fp)
 {
     FILE *f = fp;
-    fwrite("CIVN2", 1, 5, f);
+    fwrite("CIVN3", 1, 5, f);
     fwrite(cap, sizeof cap, 1, f);
     autowork_save(f);
     fwrite(gov, sizeof gov, 1, f);
+    unit_xp_save(f);
 }
 
 void native_load_state(void *fp)
@@ -354,14 +390,19 @@ void native_load_state(void *fp)
     char tag[5];
     memset(cap, 0, sizeof cap);
     memset(gov, 0, sizeof gov);
+    last_cap_turn = -1;
+    unit_xp_load(NULL);
     if (!f || fread(tag, 1, 5, f) != 5 ||
-        (memcmp(tag, "CIVN1", 5) && memcmp(tag, "CIVN2", 5)))
+        (memcmp(tag, "CIVN1", 5) && memcmp(tag, "CIVN2", 5) && memcmp(tag, "CIVN3", 5)))
         return;
     if (fread(cap, sizeof cap, 1, f) != 1)
         memset(cap, 0, sizeof cap);
     autowork_load(f);
-    if (!memcmp(tag, "CIVN2", 5) && fread(gov, sizeof gov, 1, f) != 1)
+    if ((!memcmp(tag, "CIVN2", 5) || !memcmp(tag, "CIVN3", 5)) &&
+        fread(gov, sizeof gov, 1, f) != 1)
         memset(gov, 0, sizeof gov);
+    if (!memcmp(tag, "CIVN3", 5))
+        unit_xp_load(f);
 }
 
 /* The filters run in the keyboard interrupt / mouse event, where DS is

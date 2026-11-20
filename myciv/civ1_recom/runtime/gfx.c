@@ -1034,9 +1034,19 @@ static void e10_dissolve(void)
         return;
     }
     /* pseudo random dissolve over ~speed ticks */
-    int total = wide ? gfx_w * gfx_h : 64000;
-    uint8_t *s = wide ? gfx_page_pixels(from) : &mem[(uint32_t)from << 4];
-    uint8_t *d = wide ? gfx_page_pixels(to) : &mem[(uint32_t)to << 4];
+    int w = 320, h = 200;
+    struct hostpage *sp = NULL, *dp = NULL;
+    uint8_t *s = NULL, *d = NULL;
+    if (wide) {
+        sp = host_page(from);
+        dp = host_page(to);
+        w = sp->w < dp->w ? sp->w : dp->w;
+        h = sp->h < dp->h ? sp->h : dp->h;
+    } else {
+        s = &mem[(uint32_t)from << 4];
+        d = &mem[(uint32_t)to << 4];
+    }
+    int total = w * h;
     uint32_t lfsr = 1, done = 0;
     uint64_t start = now_us(), dur = (uint64_t)speed * 1000000ULL / 182 * 10 / 10;
     if (dur > 3000000)
@@ -1051,7 +1061,13 @@ static void e10_dissolve(void)
             do {
                 lfsr = (lfsr >> 1) ^ (-(lfsr & 1u) & 0x90000u);
             } while (lfsr > (uint32_t)total);
-            d[lfsr - 1] = s[lfsr - 1];
+            uint32_t idx = lfsr - 1;
+            if (wide) {
+                int py = (int)(idx / (uint32_t)w), px = (int)(idx % (uint32_t)w);
+                dp->pix[(size_t)py * dp->w + px] = sp->pix[(size_t)py * sp->w + px];
+            } else {
+                d[idx] = s[idx];
+            }
             done++;
         }
         if (done < (uint32_t)total)
@@ -1059,7 +1075,7 @@ static void e10_dissolve(void)
         if (quit_requested)
             break;
     }
-    memcpy(d, s, (size_t)total);
+    copy_page(from, to);
 }
 
 /* 10bb: screen shake, called from the timer interrupt.  The state lives

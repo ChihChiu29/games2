@@ -127,6 +127,19 @@ void native_overlay_draw(uint8_t *buf, int W, int H, int ox, int oy)
         const char *label = on ? "GOLD!" : "GOLD";
         text(buf, W, H, x + (GOLD_BTN_W - text_width(label)) / 2, y + 1, label,
              on ? black : white);
+        if (on && !city_menu_open()) {
+            uint8_t dblue = nearest(0, 0, 28);
+            /* cover old item name/icon between Buy and Change buttons */
+            fill(buf, W, H, ox + 231, oy + 98, 85, 8, dblue);
+            fill(buf, W, H, ox + 264, oy + 100, 29, 16, dblue);
+            text(buf, W, H, ox + 267, oy + 105, "GOLD", yellow);
+            /* label inside the production shields box */
+            fill(buf, W, H, ox + 232, oy + 120, 82, 24, dblue);
+            text(buf, W, H, ox + 232 + (82 - text_width("PRODUCING")) / 2, oy + 123,
+                 "PRODUCING", white);
+            text(buf, W, H, ox + 232 + (82 - text_width("GOLD")) / 2, oy + 133,
+                 "GOLD", yellow);
+        }
     }
     if (video_is_map() && city < 0) {
         /* clickable mode toggle / turn clock at the bottom of the status panel */

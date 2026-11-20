@@ -127,14 +127,13 @@ void realtime_idle(void)
     bios_key_push(MARKER_KEY);
 }
 
-/* hook before 0402:3e31: the human player's units are all done.  The game
-   waits at "End of Turn" only with that option; in real time it always
-   waits there, for the clock. */
+/* hook before 0402:3e31: the human player's units are all done.  Always
+   wait at "End of Turn" (for the player in turn-based mode, or for the
+   clock in real-time mode) so turns never auto-end unexpectedly. */
 void hook_realtime_end_of_turn(void)
 {
     mp_units_done();
-    if (cfg.realtime || mp_in_game())
-        WW(SS, (uint16_t)(BP - 6), 0);
+    WW(SS, (uint16_t)(BP - 6), 0);
 }
 
 /* ---- selecting a unit by clicking it ----
@@ -176,6 +175,56 @@ static void realtime_cycle(void)
     }
 }
 
+/* Called from 0402:0c23 when left-clicking a map tile containing our own
+   unit(s).  Returns unit index >= 0 to immediately wake & select it, or -2
+   if handled without switching (already active or all units have 0 moves). */
+int map_click_select_unit(void)
+{
+    int player = (int16_t)RW(SS, (uint16_t)(BP + 6));
+    int cur = (int16_t)RW(SS, (uint16_t)(BP - 0x32));
+    int sx = (int16_t)RW(SS, (uint16_t)(BP - 0x1c));
+    int sy = (int16_t)RW(SS, (uint16_t)(BP - 0x26));
+    int best = -1, cur_here = 0, woke_zero = 0;
+
+    /* Scan starting after cur so clicking a stack cycles through units */
+    int start = (cur >= 0 && cur < 128) ? (cur + 1) & 127 : 0;
+    for (int i = 0; i < 128; i++) {
+        int u = (start + i) & 127;
+        uint16_t r = UNIT(player, u);
+        if (GB(r + UNIT_TYPE) == 0xff || GB(r + 1) != sx || GB(r + 2) != sy)
+            continue;
+        if (u == cur) {
+            cur_here = 1;
+            continue;
+        }
+        if (GB(r + UNIT_MOVES) > 0) {
+            best = u;
+            break;
+        }
+    }
+    if (best >= 0) {
+        uint16_t r = UNIT(player, best);
+        WB(DS, r, GB(r) & ~0xcf);        /* clear sentry, fortify, settler work */
+        WB(DS, (uint16_t)(r + 6), 0xff); /* clear goto */
+        return best;
+    }
+    if (cur_here)
+        return -2;
+    /* All friendly units on this tile have 0 moves left: wake standing orders */
+    for (int u = 0; u < 128; u++) {
+        uint16_t r = UNIT(player, u);
+        if (GB(r + UNIT_TYPE) == 0xff || GB(r + 1) != sx || GB(r + 2) != sy)
+            continue;
+        if ((GB(r) & 0xcf) || GB(r + 6) != 0xff) {
+            WB(DS, r, GB(r) & ~0xcf);
+            WB(DS, (uint16_t)(r + 6), 0xff);
+            woke_zero = 1;
+        }
+    }
+    ovl_msg(woke_zero ? "Unit awakened (0 moves left)" : "No moves left this turn");
+    return -2;
+}
+
 int realtime_click(int x, int y)
 {
     if (!video_is_map())
@@ -184,20 +233,6 @@ int realtime_click(int x, int y)
         x >= RT_BTN_X && x < RT_BTN_X + RT_BTN_W &&
         y >= RT_BTN_Y(g_scr_h) && y < RT_BTN_Y(g_scr_h) + RT_BTN_H) {
         realtime_cycle();
-        return 1;
-    }
-    if (!realtime_on() || x < 80 || y < 8 || order_goto_mode ||
-        order_unit < 0 || order_unit >= 128)
-        return 0;
-    int sx = ((x - 80) / 16 + VIEW_X) % MAP_W, sy = (y - 8) / 16 + VIEW_Y;
-    int player = (int16_t)GW(0xe710);
-    for (int u = 0; u < 128; u++) {
-        uint16_t r = UNIT(player, u);
-        if (u == order_unit || GB(r + UNIT_TYPE) == 0xff || GB(r + 1) != sx ||
-            GB(r + 2) != sy || GB(r + UNIT_MOVES) == 0)
-            continue;
-        select_unit = u;
-        bios_key_push(MARKER_KEY);
         return 1;
     }
     return 0;

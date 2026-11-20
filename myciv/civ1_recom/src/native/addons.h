@@ -15,6 +15,7 @@
 #define RT_BTN_Y(h) ((h) - 11)
 
 int city_screen_city(void);          /* city shown on the city screen or -1 */
+int city_menu_open(void);            /* 1 while "What shall we build?" is open */
 int city_produces_gold(int city);
 void city_set_gold(int city, int on);
 void ovl_msg(const char *fmt, ...);

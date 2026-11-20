@@ -1301,3 +1301,4 @@ void tsound_0000_08b8(void);
 void tsound_0000_08bd(void);
 void tsound_0000_08c8(void);
 void tsound_0000_08e5(void);
+int map_click_select_unit(void);

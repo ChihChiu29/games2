@@ -21,25 +21,77 @@ PFS0_EXEFS_HASH_BLOCK_SIZE = 0x10000
 PFS0_META_HASH_BLOCK_SIZE = 0x1000
 PFS0_PADDING_SIZE = 0x200
 
-def derive_retail_header_key() -> bytes:
-    # Derive retail NCA header_key via standard Switch key schedule:
-    # splCryptoGenerateAesKek(HEADER_KEK_SRC, 0, 0) + splCryptoGenerateAesKey(HEADER_KEY_SRC)
-    master_key_00 = bytes.fromhex("c2caaff089b9aed55694876055271c7d")
-    aes_kek_gen_src = bytes.fromhex("4d870986c45d20722fba1053da92e8a9")
-    aes_key_gen_src = bytes.fromhex("89615ee05c38b6805fe58f3da24f7aa8")
-    header_kek_src = bytes.fromhex("1f12913a4acbf00d4cde3af6d523882a")
-    header_key_src = bytes.fromhex(
-        "5a3ed84fdec0d82631f7e25d197bf5d01c9b7bfaf628183d71f64d73f150b9d2"
-    )
+def parse_prod_keys(path: Path) -> dict[str, str]:
+    keys: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        keys[k.strip().lower()] = v.strip().lower()
+    return keys
+
+
+def find_prod_keys(explicit_path: str | None = None) -> Path | None:
+    candidates: list[Path] = []
+    if explicit_path:
+        candidates.append(Path(explicit_path).expanduser())
+    env_path = os.environ.get("PROD_KEYS")
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+    script_vpx_dir = Path(__file__).resolve().parent.parent
+    candidates.extend([
+        script_vpx_dir / "switch" / "prod.keys",
+        script_vpx_dir / "prod.keys",
+        Path.home() / ".switch" / "prod.keys",
+        Path.home() / ".config" / "Ryujinx" / "system" / "prod.keys",
+        Path.home() / ".local" / "share" / "yuzu" / "keys" / "prod.keys",
+        Path.home() / ".local" / "share" / "eden" / "keys" / "prod.keys",
+        Path.home() / ".local" / "share" / "sudachi" / "keys" / "prod.keys",
+    ])
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
+
+
+def load_header_key(keys_path: Path | None) -> bytes:
+    if keys_path is None:
+        raise SystemExit(
+            "ERROR: Switch prod.keys not found!\n"
+            "Nintendo Switch NCA headers must be encrypted with the retail header_key.\n"
+            "Please copy your Switch's prod.keys to one of:\n"
+            "  - vpx/prod.keys (gitignored)\n"
+            "  - ~/.switch/prod.keys\n"
+            "or run: PROD_KEYS=/path/to/prod.keys ./build.sh"
+        )
+    keys = parse_prod_keys(keys_path)
+    if "header_key" in keys and len(keys["header_key"]) == 64:
+        print(f"[NSP] Using header_key from {keys_path}")
+        return bytes.fromhex(keys["header_key"])
+
+    required = [
+        "master_key_00",
+        "aes_kek_generation_source",
+        "aes_key_generation_source",
+        "header_kek_source",
+        "header_key_source",
+    ]
+    missing = [k for k in required if k not in keys]
+    if missing:
+        raise SystemExit(
+            f"ERROR: {keys_path} is missing 'header_key' (and fallback keys: {', '.join(missing)})."
+        )
 
     def ecb_dec(key: bytes, data: bytes) -> bytes:
         c = Cipher(algorithms.AES(key), modes.ECB()).decryptor()
         return c.update(data) + c.finalize()
 
-    kek_seed = ecb_dec(master_key_00, aes_kek_gen_src)
-    kek_part = ecb_dec(kek_seed, header_kek_src)
-    header_kek = ecb_dec(kek_part, aes_key_gen_src)
-    return ecb_dec(header_kek, header_key_src)
+    kek_seed = ecb_dec(bytes.fromhex(keys["master_key_00"]), bytes.fromhex(keys["aes_kek_generation_source"]))
+    kek_part = ecb_dec(kek_seed, bytes.fromhex(keys["header_kek_source"]))
+    header_kek = ecb_dec(kek_part, bytes.fromhex(keys["aes_key_generation_source"]))
+    print(f"[NSP] Derived header_key from {keys_path}")
+    return ecb_dec(header_kek, bytes.fromhex(keys["header_key_source"]))
 
 
 def aes_xts_nintendo_encrypt_header(header_bytes: bytes, key: bytes) -> bytes:
@@ -257,20 +309,21 @@ def finalize_nca_file(nca_path: Path, tid: int, content_type: int, sections: lis
 
 
 def main():
-    if len(sys.argv) != 5:
-        print(f"Usage: {sys.argv[0]} <devkitpro_dir> <vpnx_dir> <romfs_staging_dir> <out_nsp_path>", file=sys.stderr)
+    if len(sys.argv) not in (5, 6):
+        print(f"Usage: {sys.argv[0]} <devkitpro_dir> <vpnx_dir> <romfs_staging_dir> <out_nsp_path> [prod_keys_path]", file=sys.stderr)
         sys.exit(1)
 
     dkp_dir = Path(sys.argv[1]).resolve()
     vpnx_dir = Path(sys.argv[2]).resolve()
     romfs_dir = Path(sys.argv[3]).resolve()
     out_nsp = Path(sys.argv[4]).resolve()
+    explicit_keys = sys.argv[5] if len(sys.argv) == 6 else None
 
     build_romfs_bin = dkp_dir / "tools" / "bin" / "build_romfs"
     build_pfs0_bin = dkp_dir / "tools" / "bin" / "build_pfs0"
 
     tid = make_title_id("vpnx-forwarder:launcher")
-    header_key = derive_retail_header_key()
+    header_key = load_header_key(find_prod_keys(explicit_keys))
     print(f"[NSP] Title ID: 0x{tid:016X}")
 
     fwd_dir = vpnx_dir / "romfs" / "forwarder"

@@ -1,2 +1,6 @@
 .devkitpro/
 .cache/
+prod.keys
+switch/
+
+

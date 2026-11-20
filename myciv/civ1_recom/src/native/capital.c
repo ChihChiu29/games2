@@ -72,6 +72,11 @@ static void toggle(int c)
 #define GOLD_ITEM 0x70                  /* unused item id */
 static int menu_city = -1;
 
+int city_menu_open(void)
+{
+    return menu_city >= 0;
+}
+
 void hook_build_menu(void)              /* 0ad5:1433, human player's list */
 {
     int city = (int16_t)RW(SS, (uint16_t)(BP + 8));

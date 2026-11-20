@@ -2221,6 +2221,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -13623,6 +13632,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -25026,6 +25044,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -36429,6 +36456,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -47832,6 +47868,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -59235,6 +59280,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -70667,6 +70721,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -82070,6 +82133,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -93473,6 +93545,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -104876,6 +104957,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -116279,6 +116369,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -127682,6 +127781,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -139085,6 +139193,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -150488,6 +150605,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -161891,6 +162017,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -173294,6 +173429,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -184697,6 +184841,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -196100,6 +196253,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -207512,6 +207674,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */
@@ -218930,6 +219101,15 @@ L_0c20:
     /* 0c20: jmp 0xcaf */
     goto L_0caf;
 L_0c23:
+    {
+        int su = map_click_select_unit();
+        if (su >= 0) {
+            WW(SS, BP - 0x3a, (uint16_t)su);
+            goto L_0c4f;
+        }
+        if (su == -2)
+            goto L_0cc8;
+    }
     /* 0c23: push word ptr [bp - 0x44] */
     PUSH(RW(SS, BP - 0x44));
     /* 0c26: push word ptr [0xe70e] */

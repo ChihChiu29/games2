@@ -1,6 +1,6 @@
 # myciv — Project Resume Context
 
-**Current Release:** `v480.08` → `myciv/release/civ_480.08_dospure.zip`  
+**Current Release:** `v481` → `myciv/release/civ_481_dospure.zip`  
 **Base Game:** Sid Meier's Civilization (1991, DOS v475.01, `myciv/original/civ1_dos.zip`)  
 **Engine:** `myciv/civ1_recom/` (static x86-to-C recompilation, cross-compiled to DOS DPMI via DJGPP + embedded `CWSDSTUB.EXE` for **DOSBox Pure**)  
 *(Note: `myciv/civr/` is an unused repo; all active work is in `myciv/civ1_recom/`.)*
@@ -58,6 +58,14 @@
      - **b.** `+1` random stat to self + all friendly units within 1 tile (3×3, east/west wrapped)
      - **c.** `+1` random stat on self ×3
      - **d.** `+1` Extra Life (survives lethal combat blow; returns `AX = 0xFFFF` from `f_1a19_000e` to cleanly abort advance/capture and deducts attacker moves / zeroes Bomber moves).
+
+6. **Context-Sensitive Active Unit Shortcut Bar (`v481`)**
+   - Native Civ1-styled shortcut buttons in the left status panel (`y = H - 34`, above the XP badge & mode toggle) in `src/native/realtime.c`, `src/native/overlay.c`, and `src/native/addons.h`:
+     - **Settlers:** `CITY` (`B`) · `AUTO` (`A`)
+     - **Land Military:** `FORT` (`F`) · `WAIT` (`W`)
+     - **Naval / Air / Nuclear:** `SENTRY` (`S`) · `WAIT` (`W`)
+     - **Diplomat / Caravan:** `WAIT` (`W`) · `SKIP` (`Space`)
+     - **End of Turn:** full-width `NEXT TURN` (`Enter`)
 
 ---
 

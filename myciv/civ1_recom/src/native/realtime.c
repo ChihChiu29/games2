@@ -32,6 +32,11 @@
 #define END_OF_TURN 0x80            /* unit number of the End of Turn wait */
 #define KEY_ENTER 0x1C0D
 #define KEY_WAIT 0x1177             /* 'w': the game's "wait" (next unit) */
+#define KEY_BUILD_CITY 0x3062       /* 'b': Settlers build city */
+#define KEY_AUTO_WORK 0x1E61        /* 'a': Settlers auto-improve */
+#define KEY_FORTIFY 0x2166          /* 'f': fortify */
+#define KEY_SENTRY 0x1F73           /* 's': sentry */
+#define KEY_SKIP 0x3920             /* Space: no orders / skip */
 #define MARKER_KEY 0xFFFE           /* wakes the order loop (see mapnav.c) */
 
 static const int speeds[] = {12000, 8000, 5000, 3000, 2000, 1500, 1000, 600};
@@ -88,9 +93,14 @@ static int turn_due(int unit)
     return !paused && elapsed_us >= (uint64_t)turn_ms() * 1000;
 }
 
+static int idle_unit = -1;
+static uint64_t idle_seen_us;
+
 /* called while the game waits for orders on the map (hook_map_idle) */
 void realtime_idle(void)
 {
+    idle_unit = (int16_t)RW(SS, (uint16_t)(BP + 8));   /* f_0860_0aa8(player, unit) */
+    idle_seen_us = now_us();
     if (!cfg.realtime && !mp_in_game())
         return;
     mp_note_idle();
@@ -148,6 +158,72 @@ void realtime_order_wait(void)
 {
     order_unit = (int16_t)RW(SS, (uint16_t)(BP - 0x32));
     order_goto_mode = RW(SS, (uint16_t)(BP - 0x36)) != 0;
+    idle_unit = order_unit;
+    idle_seen_us = now_us();
+}
+
+static int resolve_shortcuts(const char **lbl1, uint8_t *col1, uint16_t *key1,
+                             const char **lbl2, uint8_t *col2, uint16_t *key2)
+{
+    if (order_goto_mode || now_us() - idle_seen_us > 1200000ULL)
+        return 0;
+    int au = idle_unit;
+    if (au == END_OF_TURN) {
+        if (lbl1) *lbl1 = "NEXT TURN";
+        if (col1) *col1 = 10;
+        if (key1) *key1 = KEY_ENTER;
+        return 1;
+    }
+    if (au < 0 || au >= 128)
+        return 0;
+    int player = (int16_t)GW(0xe710);
+    if (player < 0 || player >= 8)
+        return 0;
+    uint16_t r = UNIT(player, au);
+    uint8_t t = GB(r + UNIT_TYPE);
+    if (t == 0xff || GB(r + UNIT_MOVES) == 0)
+        return 0;
+    if (t == 0) {                   /* Settlers */
+        if (lbl1) *lbl1 = "CITY";
+        if (col1) *col1 = 10;
+        if (key1) *key1 = KEY_BUILD_CITY;
+        if (lbl2) *lbl2 = "AUTO";
+        if (col2) *col2 = 9;
+        if (key2) *key2 = KEY_AUTO_WORK;
+        return 2;
+    }
+    if (t <= 13) {                  /* Land military */
+        if (lbl1) *lbl1 = "FORT";
+        if (col1) *col1 = 9;
+        if (key1) *key1 = KEY_FORTIFY;
+        if (lbl2) *lbl2 = "WAIT";
+        if (col2) *col2 = 9;
+        if (key2) *key2 = KEY_WAIT;
+        return 2;
+    }
+    if (t <= 25) {                  /* Air / Naval / Nuclear */
+        if (lbl1) *lbl1 = "SENTRY";
+        if (col1) *col1 = 9;
+        if (key1) *key1 = KEY_SENTRY;
+        if (lbl2) *lbl2 = "WAIT";
+        if (col2) *col2 = 9;
+        if (key2) *key2 = KEY_WAIT;
+        return 2;
+    }
+    /* Diplomat / Caravan */
+    if (lbl1) *lbl1 = "WAIT";
+    if (col1) *col1 = 9;
+    if (key1) *key1 = KEY_WAIT;
+    if (lbl2) *lbl2 = "SKIP";
+    if (col2) *col2 = 9;
+    if (key2) *key2 = KEY_SKIP;
+    return 2;
+}
+
+int unit_shortcuts_get(const char **lbl1, uint8_t *col1,
+                       const char **lbl2, uint8_t *col2)
+{
+    return resolve_shortcuts(lbl1, col1, NULL, lbl2, col2, NULL);
 }
 
 int realtime_active_unit(void)
@@ -244,6 +320,28 @@ int realtime_click(int x, int y)
         y >= RT_BTN_Y(g_scr_h) && y < RT_BTN_Y(g_scr_h) + RT_BTN_H) {
         realtime_cycle();
         return 1;
+    }
+    int sy = SC_BTN_Y(g_scr_h);
+    if (y >= sy && y < sy + SC_BTN_H) {
+        uint16_t k1 = 0, k2 = 0;
+        int n = resolve_shortcuts(NULL, NULL, &k1, NULL, NULL, &k2);
+        if (n == 1 && x >= SC_FULL_X && x < SC_FULL_X + SC_FULL_W) {
+            idle_seen_us = 0;
+            bios_key_push(k1);
+            return 1;
+        }
+        if (n == 2) {
+            if (x >= SC_BTN1_X && x < SC_BTN1_X + SC_BTN1_W) {
+                idle_seen_us = 0;
+                bios_key_push(k1);
+                return 1;
+            }
+            if (x >= SC_BTN2_X && x < SC_BTN2_X + SC_BTN2_W) {
+                idle_seen_us = 0;
+                bios_key_push(k2);
+                return 1;
+            }
+        }
     }
     return 0;
 }

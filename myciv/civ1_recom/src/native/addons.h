@@ -19,6 +19,16 @@
 #define RT_BTN_H 10
 #define RT_BTN_Y(h) ((h) - 11)
 
+/* map screen context-sensitive unit shortcut bar (above XP badge & mode toggle) */
+#define SC_BTN_Y(h) ((h) - 34)
+#define SC_BTN_H 9
+#define SC_BTN1_X 2
+#define SC_BTN1_W 37
+#define SC_BTN2_X 41
+#define SC_BTN2_W 37
+#define SC_FULL_X 2
+#define SC_FULL_W 76
+
 int city_screen_city(void);          /* city shown on the city screen or -1 */
 int city_menu_open(void);            /* 1 while "What shall we build?" is open */
 int city_produces_gold(int city);
@@ -43,6 +53,8 @@ void realtime_order_wait(void);
 int realtime_active_unit(void);
 int realtime_click(int x, int y);
 void realtime_apply_select(void);
+int unit_shortcuts_get(const char **lbl1, uint8_t *col1,
+                       const char **lbl2, uint8_t *col2);
 
 /* map navigation (mapnav.c) */
 int mapnav_button(int b, int down, int x, int y);

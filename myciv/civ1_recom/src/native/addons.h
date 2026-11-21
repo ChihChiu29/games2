@@ -2,15 +2,15 @@
 #pragma once
 #include <stdint.h>
 
-/* city screen "GOLD" and "GOV" buttons (game coordinates, 320x200 city screen) */
-#define GOV_BTN_X 192
-#define GOV_BTN_Y 189
-#define GOV_BTN_W 42
+/* city screen "GOV" and "GOLD" buttons (33x9 at y=190, matching native EXIT/CHANGE) */
+#define GOV_BTN_X 214
+#define GOV_BTN_Y 190
+#define GOV_BTN_W 33
 #define GOV_BTN_H 9
 
-#define GOLD_BTN_X 238
-#define GOLD_BTN_Y 189
-#define GOLD_BTN_W 44
+#define GOLD_BTN_X 249
+#define GOLD_BTN_Y 190
+#define GOLD_BTN_W 33
 #define GOLD_BTN_H 9
 
 /* map screen real-time mode toggle button (bottom of left status panel) */

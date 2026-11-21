@@ -1,6 +1,6 @@
 # myciv — Project Resume Context
 
-**Current Release:** `v480.07` → `myciv/release/civ_480.07_dospure.zip`  
+**Current Release:** `v480.08` → `myciv/release/civ_480.08_dospure.zip`  
 **Base Game:** Sid Meier's Civilization (1991, DOS v475.01, `myciv/original/civ1_dos.zip`)  
 **Engine:** `myciv/civ1_recom/` (static x86-to-C recompilation, cross-compiled to DOS DPMI via DJGPP + embedded `CWSDSTUB.EXE` for **DOSBox Pure**)  
 *(Note: `myciv/civr/` is an unused repo; all active work is in `myciv/civ1_recom/`.)*
@@ -41,8 +41,8 @@
    - Cycles **Turn-Based → 1X (3.0s/turn) → 2X (1.5s/turn) → Turn-Based**.
    - Game starts in Turn-Based (`realtime = 0`), and `hook_realtime_end_of_turn()` always waits at "End of Turn" (prevents Civ1's default auto-end-turn).
 
-4. **City Screen UI & Development Governor (`v478.01`, `v479`, `v479.01`, `v480.02`, `v480.04`, `v480.07`)**
-   - Classic Civ1 3D beveled button style (`civ_button()` matching `f_0d07_703b`) for `GOV`, `GOLD`, `TURN-BASED`/`1X`/`2X`, and toast banners in `src/native/overlay.c`.
+4. **City Screen UI & Development Governor (`v478.01`, `v479`, `v479.01`, `v480.02`, `v480.04`, `v480.07`, `v480.08`)**
+   - Native `f_0d07_703b`-exact city screen buttons (`native_city_button()` with 5px-tall compact font, static palette indices `0..15`, 33×9 px at `y=190`, aligned flush with `EXIT`) for `GOV` (`x=214`) and `GOLD` (`x=249`) in `src/native/overlay.c`; `nearest()` restricted to static palette `0..15` so overlays never pick timer-cycled palette entries; Civ1's RLE mouse cursor is redrawn on top of overlays (`gfx_draw_cursor_to()` in `runtime/gfx.c` / `runtime/video.c`) so the cursor is always foremost.
    - When producing **Gold**, city screen covers old build icon/name with **`GOLD`** and displays a **`PRODUCING GOLD`** plaque in the shields box (hidden while *"What shall we build?"* is open).
    - **City Governor (`GOV` button at `x=192, y=189` in `capital.c`, `root_0ad5.c`):**
      - Skips *"What shall we build?"* popup on build completion (manual **Change** in city screen still works).

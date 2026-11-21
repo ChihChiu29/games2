@@ -20,3 +20,4 @@ int gfx_map_page_w(void);
 void gfx_copy_rect(int page, int sx, int sy, int w, int h, int dx, int dy);    /* native driver only */
 void gfx_resize(int w, int h);
 void gfx_set_map_page_w(int w);
+void gfx_draw_cursor_to(uint8_t *buf, int W, int H, int ox, int oy);

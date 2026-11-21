@@ -50,6 +50,7 @@ const uint8_t *video_framebuffer(int *w, int *h)
     }
     memcpy(ov, f, n);
     native_overlay_draw(ov, *w, *h, off_x, off_y);
+    gfx_draw_cursor_to(ov, *w, *h, off_x, off_y);
     return ov;
 }
 

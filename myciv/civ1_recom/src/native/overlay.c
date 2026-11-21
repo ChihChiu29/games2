@@ -49,11 +49,13 @@ static const uint8_t *glyph(char c)
     return NULL;
 }
 
-/* palette index closest to an RGB colour (6 bit components) */
+/* palette index closest to an RGB colour (6 bit components), restricted to
+   the static 16-color UI palette (0..15) so overlays never pick a cycling
+   palette index animated by Civ1's timer interrupt. */
 static uint8_t nearest(int r, int g, int b)
 {
     int best = 0, bd = 1 << 30;
-    for (int i = 0; i < 256; i++) {
+    for (int i = 0; i < 16; i++) {
         int dr = vga_dac[i][0] - r, dg = vga_dac[i][1] - g, db = vga_dac[i][2] - b;
         int d = dr * dr + dg * dg + db * db;
         if (d < bd) {
@@ -121,9 +123,89 @@ static void shadow_text(uint8_t *buf, int W, int H, int x, int y,
     text(buf, W, H, x, y, s, fg);
 }
 
-/* Draw a classic Civ1 3D beveled button (matching f_0d07_703b):
-   1px outer dark frame, top/left highlight bevel, bottom/right shadow bevel,
-   and centered text with 1px drop shadow. */
+/* Compact 5px-tall uppercase font matching Civ1's native city screen buttons
+   (f_0d07_703b: CHANGE, BUY, INFO, HAPPY, MAP, VIEW, EXIT). */
+static const struct { char c; uint8_t w; uint8_t row[5]; } small_font[] = {
+    {'G', 4, {0x6, 0x8, 0xB, 0x9, 0x6}},
+    {'O', 4, {0x6, 0x9, 0x9, 0x9, 0x6}},
+    {'V', 5, {0x11, 0x11, 0x11, 0x0A, 0x04}},
+    {'L', 4, {0x8, 0x8, 0x8, 0x8, 0xF}},
+    {'D', 4, {0xE, 0x9, 0x9, 0x9, 0xE}},
+    {'!', 1, {0x1, 0x1, 0x1, 0x0, 0x1}},
+};
+
+static int small_text_width(const char *s)
+{
+    int w = 0;
+    for (; *s; s++) {
+        char ch = (*s >= 'a' && *s <= 'z') ? (char)(*s - 32) : *s;
+        int gw = 3;
+        for (size_t i = 0; i < sizeof small_font / sizeof small_font[0]; i++) {
+            if (small_font[i].c == ch) {
+                gw = small_font[i].w;
+                break;
+            }
+        }
+        if (w > 0)
+            w += 1;
+        w += gw;
+    }
+    return w;
+}
+
+static void small_text(uint8_t *buf, int W, int H, int x, int y,
+                       const char *s, uint8_t c)
+{
+    for (; *s; s++) {
+        char ch = (*s >= 'a' && *s <= 'z') ? (char)(*s - 32) : *s;
+        const uint8_t *rows = NULL;
+        int gw = 3;
+        for (size_t i = 0; i < sizeof small_font / sizeof small_font[0]; i++) {
+            if (small_font[i].c == ch) {
+                rows = small_font[i].row;
+                gw = small_font[i].w;
+                break;
+            }
+        }
+        if (rows) {
+            for (int r = 0; r < 5; r++)
+                for (int k = 0; k < gw; k++)
+                    if ((rows[r] >> (gw - 1 - k)) & 1) {
+                        int px = x + k, py = y + r;
+                        if (px >= 0 && px < W && py >= 0 && py < H)
+                            buf[py * W + px] = c;
+                    }
+        }
+        x += gw + 1;
+    }
+}
+
+/* Pixel-exact match for Civ1's native city screen button f_0d07_703b:
+   uses static palette indices 0..15 (col >= 8 -> hi=7, lo=col-8, fg=col^8),
+   1px bevels, no outer drop shadow, and centered 5px-tall label. */
+static void native_city_button(uint8_t *buf, int W, int H, int x, int y,
+                               int w, int h, uint8_t col, const char *label)
+{
+    uint8_t hi = (col >= 8) ? 7 : (uint8_t)(col + 8);
+    uint8_t lo = (col >= 8) ? (uint8_t)(col - 8) : 8;
+    uint8_t fg = (uint8_t)(col ^ 8);
+    fill(buf, W, H, x, y, w, h, col);
+    /* top and left bevel */
+    fill(buf, W, H, x, y, w, 1, hi);
+    fill(buf, W, H, x, y, 1, h, hi);
+    /* bottom and right bevel (right edge runs full height, matching f_0d07_703b) */
+    fill(buf, W, H, x + 1, y + h - 1, w - 1, 1, lo);
+    fill(buf, W, H, x + w - 1, y, 1, h, lo);
+    if (label && label[0]) {
+        int tx = x + (w - small_text_width(label)) / 2;
+        int ty = y + (h - 5) / 2;
+        small_text(buf, W, H, tx, ty, label, fg);
+    }
+}
+
+/* Draw a classic Civ1 3D beveled button (used for map HUD & banners):
+   top/left highlight bevel, bottom/right shadow bevel, outer drop line,
+   and centered 5x7 text with 1px drop shadow. */
 static void civ_button(uint8_t *buf, int W, int H, int x, int y, int w, int h,
                        uint8_t face, uint8_t hi, uint8_t lo, uint8_t border,
                        const char *label, uint8_t fg, uint8_t sh)
@@ -155,32 +237,22 @@ void native_overlay_draw(uint8_t *buf, int W, int H, int ox, int oy)
     uint8_t white = nearest(63, 63, 63), black = nearest(0, 0, 0);
     uint8_t yellow = nearest(63, 55, 0), grey = nearest(22, 22, 22);
     uint8_t lgrey = nearest(42, 42, 42), dgrey = nearest(14, 14, 14);
-    uint8_t blue = nearest(16, 20, 56), dblue = nearest(0, 0, 32);
-    uint8_t lblue = nearest(34, 42, 63);
-    uint8_t green = nearest(0, 36, 0), lgreen = nearest(20, 60, 20);
+    uint8_t lblue = nearest(34, 42, 63), dblue = nearest(0, 0, 32);
     uint8_t gold = nearest(46, 34, 0);
 
     int city = city_screen_city();
     if (city >= 0) {
         int gon = city_has_governor(city);
-        civ_button(buf, W, H, ox + GOV_BTN_X, oy + GOV_BTN_Y,
-                   GOV_BTN_W, GOV_BTN_H,
-                   gon ? green : blue,
-                   gon ? lgreen : lblue,
-                   gon ? black : dblue,
-                   black,
-                   gon ? "GOV!" : "GOV",
-                   gon ? yellow : white, black);
+        native_city_button(buf, W, H, ox + GOV_BTN_X, oy + GOV_BTN_Y,
+                           GOV_BTN_W, GOV_BTN_H,
+                           gon ? 10 : 9,
+                           gon ? "GOV!" : "GOV");
 
         int on = city_produces_gold(city);
-        civ_button(buf, W, H, ox + GOLD_BTN_X, oy + GOLD_BTN_Y,
-                   GOLD_BTN_W, GOLD_BTN_H,
-                   on ? gold : blue,
-                   on ? yellow : lblue,
-                   on ? black : dblue,
-                   black,
-                   on ? "GOLD!" : "GOLD",
-                   on ? yellow : white, black);
+        native_city_button(buf, W, H, ox + GOLD_BTN_X, oy + GOLD_BTN_Y,
+                           GOLD_BTN_W, GOLD_BTN_H,
+                           on ? 14 : 9,
+                           on ? "GOLD!" : "GOLD");
 
         if (on && !city_menu_open()) {
             /* cover old item name/icon between Buy and Change buttons */
@@ -189,8 +261,8 @@ void native_overlay_draw(uint8_t *buf, int W, int H, int ox, int oy)
             shadow_text(buf, W, H, ox + 267, oy + 105, "GOLD", yellow, black);
             /* classic beveled plaque inside the production shields box */
             fill(buf, W, H, ox + 232, oy + 120, 82, 24, dblue);
-            fill(buf, W, H, ox + 232, oy + 120, 82, 1, blue);
-            fill(buf, W, H, ox + 232, oy + 120, 1, 24, blue);
+            fill(buf, W, H, ox + 232, oy + 120, 82, 1, lblue);
+            fill(buf, W, H, ox + 232, oy + 120, 1, 24, lblue);
             fill(buf, W, H, ox + 233, oy + 143, 81, 1, black);
             fill(buf, W, H, ox + 313, oy + 121, 1, 23, black);
             shadow_text(buf, W, H, ox + 232 + (82 - text_width("PRODUCING")) / 2,

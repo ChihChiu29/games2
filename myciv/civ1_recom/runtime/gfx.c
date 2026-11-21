@@ -547,11 +547,12 @@ static void copy_page(uint16_t from, uint16_t to)
 
 static uint16_t cur_seg;
 static int16_t cur_x, cur_y, cur_cx, cur_cy, cur_w, cur_h;
-static int cur_on;
+static int cur_on, cur_drawn;
 static uint8_t cur_save[512 * 8];
 
 static void cursor_restore(void)
 {
+    cur_drawn = 0;
     if (!cur_on)
         return;
     uint16_t seg = page_seg[0];
@@ -589,6 +590,38 @@ static void cursor_draw(int page)
         for (int i = 0; i < cur_w; i++)
             cur_save[k++] = *PX(seg, cur_cx + i, cur_cy + r);
     draw_sprite_ctx(page, cur_x, cur_y, cur_seg);
+    cur_drawn = 1;
+}
+
+/* Redraw the game's RLE mouse cursor sprite onto a composed presentation
+   buffer (after native overlays), so the mouse cursor is always foremost. */
+void gfx_draw_cursor_to(uint8_t *buf, int W, int H, int ox, int oy)
+{
+    if (!gfx_native || !cur_on || !cur_drawn || !cur_seg)
+        return;
+    uint16_t sw = RW(cur_seg, 0);
+    uint16_t sh = RW(cur_seg, 2);
+    if (!sw || !sh)
+        return;
+    uint16_t si = 4;
+    for (uint16_t r = 0; r < sh; r++) {
+        uint16_t len = RW(cur_seg, si);
+        uint16_t skip = RW(cur_seg, (uint16_t)(si + 2));
+        si = (uint16_t)(si + 4);
+        int py = oy + cur_y + r;
+        if (py >= 0 && py < H) {
+            int base_x = ox + cur_x + skip;
+            for (uint16_t i = 0; i < len; i++) {
+                uint8_t c = RB(cur_seg, (uint16_t)(si + i));
+                if (c) {
+                    int px = base_x + i;
+                    if (px >= 0 && px < W)
+                        buf[py * W + px] = c;
+                }
+            }
+        }
+        si = (uint16_t)(si + len);
+    }
 }
 
 static void e30_cursor_set(void)
@@ -599,6 +632,7 @@ static void e30_cursor_set(void)
     cur_x = x;
     cur_y = y;
     cur_on = 0;
+    cur_drawn = 0;
     int16_t w = (int16_t)RW(seg, 0);
     if (!w)
         return;
@@ -993,6 +1027,7 @@ static void e37_set_mode(void)
 {
     uint8_t mode = (uint8_t)((ARG(0) & 0x80) | 0x13);
     g_map_mode = 0;
+    cur_drawn = 0;
     AX = mode;
     bios_int(0x10);
     /* default palette from the driver data */

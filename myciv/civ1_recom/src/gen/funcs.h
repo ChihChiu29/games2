@@ -1302,6 +1302,8 @@ void tsound_0000_08bd(void);
 void tsound_0000_08c8(void);
 void tsound_0000_08e5(void);
 int map_click_select_unit(void);
+int map_click_zero_goto(void);
+int native_goto_step(int player, int unit);
 int governor_pick_build(int16_t *out);
 int unit_xp_atk(int p, int u);
 int unit_xp_def(int p, int u);

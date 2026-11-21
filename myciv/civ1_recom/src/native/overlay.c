@@ -10,6 +10,7 @@
 #include "runtime.h"
 #include "addons.h"
 #include "video.h"
+#include "wide.h"
 #include "mp.h"
 
 /* 5x7 font, one byte per row (bit 4 = leftmost pixel) */
@@ -148,6 +149,7 @@ static const struct { char c; uint8_t w; uint8_t row[5]; } small_font[] = {
     {'X', 4, {0x9, 0x9, 0x6, 0x9, 0x9}},
     {'Y', 3, {0x5, 0x5, 0x2, 0x2, 0x2}},
     {'!', 1, {0x1, 0x1, 0x1, 0x0, 0x1}},
+    {'-', 3, {0x0, 0x0, 0x7, 0x0, 0x0}},
     {' ', 2, {0x0, 0x0, 0x0, 0x0, 0x0}},
 };
 
@@ -289,28 +291,53 @@ void native_overlay_draw(uint8_t *buf, int W, int H, int ox, int oy)
         }
     }
     if (video_is_map() && city < 0) {
-        /* context-sensitive active unit / End-of-Turn shortcut buttons */
-        const char *sc_l1 = NULL, *sc_l2 = NULL;
-        uint8_t sc_c1 = 9, sc_c2 = 9;
-        int sc_n = unit_shortcuts_get(&sc_l1, &sc_c1, &sc_l2, &sc_c2);
-        if (sc_n == 1) {
-            native_city_button(buf, W, H, ox + SC_FULL_X, oy + SC_BTN_Y(H),
-                               SC_FULL_W, SC_BTN_H, sc_c1, sc_l1);
-        } else if (sc_n == 2) {
-            native_city_button(buf, W, H, ox + SC_BTN1_X, oy + SC_BTN_Y(H),
-                               SC_BTN1_W, SC_BTN_H, sc_c1, sc_l1);
-            native_city_button(buf, W, H, ox + SC_BTN2_X, oy + SC_BTN_Y(H),
-                               SC_BTN2_W, SC_BTN_H, sc_c2, sc_l2);
+        /* highlight box around a selected 0-move unit waiting for a Goto click */
+        int zux = 0, zuy = 0;
+        if (realtime_zero_selected(&zux, &zuy)) {
+            int dx = (zux - (int)VIEW_X + MAP_W) % MAP_W;
+            int dy = zuy - (int)VIEW_Y;
+            if (dx >= 0 && dx < VIEW_W && dy >= 0 && dy < VIEW_H) {
+                int sx = ox + 80 + dx * 16;
+                int sy = oy + 8 + dy * 16;
+                /* 4px corner brackets in bright yellow (palette 14) */
+                fill(buf, W, H, sx, sy, 4, 1, 14);
+                fill(buf, W, H, sx, sy, 1, 4, 14);
+                fill(buf, W, H, sx + 12, sy, 4, 1, 14);
+                fill(buf, W, H, sx + 15, sy, 1, 4, 14);
+                fill(buf, W, H, sx, sy + 15, 4, 1, 14);
+                fill(buf, W, H, sx, sy + 12, 1, 4, 14);
+                fill(buf, W, H, sx + 12, sy + 15, 4, 1, 14);
+                fill(buf, W, H, sx + 15, sy + 12, 1, 4, 14);
+            }
         }
-        /* active unit XP / Hero badge right above the mode toggle button */
+        /* context-sensitive active unit shortcut buttons (directly above mode toggle) */
+        const char *sc_l[3] = {NULL, NULL, NULL};
+        uint8_t sc_c[3] = {9, 9, 9};
+        int sc_n = unit_shortcuts_get(sc_l, sc_c);
+        int has_sc = sc_n > 0;
+        if (sc_n == 2) {
+            native_city_button(buf, W, H, ox + SC_BTN1_X, oy + SC_BTN_Y(H),
+                               SC_BTN1_W, SC_BTN_H, sc_c[0], sc_l[0]);
+            native_city_button(buf, W, H, ox + SC_BTN2_X, oy + SC_BTN_Y(H),
+                               SC_BTN2_W, SC_BTN_H, sc_c[1], sc_l[1]);
+        } else if (sc_n == 3) {
+            native_city_button(buf, W, H, ox + SC3_BTN1_X, oy + SC_BTN_Y(H),
+                               SC3_BTN_W, SC_BTN_H, sc_c[0], sc_l[0]);
+            native_city_button(buf, W, H, ox + SC3_BTN2_X, oy + SC_BTN_Y(H),
+                               SC3_BTN_W, SC_BTN_H, sc_c[1], sc_l[1]);
+            native_city_button(buf, W, H, ox + SC3_BTN3_X, oy + SC_BTN_Y(H),
+                               SC3_BTN_W, SC_BTN_H, sc_c[2], sc_l[2]);
+        }
+        /* active unit XP / Hero badge directly above the shortcut bar (or mode toggle) */
         int au = realtime_active_unit();
         if (au >= 0 && au < 128) {
             char badge[24];
             int is_hero = 0;
             int has = unit_xp_badge((int16_t)GW(0xe710), au, badge, sizeof badge, &is_hero);
             if (has) {
-                int bx = ox + RT_BTN_X, by = oy + RT_BTN_Y(H) - 12;
-                civ_button(buf, W, H, bx, by, RT_BTN_W, 10,
+                int bx = ox + RT_BTN_X;
+                int by = oy + (has_sc ? SC_BTN_Y(H) : RT_BTN_Y(H)) - 11;
+                civ_button(buf, W, H, bx, by, RT_BTN_W, 9,
                            is_hero ? gold : dblue,
                            is_hero ? yellow : lblue,
                            black, black,
@@ -321,9 +348,7 @@ void native_overlay_draw(uint8_t *buf, int W, int H, int ox, int oy)
         int x = ox + RT_BTN_X, y = oy + RT_BTN_Y(H);
         int w = RT_BTN_W, h = RT_BTN_H;
         if (!realtime_on()) {
-            civ_button(buf, W, H, x, y, w, h,
-                       lgrey, white, dgrey, black,
-                       "TURN-BASED", black, black);
+            native_city_button(buf, W, H, x, y, w, h, 9, "TURN-BASED");
         } else {
             /* sunken bevel frame matching Civ1's stone side panel */
             fill(buf, W, H, x, y, w, h, dblue);
@@ -350,7 +375,7 @@ void native_overlay_draw(uint8_t *buf, int W, int H, int ox, int oy)
                 fill(buf, W, H, x + 2, y + h - 3, p, 1,
                      realtime_paused() ? dgrey : gold);
             }
-            shadow_text(buf, W, H, x + w - tw + 1, y + 2, t, white, black);
+            shadow_text(buf, W, H, x + w - tw + 1, y + 1, t, white, black);
         }
     }
     mp_overlay_draw(buf, W, H, ox, oy, fill, text, white, black, yellow, grey);

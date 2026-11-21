@@ -77,6 +77,7 @@ class MapUnit : IsPartOfGameInfoSerialization {
 
     var attacksThisTurn = 0
     var promotions = UnitPromotions()
+    var hero = UnitHeroData()
 
     /** Indicates if unit should be located with 'next unit' action */
     var due: Boolean = true
@@ -227,6 +228,7 @@ class MapUnit : IsPartOfGameInfoSerialization {
         toReturn.attacksThisTurn = attacksThisTurn
         toReturn.turnsFortified = turnsFortified
         toReturn.promotions = promotions.clone(toReturn)
+        toReturn.hero = hero.clone()
         toReturn.isTransported = isTransported
         toReturn.abilityToTimesUsed = HashMap(abilityToTimesUsed)
         toReturn.religion = religion
@@ -402,6 +404,7 @@ class MapUnit : IsPartOfGameInfoSerialization {
 
         movement += getMatchingUniques(UniqueType.Movement, checkCivInfoUniques = true)
                 .sumOf { it.params[0].toInt() }
+        movement += hero.bonusMovement
 
         if (movement < 1) movement = 1
 
@@ -835,6 +838,7 @@ class MapUnit : IsPartOfGameInfoSerialization {
                 promotions.addPromotion(promotion, isFree = true)
 
         newUnit.promotions = promotions.clone(newUnit)
+        newUnit.hero = hero.clone()
         newUnit.automated = automated
         newUnit.action = action // Needed too for Unit Overview action column
 

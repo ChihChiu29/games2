@@ -4,6 +4,26 @@
 #include "wide.h"
 #define SEGR(v) ((uint16_t)(LOADSEG + (v)))
 
+static void widen_menu_spacing(uint16_t text_off, int16_t menu_y)
+{
+    if (RW(DS, 0x38e6) != 0xffff)
+        return;
+    int h = (int16_t)RW(DS, 0x2f54);
+    if (h < 7 || h > 9)
+        return;
+    int lines = 1;
+    for (int i = 0; i < 2000; i++) {
+        uint8_t c = RB(DS, (uint16_t)(text_off + i));
+        if (!c)
+            break;
+        if (c == '\n')
+            lines++;
+    }
+    int nh = h + 3;                 /* 8px -> 11px for touch-friendly spacing */
+    if (menu_y >= 0 && menu_y + lines * nh + 12 <= 198)
+        WW(DS, 0x2f54, (uint16_t)nh);
+}
+
 void f_1d1e_000e(void)
 {
     /* 000e: push bp */
@@ -62,6 +82,7 @@ void f_1d1e_0026(void)
 
 void f_1d1e_003f(void)
 {
+    int waited_release = 0;
     /* 003f: push bp */
     PUSH(BP);
     /* 0040: mov bp, sp */
@@ -148,6 +169,7 @@ L_00bd:
     /* 00bd: mov word ptr [0x2f54], 8 */
     WW(DS, 0x2f54, 0x0008);
 L_00c3:
+    widen_menu_spacing(RW(SS, BP + 6), (int16_t)RW(SS, BP + 0xa));
     /* 00c3: mov word ptr [bp - 0xc], 7 */
     WW(SS, BP - 0xc, 0x0007);
     /* 00c8: mov word ptr [bp - 0xe], 0x16 */
@@ -251,6 +273,15 @@ L_0162:
     /* 0162: call overlay 6:1b33 */
     OVL_CALL(6, ovl06_1b33, 0x0167);
 L_0167:
+    if (!waited_release) {
+        waited_release = 1;
+        /* Touch-friendly: wait for the opening click/tap to release so the
+           menu stays open until a second tap selects an item or closes it. */
+        do {
+            CALLF(SEGR(0x01a7), 0x0178, f_01a7_0225);
+            IRQ_POLL();
+        } while (RW(DS, 0xea5a) != 0);
+    }
     /* 0167: mov word ptr [0xe202], 0 */
     WW(DS, 0xe202, 0x0000);
     /* 016d: mov word ptr [0xea5a], 0 */
@@ -899,6 +930,7 @@ L_04bd:
     /* 04bd: mov word ptr [0x2f54], 8 */
     WW(DS, 0x2f54, 0x0008);
 L_04c3:
+    widen_menu_spacing(RW(SS, BP + 6), (int16_t)RW(SS, BP + 0xa));
     /* 04c3: mov word ptr [bp - 0x56], 0 */
     WW(SS, BP - 0x56, 0x0000);
 L_04c8:

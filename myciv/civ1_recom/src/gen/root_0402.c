@@ -2327,6 +2327,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -13738,6 +13740,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -25150,6 +25154,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -36562,6 +36568,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -47974,6 +47982,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -59386,6 +59396,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -70827,6 +70839,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -82239,6 +82253,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -93651,6 +93667,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -105063,6 +105081,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -116475,6 +116495,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -127887,6 +127909,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -139299,6 +139323,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -150711,6 +150737,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -162123,6 +162151,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -173535,6 +173565,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -184947,6 +184979,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -196359,6 +196393,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -207780,6 +207816,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&
@@ -219207,6 +219245,8 @@ L_0cac:
     /* 0cac: jmp 0xcc8 */
     goto L_0cc8;
 L_0caf:
+    if (map_click_zero_goto())
+        goto L_0cc8;
     /* Left-click on map tile: if a unit is selected (and not in View mode),
        issue Goto to the clicked tile instead of centering the map. */
     if ((int16_t)RW(SS, BP - 0x32) < (int16_t)0x0080 &&

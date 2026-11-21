@@ -34,6 +34,8 @@
 #define KEY_WAIT 0x1177             /* 'w': the game's "wait" (next unit) */
 #define KEY_BUILD_CITY 0x3062       /* 'b': Settlers build city */
 #define KEY_AUTO_WORK 0x1E61        /* 'a': Settlers auto-improve */
+#define KEY_ROAD_TO 0x1352          /* 'R' (Shift+R): Settlers Road-To */
+#define KEY_AUTO_EXPLORE 0x2247     /* 'G' (Shift+G): Auto-Explore */
 #define KEY_FORTIFY 0x2166          /* 'f': fortify */
 #define KEY_SENTRY 0x1F73           /* 's': sentry */
 #define KEY_SKIP 0x3920             /* Space: no orders / skip */
@@ -150,8 +152,47 @@ void hook_realtime_end_of_turn(void)
    The order loop of f_0402_000a works through the units by index
    ([BP-0x32]); clicking one of your units with moves left makes the loop
    continue with that unit.  Its standing orders (sentry, fortify,
-   settler work, goto) are cancelled, as it now waits for new ones. */
+   settler work, goto) are cancelled, as it now waits for new ones.
+   Clicking a friendly unit with 0 moves left selects it in zero_sel_unit
+   so the next left-click on a map tile updates its Goto target for next turn. */
 static int order_unit = -1, order_goto_mode, select_unit = -1;
+static int zero_sel_unit = -1, zero_sel_player = -1, zero_sel_turn = -1;
+
+void realtime_clear_zero_select(void)
+{
+    zero_sel_unit = -1;
+}
+
+int realtime_zero_selected(int *ux, int *uy)
+{
+    if (zero_sel_unit < 0 || zero_sel_unit >= 128 || city_screen_city() >= 0) {
+        zero_sel_unit = -1;
+        return 0;
+    }
+    int player = (int16_t)GW(0xe710);
+    int turn = (int16_t)GW(0x90f2);
+    if (player != zero_sel_player || turn != zero_sel_turn) {
+        zero_sel_unit = -1;
+        return 0;
+    }
+    uint16_t r = UNIT(player, zero_sel_unit);
+    if (GB(r + UNIT_TYPE) == 0xff || GB(r + UNIT_MOVES) > 0) {
+        zero_sel_unit = -1;
+        return 0;
+    }
+    if (ux) *ux = GB(r + 1);
+    if (uy) *uy = GB(r + 2);
+    return 1;
+}
+
+static uint16_t rt_map_call(func_t fn, int x, int y)
+{
+    cpu_t saved = cpu;
+    call_lifted(0x1b05, fn, 2, x, y);
+    uint16_t r = AX;
+    cpu = saved;
+    return r;
+}
 
 /* hook_unit_await (0402:0645), BP = order loop frame */
 void realtime_order_wait(void)
@@ -162,18 +203,11 @@ void realtime_order_wait(void)
     idle_seen_us = now_us();
 }
 
-static int resolve_shortcuts(const char **lbl1, uint8_t *col1, uint16_t *key1,
-                             const char **lbl2, uint8_t *col2, uint16_t *key2)
+static int resolve_shortcuts(const char **lbl, uint8_t *col, uint16_t *key)
 {
     if (order_goto_mode || now_us() - idle_seen_us > 1200000ULL)
         return 0;
     int au = idle_unit;
-    if (au == END_OF_TURN) {
-        if (lbl1) *lbl1 = "NEXT TURN";
-        if (col1) *col1 = 10;
-        if (key1) *key1 = KEY_ENTER;
-        return 1;
-    }
     if (au < 0 || au >= 128)
         return 0;
     int player = (int16_t)GW(0xe710);
@@ -183,47 +217,40 @@ static int resolve_shortcuts(const char **lbl1, uint8_t *col1, uint16_t *key1,
     uint8_t t = GB(r + UNIT_TYPE);
     if (t == 0xff || GB(r + UNIT_MOVES) == 0)
         return 0;
-    if (t == 0) {                   /* Settlers */
-        if (lbl1) *lbl1 = "CITY";
-        if (col1) *col1 = 10;
-        if (key1) *key1 = KEY_BUILD_CITY;
-        if (lbl2) *lbl2 = "AUTO";
-        if (col2) *col2 = 9;
-        if (key2) *key2 = KEY_AUTO_WORK;
+    if (t == 0) {                   /* Settlers: 3 buttons */
+        if (lbl) { lbl[0] = "CITY"; lbl[1] = "ROAD"; lbl[2] = "AUTO"; }
+        if (col) { col[0] = 10; col[1] = roadto_picking() ? 14 : 9; col[2] = 9; }
+        if (key) { key[0] = KEY_BUILD_CITY; key[1] = KEY_ROAD_TO; key[2] = KEY_AUTO_WORK; }
+        return 3;
+    }
+    if (t <= 13) {                  /* Land military: 3 buttons */
+        if (lbl) { lbl[0] = "FORT"; lbl[1] = "EXPL"; lbl[2] = "WAIT"; }
+        if (col) { col[0] = 9; col[1] = 10; col[2] = 9; }
+        if (key) { key[0] = KEY_FORTIFY; key[1] = KEY_AUTO_EXPLORE; key[2] = KEY_WAIT; }
+        return 3;
+    }
+    if (t >= 16 && t <= 24) {       /* Naval: 3 buttons */
+        if (lbl) { lbl[0] = "SENT"; lbl[1] = "EXPL"; lbl[2] = "WAIT"; }
+        if (col) { col[0] = 9; col[1] = 10; col[2] = 9; }
+        if (key) { key[0] = KEY_SENTRY; key[1] = KEY_AUTO_EXPLORE; key[2] = KEY_WAIT; }
+        return 3;
+    }
+    if (t <= 25) {                  /* Air / Nuclear: 2 buttons */
+        if (lbl) { lbl[0] = "SENTRY"; lbl[1] = "WAIT"; }
+        if (col) { col[0] = 9; col[1] = 9; }
+        if (key) { key[0] = KEY_SENTRY; key[1] = KEY_WAIT; }
         return 2;
     }
-    if (t <= 13) {                  /* Land military */
-        if (lbl1) *lbl1 = "FORT";
-        if (col1) *col1 = 9;
-        if (key1) *key1 = KEY_FORTIFY;
-        if (lbl2) *lbl2 = "WAIT";
-        if (col2) *col2 = 9;
-        if (key2) *key2 = KEY_WAIT;
-        return 2;
-    }
-    if (t <= 25) {                  /* Air / Naval / Nuclear */
-        if (lbl1) *lbl1 = "SENTRY";
-        if (col1) *col1 = 9;
-        if (key1) *key1 = KEY_SENTRY;
-        if (lbl2) *lbl2 = "WAIT";
-        if (col2) *col2 = 9;
-        if (key2) *key2 = KEY_WAIT;
-        return 2;
-    }
-    /* Diplomat / Caravan */
-    if (lbl1) *lbl1 = "WAIT";
-    if (col1) *col1 = 9;
-    if (key1) *key1 = KEY_WAIT;
-    if (lbl2) *lbl2 = "SKIP";
-    if (col2) *col2 = 9;
-    if (key2) *key2 = KEY_SKIP;
-    return 2;
+    /* Diplomat / Caravan: 3 buttons */
+    if (lbl) { lbl[0] = "EXPL"; lbl[1] = "WAIT"; lbl[2] = "SKIP"; }
+    if (col) { col[0] = 10; col[1] = 9; col[2] = 9; }
+    if (key) { key[0] = KEY_AUTO_EXPLORE; key[1] = KEY_WAIT; key[2] = KEY_SKIP; }
+    return 3;
 }
 
-int unit_shortcuts_get(const char **lbl1, uint8_t *col1,
-                       const char **lbl2, uint8_t *col2)
+int unit_shortcuts_get(const char **lbl, uint8_t *col)
 {
-    return resolve_shortcuts(lbl1, col1, NULL, lbl2, col2, NULL);
+    return resolve_shortcuts(lbl, col, NULL);
 }
 
 int realtime_active_unit(void)
@@ -284,31 +311,90 @@ int map_click_select_unit(void)
         }
     }
     if (best >= 0) {
+        zero_sel_unit = -1;
         uint16_t r = UNIT(player, best);
         WB(DS, r, GB(r) & ~0xcf);        /* clear sentry, fortify, settler work */
         WB(DS, (uint16_t)(r + 6), 0xff); /* clear goto */
         autowork_cancel(best);
         return best;
     }
-    if (cur_here)
+    if (cur_here) {
+        zero_sel_unit = -1;
         return -2;
-    /* All friendly units on this tile have 0 moves left: wake standing orders */
-    int cancelled_auto = 0;
-    for (int u = 0; u < 128; u++) {
+    }
+    /* All friendly units on this tile have 0 moves left: select one (cycling
+       through stacks) so the user can click a destination tile to set Goto. */
+    int zstart = (zero_sel_unit >= 0 && zero_sel_unit < 128) ? (zero_sel_unit + 1) & 127 : 0;
+    int zpick = -1;
+    for (int i = 0; i < 128; i++) {
+        int u = (zstart + i) & 127;
         uint16_t r = UNIT(player, u);
         if (GB(r + UNIT_TYPE) == 0xff || GB(r + 1) != sx || GB(r + 2) != sy)
             continue;
-        if (autowork_cancel(u))
-            cancelled_auto = 1;
+        zpick = u;
+        break;
+    }
+    if (zpick >= 0) {
+        uint16_t r = UNIT(player, zpick);
+        autowork_cancel(zpick);
         if ((GB(r) & 0xcf) || GB(r + 6) != 0xff) {
             WB(DS, r, GB(r) & ~0xcf);
             WB(DS, (uint16_t)(r + 6), 0xff);
             woke_zero = 1;
         }
+        zero_sel_unit = zpick;
+        zero_sel_player = player;
+        zero_sel_turn = (int16_t)GW(0x90f2);
+        ovl_msg(woke_zero ? "Selected (0 moves) - click tile for Goto"
+                          : "Selected (0 moves) - click tile for Goto");
     }
-    if (!cancelled_auto)
-        ovl_msg(woke_zero ? "Unit awakened (0 moves left)" : "No moves left this turn");
     return -2;
+}
+
+/* Called at L_0caf in root_0402.c when left-clicking a map tile.
+   If a 0-move unit is selected, sets its Goto destination (for next turn)
+   without moving it now, and returns 1 to consume the click. */
+int map_click_zero_goto(void)
+{
+    int player = (int16_t)RW(SS, (uint16_t)(BP + 6));
+    int sx = (int16_t)RW(SS, (uint16_t)(BP - 0x1c));
+    int sy = (int16_t)RW(SS, (uint16_t)(BP - 0x26));
+    if (RW(SS, (uint16_t)(BP - 4)) != 0 || sy < 0 || sy >= 50)
+        return 0;
+    if (zero_sel_unit < 0 || zero_sel_unit >= 128 ||
+        zero_sel_player != player || zero_sel_turn != (int16_t)GW(0x90f2)) {
+        zero_sel_unit = -1;
+        return 0;
+    }
+    uint16_t r = UNIT(player, zero_sel_unit);
+    uint8_t ut = GB(r + UNIT_TYPE);
+    if (ut == 0xff || GB(r + UNIT_MOVES) > 0) {
+        zero_sel_unit = -1;
+        return 0;
+    }
+    /* Domain check on explored tiles (allow fog of war) */
+    uint16_t vis_off = (uint16_t)(0x0032 * (uint16_t)sx + (uint16_t)sy + 0x7ff8);
+    uint8_t vis = RB((uint16_t)VISSEG, vis_off);
+    if (vis & (1u << (player & 7))) {
+        int t = rt_map_call(f_1b05_133c, sx, sy);
+        int imp = rt_map_call(f_1b05_1577, sx, sy);
+        if ((ut <= 13 || ut >= 26) && t == 10) {
+            ovl_msg("Land unit cannot Goto ocean");
+            return 1;
+        }
+        if (ut >= 16 && ut <= 24 && t != 10 && !(imp & 0x01)) {
+            ovl_msg("Naval unit cannot Goto land");
+            return 1;
+        }
+    }
+    WB(DS, r, GB(r) & ~0xcf);
+    WB(DS, (uint16_t)(r + 6), (uint8_t)sx);
+    WB(DS, (uint16_t)(r + 7), (uint8_t)sy);
+    WB(DS, (uint16_t)(r + 8), 0xff);
+    autowork_cancel(zero_sel_unit);
+    zero_sel_unit = -1;
+    ovl_msg("Goto set (moves next turn)");
+    return 1;
 }
 
 int realtime_click(int x, int y)
@@ -323,23 +409,27 @@ int realtime_click(int x, int y)
     }
     int sy = SC_BTN_Y(g_scr_h);
     if (y >= sy && y < sy + SC_BTN_H) {
-        uint16_t k1 = 0, k2 = 0;
-        int n = resolve_shortcuts(NULL, NULL, &k1, NULL, NULL, &k2);
-        if (n == 1 && x >= SC_FULL_X && x < SC_FULL_X + SC_FULL_W) {
-            idle_seen_us = 0;
-            bios_key_push(k1);
-            return 1;
-        }
+        uint16_t keys[3] = {0, 0, 0};
+        int n = resolve_shortcuts(NULL, NULL, keys);
         if (n == 2) {
             if (x >= SC_BTN1_X && x < SC_BTN1_X + SC_BTN1_W) {
                 idle_seen_us = 0;
-                bios_key_push(k1);
+                bios_key_push(keys[0]);
                 return 1;
             }
             if (x >= SC_BTN2_X && x < SC_BTN2_X + SC_BTN2_W) {
                 idle_seen_us = 0;
-                bios_key_push(k2);
+                bios_key_push(keys[1]);
                 return 1;
+            }
+        } else if (n == 3) {
+            static const int bx[3] = {SC3_BTN1_X, SC3_BTN2_X, SC3_BTN3_X};
+            for (int i = 0; i < 3; i++) {
+                if (x >= bx[i] && x < bx[i] + SC3_BTN_W) {
+                    idle_seen_us = 0;
+                    bios_key_push(keys[i]);
+                    return 1;
+                }
             }
         }
     }

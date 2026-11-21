@@ -60,6 +60,7 @@ class CivInfoStatsForNextTurn(val civInfo: Civilization) {
             .toList().asSequence()
 
         for (unit in unitsToPayFor) {
+            if (unit.hero.noMaintenance) continue
             val stateForConditionals = unit.cache.state
             var unitMaintenance = 1f
             val uniquesThatApply = unit.getMatchingUniques(

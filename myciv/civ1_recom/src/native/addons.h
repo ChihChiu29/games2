@@ -16,18 +16,20 @@
 /* map screen real-time mode toggle button (bottom of left status panel) */
 #define RT_BTN_X 2
 #define RT_BTN_W 76
-#define RT_BTN_H 10
-#define RT_BTN_Y(h) ((h) - 11)
+#define RT_BTN_H 9
+#define RT_BTN_Y(h) ((h) - 10)
 
-/* map screen context-sensitive unit shortcut bar (above XP badge & mode toggle) */
-#define SC_BTN_Y(h) ((h) - 34)
+/* map screen context-sensitive unit shortcut bar (directly above mode toggle) */
+#define SC_BTN_Y(h) ((h) - 20)
 #define SC_BTN_H 9
 #define SC_BTN1_X 2
 #define SC_BTN1_W 37
 #define SC_BTN2_X 41
 #define SC_BTN2_W 37
-#define SC_FULL_X 2
-#define SC_FULL_W 76
+#define SC3_BTN1_X 2
+#define SC3_BTN2_X 28
+#define SC3_BTN3_X 54
+#define SC3_BTN_W 24
 
 int city_screen_city(void);          /* city shown on the city screen or -1 */
 int city_menu_open(void);            /* 1 while "What shall we build?" is open */
@@ -53,8 +55,9 @@ void realtime_order_wait(void);
 int realtime_active_unit(void);
 int realtime_click(int x, int y);
 void realtime_apply_select(void);
-int unit_shortcuts_get(const char **lbl1, uint8_t *col1,
-                       const char **lbl2, uint8_t *col2);
+int unit_shortcuts_get(const char **lbl, uint8_t *col);
+int realtime_zero_selected(int *ux, int *uy);
+void realtime_clear_zero_select(void);
 
 /* map navigation (mapnav.c) */
 int mapnav_button(int b, int down, int x, int y);
@@ -75,6 +78,9 @@ void native_load_state(void *f);
 int autowork_cancel(int unit);
 void autowork_save(void *f);
 void autowork_load(void *f);
+int roadto_picking(void);
+void roadto_cancel_pick(void);
+int roadto_click(int x, int y);
 
 /* unit XP & Hero upgrades (unitxp.c) */
 int unit_xp_atk(int p, int u);

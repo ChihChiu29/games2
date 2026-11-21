@@ -16,6 +16,13 @@ void f_1e4a_0004(void)
     PUSH(DI);
     /* 000b: push si */
     PUSH(SI);
+    {
+        int d = native_goto_step((int16_t)RW(SS, BP + 6), (int16_t)RW(SS, BP + 8));
+        if (d >= 0) {
+            AX = (uint16_t)d;
+            goto L_05d6;
+        }
+    }
     /* 000c: mov ax, word ptr [0xe710] */
     AX = RW(DS, 0xe710);
     /* 000f: cmp word ptr [bp + 6], ax */
@@ -262,7 +269,7 @@ L_0152:
     SP += 0x0002;
     /* 0169: cmp ax, 0x49 */
     /* 016c: jle 0x1ce */
-    if ((int16_t)AX <= (int16_t)0x0049) goto L_01ce;
+    if ((int16_t)AX <= (int16_t)((uint16_t)(MAP_W - 7))) goto L_01ce;
 L_016e:
     /* 016e: mov ax, 0x600 */
     AX = 0x0600;

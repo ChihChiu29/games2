@@ -1,5 +1,6 @@
 package com.unciv.logic.battle
 
+import com.unciv.logic.map.mapunit.UnitHeroSystem
 import com.unciv.logic.map.tile.Tile
 import com.unciv.models.Counter
 import com.unciv.models.ruleset.GlobalUniques
@@ -55,6 +56,9 @@ object BattleDamage {
             val (greatGeneralName, greatGeneralBonus) = GreatGeneralImplementation.getGreatGeneralBonus(combatant, enemy, combatAction)
             if (greatGeneralBonus != 0)
                 modifiers[greatGeneralName] = greatGeneralBonus
+
+            if (combatant.unit.hero.isHero())
+                modifiers["Hero (Veteran)"] = UnitHeroSystem.HERO_VETERAN_COMBAT_BONUS
 
         } else if (combatant is CityCombatant) {
             combatant.city.forEachMatchingUnique(UniqueType.StrengthForCities, conditionalState) { unique ->

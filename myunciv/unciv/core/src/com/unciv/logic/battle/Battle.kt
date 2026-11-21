@@ -8,6 +8,7 @@ import com.unciv.logic.automation.civilization.NextTurnAutomation
 import com.unciv.logic.city.City
 import com.unciv.logic.civilization.*
 import com.unciv.logic.map.HexCoord
+import com.unciv.logic.map.mapunit.UnitHeroSystem
 import com.unciv.logic.map.tile.Tile
 import com.unciv.models.UnitActionType
 import com.unciv.models.ruleset.unique.GameContext
@@ -149,6 +150,13 @@ object Battle {
         // Add culture when defeating a barbarian when Honor policy is adopted, gold from enemy killed when honor is complete
         // or any enemy military unit with Sacrificial captives unique (can be either attacker or defender!)
         triggerPostKillingUniques(defender, attacker, attackedTile)
+
+        // Unit XP / Level-Up / Hero Ascension on combat victory (both human and AI)
+        if (!isAlreadyDefeatedCity && defender.isDefeated() && !defender.isCivilian() && attacker is MapUnitCombatant && !attacker.isDefeated()) {
+            UnitHeroSystem.onCombatWin(attacker.unit)
+        } else if (attacker.isDefeated() && !attacker.isCivilian() && defender is MapUnitCombatant && !defender.isDefeated()) {
+            UnitHeroSystem.onCombatWin(defender.unit)
+        }
         
         if (attacker is MapUnitCombatant && defender is MapUnitCombatant){
             triggerDamageUniquesForUnit(attacker, defender, attackedTile, CombatAction.Attack)
@@ -387,7 +395,13 @@ object Battle {
         if (defender is MapUnitCombatant && defender.unit.isCivilian() && attacker.isMelee()) {
             BattleUnitCapture.captureCivilianUnit(attacker, defender)
         } else if (attacker.isRanged() && !attacker.isAirUnit()) {  // Air Units are Ranged, but take damage as well
-            defender.takeDamage(potentialDamageToDefender) // straight up
+            if (defender is MapUnitCombatant && defender.getHealth() <= potentialDamageToDefender
+                && UnitHeroSystem.tryConsumeExtraLife(defender.unit, attacker.getCivInfo())
+            ) {
+                // Survived lethal ranged blow via Hero Extra Life
+            } else {
+                defender.takeDamage(potentialDamageToDefender) // straight up
+            }
         } else {
             //melee attack is complicated, because either side may defeat the other midway
             //so...for each round, we randomize who gets the attack in. Seems to be a good way to work for now.
@@ -395,10 +409,16 @@ object Battle {
             while (potentialDamageToDefender + potentialDamageToAttacker > 0) {
                 if (rng.nextInt(potentialDamageToDefender + potentialDamageToAttacker) < potentialDamageToDefender) {
                     potentialDamageToDefender--
+                    if (defender is MapUnitCombatant && defender.getHealth() <= 1
+                        && UnitHeroSystem.tryConsumeExtraLife(defender.unit, attacker.getCivInfo())
+                    ) break
                     defender.takeDamage(1)
                     if (defender.isDefeated()) break
                 } else {
                     potentialDamageToAttacker--
+                    if (attacker is MapUnitCombatant && attacker.getHealth() <= 1
+                        && UnitHeroSystem.tryConsumeExtraLife(attacker.unit, defender.getCivInfo())
+                    ) break
                     attacker.takeDamage(1)
                     if (attacker.isDefeated()) break
                 }

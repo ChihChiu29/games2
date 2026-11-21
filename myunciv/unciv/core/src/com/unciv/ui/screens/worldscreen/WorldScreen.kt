@@ -457,7 +457,7 @@ class WorldScreen(
         if (uiEnabled) {
             // UnitActionsTable measures geometry (its own y, techPolicyAndDiplomacy and fogOfWarButton), so call update this late
             unitActionsTable.y = bottomUnitTable.height
-            unitActionsTable.update(bottomUnitTable.selectedUnit)
+            unitActionsTable.update(bottomUnitTable.selectedUnit?.getUnit())
         }
 
         // If the game has ended, lets stop AutoPlay

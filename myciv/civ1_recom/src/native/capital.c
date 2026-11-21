@@ -199,33 +199,10 @@ int governor_pick_build(int16_t *out)
     int count = (int16_t)RW(SS, (uint16_t)(BP - 0xa));
     uint16_t list = (uint16_t)(BP - 0xde);
     uint16_t r = CITY(city);
-    int player = GB(r + CITY_OWNER) & 7;
-    int cx = GB(r + CITY_X), cy = GB(r + CITY_Y);
     int size = GB(r + CITY_SIZE);
     uint32_t bld = (uint32_t)GW(r) | ((uint32_t)GW((uint16_t)(r + 2)) << 16);
 
-    /* 1. Ensure at least 1 garrison defender */
-    int defenders = 0;
-    for (int u = 0; u < 128; u++) {
-        uint16_t ur = UNIT(player, u);
-        uint8_t ut = GB(ur + 3);
-        if (ut != 0xff && ut != 0 && ut < 26 && GB(ur + 1) == cx && GB(ur + 2) == cy)
-            defenders++;
-    }
-    if (defenders == 0) {
-        static const int16_t defs[] = {12, 5, 4, 2, 1};
-        for (size_t i = 0; i < sizeof defs / sizeof defs[0]; i++) {
-            if (list_has(list, count, defs[i])) {
-                city_set_gold(city, 0);
-                *out = defs[i];
-                menu_city = -1;
-                ovl_msg("Gov: %s", gov_item_name(defs[i]));
-                return 1;
-            }
-        }
-    }
-
-    /* 2. Urgent Aqueduct if city size >= 7 */
+    /* 1. Urgent Aqueduct if city size >= 7 */
     if (size >= 7 && list_has(list, count, -9)) {
         city_set_gold(city, 0);
         *out = -9;
@@ -344,6 +321,10 @@ void hook_city_production(void)
 static int key_filter(uint16_t key)
 {
     uint8_t ascii = (uint8_t)key;
+    if (screen_city < 0 && ascii == 27) {
+        realtime_clear_zero_select();
+        roadto_cancel_pick();
+    }
     if (mp_key(key))
         return 1;
     if (screen_city < 0 && realtime_key(key))
@@ -357,6 +338,8 @@ static int key_filter(uint16_t key)
 
 static int mouse_filter(int button, int x, int y)
 {
+    if (screen_city < 0 && button == 0 && roadto_click(x, y))
+        return 1;
     if (screen_city < 0 && button == 0 && realtime_click(x, y))
         return 1;
     if (screen_city < 0 || button != 0 || city_menu_open())

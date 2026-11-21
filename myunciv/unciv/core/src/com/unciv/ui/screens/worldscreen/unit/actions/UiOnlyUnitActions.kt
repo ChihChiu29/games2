@@ -13,10 +13,6 @@ import com.unciv.models.metadata.GameSettings
 import com.unciv.models.ruleset.unique.UniqueType
 import com.unciv.ui.screens.pickerscreens.ImprovementPickerScreen
 import com.unciv.ui.screens.pickerscreens.PromotionPickerScreen
-import com.unciv.view.MapUnitView
-import com.unciv.view.hasMovement
-import com.unciv.view.isAirUnit
-import com.unciv.view.isMoving
 
 /**
  *  Actions offered as buttons that don't change the game by themselves, but only open some UI element
@@ -24,17 +20,14 @@ import com.unciv.view.isMoving
  */
 object UiOnlyUnitActions {
 
-    fun getUnitActions(unit: MapUnit): Sequence<UiUnitAction> {
-        val unitView = GUI.getWorldScreen().selectedGameView.getMapUnitView(unit)
-        return sequenceOf(
-            getConstructImprovementAction(unit),
-            getConnectRoadAction(unit),
-            getPromoteAction(unitView),
-            getShowUnitDestinationAction(unitView),
-            getSwapAction(unitView),
-            getDisbandAction(unit)
-        ).filterNotNull()
-    }
+    fun getUnitActions(unit: MapUnit): Sequence<UiUnitAction> = sequenceOf(
+        getConstructImprovementAction(unit),
+        getConnectRoadAction(unit),
+        getPromoteAction(unit),
+        getShowUnitDestinationAction(unit),
+        getSwapAction(unit),
+        getDisbandAction(unit)
+    ).filterNotNull()
 
     private fun getDisbandAction(unit: MapUnit): UiUnitAction {
         val question = if (unit.currentTile.getOwner() == unit.civ)
@@ -49,30 +42,31 @@ object UiOnlyUnitActions {
         )
     }
 
-    private fun getPromoteAction(unit: MapUnitView): UiUnitAction? {
-        if (!unit.canBePromoted()) return null
+    private fun getPromoteAction(unit: MapUnit): UiUnitAction? {
+        if (!unit.promotions.canBePromoted()) return null
         // promotion does not consume movement points, but is not allowed if a unit has exhausted its movement or has attacked
         return UiUnitAction(UiUnitActionType.Promote,
             action = {
+                val unitView = GUI.getWorldScreen().selectedGameView.getMapUnitView(unit)
                 if (UncivGame.Current.settings.automaticPromotions == GameSettings.AutomaticPromotions.ForAllUnits) {
-                    NextTurnAutomation.applyPromotions(unit)
+                    NextTurnAutomation.applyPromotions(unitView)
                 } else {
-                    UncivGame.Current.pushScreen { PromotionPickerScreen(unit) }
+                    UncivGame.Current.pushScreen { PromotionPickerScreen(unitView) }
                 }
             }.takeIf { unit.hasMovement() && unit.attacksThisTurn == 0 }
         )
     }
 
-    private fun getShowUnitDestinationAction(unit: MapUnitView): UiUnitAction? {
+    private fun getShowUnitDestinationAction(unit: MapUnit): UiUnitAction? {
         if (!unit.isMoving()) return null
         return UiUnitAction(UiUnitActionType.ShowUnitDestination) {
-            GUI.getMap().setCenterPosition(unit.getMovementDestination().position(), true)
+            GUI.getMap().setCenterPosition(unit.getMovementDestination().position, true)
         }
     }
 
-    private fun getSwapAction(unit: MapUnitView): UiUnitAction? {
+    private fun getSwapAction(unit: MapUnit): UiUnitAction? {
         // Air units cannot swap
-        if (unit.isAirUnit()) return null
+        if (unit.baseUnit.isAirUnit()) return null
         // Disable unit swapping if multiple units are selected. It would make little sense.
         // In principle, the unit swapping mode /will/ function with multiselect: it will simply
         // only consider the first selected unit, and ignore the other selections. However, it does
@@ -82,7 +76,7 @@ object UiOnlyUnitActions {
         val worldScreen = GUI.getWorldScreen()
         if (worldScreen.bottomUnitTable.selectedUnits.size > 1) return null
         // Only show the swap action if there is at least one possible swap movement
-        if (unit.getUnitSwappableTiles().isEmpty()) return null
+        if (unit.movement.getUnitSwappableTiles().none()) return null
         return UiUnitAction(
             uiType = UiUnitActionType.SwapUnits,
             isCurrentAction = worldScreen.bottomUnitTable.selectedUnitIsSwapping,
@@ -158,7 +152,7 @@ object UiOnlyUnitActions {
      *  - [first][Pair.first] - [UiUnitActionType.ShowAdditionalActions] (page forward)
      *  - [second][Pair.second] - [UiUnitActionType.HideAdditionalActions] (page back)
      */
-    internal fun getPagingActions(unit: MapUnitView, actionsTable: UnitActionsTable): Pair<UiUnitAction, UiUnitAction> =
+    internal fun getPagingActions(unit: MapUnit, actionsTable: UnitActionsTable): Pair<UiUnitAction, UiUnitAction> =
         UiUnitAction(UiUnitActionType.ShowAdditionalActions) { actionsTable.changePage(1, unit) } to
             UiUnitAction(UiUnitActionType.HideAdditionalActions) { actionsTable.changePage(-1, unit) }
 }

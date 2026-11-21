@@ -60,6 +60,10 @@ open class ForeignMapUnitView(internal open val unit: MapUnit, viewer: Civilizat
     @Readonly fun isIdle(): Boolean = unit.isIdle()
     @Readonly fun isFortified(): Boolean = unit.isFortified()
     @Readonly fun isGuarding(): Boolean = unit.isGuarding()
+    @Readonly fun isHero(): Boolean = unit.hero.isHero()
+    @Readonly fun getHeroBadge(): String? = unit.hero.getBadgeText()
+    @Readonly fun getHeroBonusAttack(): Int = unit.hero.bonusAttack
+    @Readonly fun getHeroBonusDefense(): Int = unit.hero.bonusDefense
 }
 
 // Helpers built on top of the view API, rather than being part of it

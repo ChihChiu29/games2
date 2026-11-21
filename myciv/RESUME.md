@@ -1,6 +1,6 @@
 # myciv — Project Resume Context
 
-**Current Release:** `v481` → `myciv/release/civ_481_dospure.zip`  
+**Current Release:** `v483` → `myciv/release/civ_483_dospure.zip`  
 **Base Game:** Sid Meier's Civilization (1991, DOS v475.01, `myciv/original/civ1_dos.zip`)  
 **Engine:** `myciv/civ1_recom/` (static x86-to-C recompilation, cross-compiled to DOS DPMI via DJGPP + embedded `CWSDSTUB.EXE` for **DOSBox Pure**)  
 *(Note: `myciv/civr/` is an unused repo; all active work is in `myciv/civ1_recom/`.)*
@@ -33,7 +33,7 @@
 
 2. **Mouse Controls (`v477`, `v478.01`, `v479.01`, `v479.02`, `v480.06`)**
    - **Left-click on big map (`root_0402.c` `L_0caf`):** When a unit is active (and not in View mode), left-clicking an empty/terrain/enemy/unexplored tile issues **Goto** instead of centering the map (respects land/sea domain on explored tiles; allows exploring fog of war). Clicking own city still opens city screen; at End of Turn or in View mode, left-click still centers map.
-   - **Left-click on friendly unit (`root_0402.c` `L_0c23`, `realtime.c` `map_click_select_unit`):** Directly selects & wakes friendly units (works in Turn-Based & Real-Time, even at End of Turn), cycles through stacks, cancels `autowork` on automated Settlers (`autowork_cancel()`), and shows a toast if 0 moves left.
+   - **Left-click on friendly unit (`root_0402.c` `L_0c23`, `realtime.c` `map_click_select_unit`):** Directly selects & wakes friendly units (works in Turn-Based & Real-Time, even at End of Turn), cycles through stacks, cancels `autowork` on automated Settlers (`autowork_cancel()`), and for 0-move units selects them with a yellow corner highlight so the next left-click on a map tile sets their Goto destination for next turn (`map_click_zero_goto()` at `L_0caf`, `v481.03`).
    - **Right-click on big map (`root_0402.c` `L_0842`, `mapnav.c`):** Right-click on an adjacent tile moves 1 step; right-click on a non-adjacent tile inspects terrain (never Goto); right-click drag (>4px) scrolls the map smoothly (left-click drag also scrolls).
 
 3. **On-Screen Real-Time Mode Toggle & End-of-Turn (`v478`, `v478.01`)**
@@ -46,7 +46,7 @@
    - When producing **Gold**, city screen covers old build icon/name with **`GOLD`** and displays a **`PRODUCING GOLD`** plaque in the shields box (hidden while *"What shall we build?"* is open).
    - **City Governor (`GOV` button at `x=192, y=189` in `capital.c`, `root_0ad5.c`):**
      - Skips *"What shall we build?"* popup on build completion (manual **Change** in city screen still works).
-     - Priority: 1 garrison defender if 0 present → Aqueduct (if size ≥ 7) → Granary, Temple, Marketplace, Library, Aqueduct (size ≥ 5), Courthouse (non-capital), Cathedral, Bank, University, Colosseum, Factory, Hydro/Power Plant, Mfg. Plant, Mass Transit, Recycling Center, City Walls → **Produce Gold** when all development buildings are done (handles Page 2 `0x63` `"More..."` in late game!).
+     - Priority (`v482.01`: pure development, no military units): Aqueduct (if size ≥ 7) → Granary, Temple, Marketplace, Library, Aqueduct (size ≥ 5), Courthouse (non-capital), Cathedral, Bank, University, Colosseum, Factory, Hydro/Power Plant, Mfg. Plant, Mass Transit, Recycling Center, City Walls → **Produce Gold** when all development buildings are done (handles Page 2 `0x63` `"More..."` in late game!).
      - *(Known optional enhancement: Governor cities currently stay on Gold until manually toggled if a new tech unlocks a new building later.)*
 
 5. **Unit XP, Level-Up & Hero Ascension (`v480` → `v480.07`)**
@@ -59,13 +59,22 @@
      - **c.** `+1` random stat on self ×3
      - **d.** `+1` Extra Life (survives lethal combat blow; returns `AX = 0xFFFF` from `f_1a19_000e` to cleanly abort advance/capture and deducts attacker moves / zeroes Bomber moves).
 
-6. **Context-Sensitive Active Unit Shortcut Bar (`v481`)**
-   - Native Civ1-styled shortcut buttons in the left status panel (`y = H - 34`, above the XP badge & mode toggle) in `src/native/realtime.c`, `src/native/overlay.c`, and `src/native/addons.h`:
-     - **Settlers:** `CITY` (`B`) · `AUTO` (`A`)
-     - **Land Military:** `FORT` (`F`) · `WAIT` (`W`)
-     - **Naval / Air / Nuclear:** `SENTRY` (`S`) · `WAIT` (`W`)
-     - **Diplomat / Caravan:** `WAIT` (`W`) · `SKIP` (`Space`)
-     - **End of Turn:** full-width `NEXT TURN` (`Enter`)
+6. **Context-Sensitive Active Unit Shortcut Bar, Auto-Explore & Road-To (`v481` → `v483`)**
+   - Native Civ1-styled shortcut buttons stacked tightly (1px gap) directly above the matching 9px `TURN-BASED` button (`y = H - 20`, XP badge stacks above) in `src/native/realtime.c`, `src/native/overlay.c`, and `src/native/addons.h`:
+     - **Settlers:** `CITY` (`B`) · `ROAD` (`Shift+R`, Road-To destination click, `v483`) · `AUTO` (`A`)
+     - **Land Military:** `FORT` (`F`) · `EXPL` (`Shift+G`) · `WAIT` (`W`)
+     - **Naval:** `SENT` (`S`) · `EXPL` (`Shift+G`) · `WAIT` (`W`)
+     - **Air / Nuclear:** `SENTRY` (`S`) · `WAIT` (`W`)
+     - **Diplomat / Caravan:** `EXPL` (`Shift+G`) · `WAIT` (`W`) · `SKIP` (`Space`)
+   - **Auto-Explore (`autowork.c`, `Shift+G` or `EXPL` button):** BFS fog-of-war exploration respecting land/sea domain, Trireme coastal safety, enemy-spotted pause, and click/key cancellation.
+   - **Full-Map BFS Goto (`autowork.c` `native_goto_step()`, hooked in `root_1e4a.c` `f_1e4a_0004`):** Replaces Civ1's disabled 4×4 block pathfinder on 160-wide maps so long-range / off-screen left-click Goto cleanly navigates around terrain and coasts.
+
+7. **Save/Load Drive Prompt Skipped (`v481.04`)**
+   - `ovl11_05f6()` in `src/gen/ovl11.c` always selects Drive `C:` (`0x4334 = 2`, `'c'`) and jumps directly to the save/load slot menu, skipping the *"Which drive contains your Save Game disk?"* prompt.
+   - *(Note: the "rightful ruler" copy-protection quiz in `ovl16_0000` is already bypassed as a `RET_FAR` in the base `CIV.EXE`.)*
+
+8. **Touch-Friendly Menus (`v482.01`)**
+   - `f_1d1e_003f()` and `f_1d1e_0483()` in `src/gen/root_1d1e.c` wait for the opening tap/click to release so dropdown menus are click-to-open / click-to-select / click-outside-to-close (no click-and-drag), and widen menu row spacing from `8px` to `11px` whenever the menu fits within the 200px screen height.
 
 ---
 

@@ -54,7 +54,7 @@ object CivilianUnitAutomation {
         if (unit.hasUnique(UniqueType.BuildImprovements))
             return workerAutomation.automateWorkerAction(unit, dangerousTiles, cache)
 
-        if (unit.hasUnique(UniqueType.CreateWaterImprovements)) {
+        if (unit.hasUniqueToCreateWaterImprovements()) {
             if (!workerAutomation.automateWorkBoats(unit))
                 UnitAutomation.tryExplore(unit, cache)
             return
@@ -84,10 +84,10 @@ object CivilianUnitAutomation {
 
         //todo this now supports "Great General"-like mod units not combining 'aura' and citadel
         // abilities, but not additional capabilities if automation finds no use for those two
-        if (unit.hasUnique(UniqueType.StrengthBonusInRadius, ignoreConditionals = true)
+        if (unit.hasStrengthBonusInRadiusUnique()
             && SpecificUnitAutomation.automateGreatGeneral(unit))
             return
-        if (unit.hasUnique(UniqueType.ConstructImprovementInstantly) && SpecificUnitAutomation.automateCitadelPlacer(unit))
+        if (unit.hasCitadelPlacementUnique() && SpecificUnitAutomation.automateCitadelPlacer(unit))
             return
 
         if (unit.maySpreadReligion())

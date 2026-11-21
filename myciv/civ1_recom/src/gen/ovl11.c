@@ -1196,21 +1196,8 @@ void ovl11_05f6(void)
     BP = SP;
     /* 05f9: sub sp, 6 */
     SP -= 0x0006;
-    /* 05fc: cmp word ptr [0x4334], -1 */
-    CMP16(RW(DS, 0x4334), 0xffff, F_ALL);
-    /* 0601: jne 0x613 */
-    if ((uint16_t)RW(DS, 0x4334) != (uint16_t)0xffff) goto L_0613;
-L_0603:
-    /* 0603: mov ax, 0x4334 */
-    AX = 0x4334;
-    /* 0606: push ax */
-    PUSH(AX);
-    /* 0607: lcall 0x2058, 0x3132 */
-    CALLF(SEGR(0x2058), 0x060c, f_2058_3132);
-    /* 060c: add sp, 2 */
-    SP += 0x0002;
-    /* 060f: dec word ptr [0x4334] */
-    WW(DS, 0x4334, RW(DS, 0x4334) - 1);
+    /* Always use C: drive (2) and skip the drive selection prompt */
+    WW(DS, 0x4334, 0x0002);
 L_0613:
     /* 0613: mov ax, 0xf */
     AX = 0x000f;
@@ -1243,6 +1230,7 @@ L_0636:
     /* 0636: lcall 0x860, 0x25e1 */
     CALLF(SEGR(0x0860), 0x063b, f_0860_25e1);
 L_063b:
+    goto L_07c5;
     /* 063b: cmp word ptr [0x679c], 0 */
     /* 0640: je 0x647 */
     if ((uint16_t)RW(DS, 0x679c) == (uint16_t)0x0000) goto L_0647;

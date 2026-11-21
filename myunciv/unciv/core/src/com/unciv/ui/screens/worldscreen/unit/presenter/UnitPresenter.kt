@@ -3,6 +3,7 @@ package com.unciv.ui.screens.worldscreen.unit.presenter
 import com.unciv.view.isCivilian
 import com.unciv.view.isPreparingAirSweep
 import com.unciv.view.isPreparingParadrop
+import com.badlogic.gdx.graphics.Color
 import com.badlogic.gdx.utils.Align
 import com.unciv.logic.map.HexCoord
 import com.unciv.models.ruleset.unique.UniqueType
@@ -112,6 +113,12 @@ class UnitPresenter(private val unitTable: UnitTable, private val worldScreen: W
                 )
             }
 
+            val heroBadge = unit.getHeroBadge()
+            if (heroBadge != null) {
+                val badgeColor = if (unit.isHero()) Color.GOLD else Color.CYAN
+                descriptionTable.add(heroBadge.toLabel(badgeColor, hideIcons = true)).padLeft(8f)
+            }
+
             if (baseUnit.religiousStrength > 0) {
                 descriptionTable.add(ImageGetter.getStatIcon("ReligiousStrength")).size(20f)
                 descriptionTable.add((baseUnit.religiousStrength - unit.religiousStrengthLost).tr())
@@ -165,7 +172,8 @@ class UnitPresenter(private val unitTable: UnitTable, private val worldScreen: W
 
     @Readonly
     private fun buildNameLabelText(unit: MapUnitView) : String {
-        var nameLabelText = unit.displayName().tr(true)
+        val heroPrefix = if (unit.isHero()) "★ " else ""
+        var nameLabelText = heroPrefix + unit.displayName().tr(true)
         if (unit.unitHealth < 100) nameLabelText += " (${unit.unitHealth.tr()})"
         return nameLabelText
     }

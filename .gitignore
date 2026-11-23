@@ -1,5 +1,7 @@
 __pycache__/
 *.[eE][xX][eE]
+*eboot*.bin
+
 
 
 

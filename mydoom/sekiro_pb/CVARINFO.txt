@@ -1,6 +1,9 @@
 server bool sk_enabled = true;
 server float sk_proj_maxspeed = 14.0;
 server float sk_proj_scale = 0.45;
-server int sk_parry_tics = 10;
+server float sk_reflect_chance = 0.45;
+server int sk_parry_tics = 7;
+server float sk_block_dmg_mult = 0.35;
 server int sk_stun_tics = 105;
+server int sk_deathblow_heal = 20;
 server bool sk_telegraph = true;

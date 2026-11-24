@@ -1,6 +1,11 @@
 __pycache__/
 *.[eE][xX][eE]
 *eboot*.bin
+*.apk
+*.APK
+*.jar
+*.JAR
+
 
 
 

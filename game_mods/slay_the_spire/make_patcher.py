@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Generate self-contained release/patch_sts_jar.py with embedded sts/GoldMod.class."""
+"""Generate self-contained release/patch_sts_jar.py with embedded sts/GoldMod.class.
+
+Patches:
+  1. AbstractPlayer.gainGold(I)V       -> configurable gold multiplier (sts_cheat.ini)
+  2. AbstractPlayer.initializeClass()  -> configurable starting_potion_slots & cards_per_turn (sts_cheat.ini)
+  3. DesktopLauncher.main(String[])V   -> config.resizable = true
+  4. CardCrawlGame.resize(II)V         -> aspect-ratio FitViewport.update + Settings.M_W/M_H
+  5. InputHelper.updateFirst()V        -> unproject mouse coordinates through FitViewport
+"""
 import base64
 import os
 
@@ -7,8 +15,9 @@ with open("build/sts/GoldMod.class", "rb") as f:
     goldmod_b64 = base64.b64encode(f.read()).decode("ascii")
 
 PATCHER_SRC = '''#!/usr/bin/env python3
-"""Patch Slay the Spire (desktop-1.0.jar) with configurable gold multiplier,
-starting potion slots, and cards drawn per turn (configured via sts_gold.ini).
+"""Patch Slay the Spire (desktop-1.0.jar) with:
+  - Configurable gold multiplier, starting potion slots, and cards drawn per turn (sts_cheat.ini)
+  - Resizable windowed mode (preserving aspect ratio via FitViewport + accurate mouse mapping)
 
 Usage:
     python patch_sts_jar.py /path/to/desktop-1.0.jar
@@ -21,7 +30,10 @@ import struct
 import sys
 import zipfile
 
-TARGET_CLASS = "com/megacrit/cardcrawl/characters/AbstractPlayer.class"
+PLAYER_CLASS = "com/megacrit/cardcrawl/characters/AbstractPlayer.class"
+LAUNCHER_CLASS = "com/megacrit/cardcrawl/desktop/DesktopLauncher.class"
+GAME_CLASS = "com/megacrit/cardcrawl/core/CardCrawlGame.class"
+INPUT_CLASS = "com/megacrit/cardcrawl/helpers/input/InputHelper.class"
 HELPER_CLASS = "sts/GoldMod.class"
 HELPER_BYTES = base64.b64decode("__GOLDMOD_B64__")
 
@@ -60,18 +72,7 @@ def parse_cp(data, off, cp_count):
     return entries, off
 
 
-def patch_abstract_player_class(cls_bytes):
-    magic, minor, major, cp_count = struct.unpack_from(">IHHH", cls_bytes, 0)
-    assert magic == 0xCAFEBABE, "Not a valid Java class file"
-    cp, off = parse_cp(cls_bytes, 10, cp_count)
-
-    for e in cp:
-        if e and e[0] == 1 and e[2] == "sts/GoldMod":
-            return None  # Already patched
-
-    new_cp_bytes = bytearray(cls_bytes[10:off])
-    next_idx = cp_count
-
+def _append_methodref(new_cp_bytes, next_idx, cls_name, method_name, method_desc):
     def add_utf8(s):
         nonlocal next_idx
         b = s.encode("utf-8")
@@ -101,20 +102,16 @@ def patch_abstract_player_class(cls_bytes):
         next_idx += 1
         return idx
 
-    u_cls = add_utf8("sts/GoldMod")
+    u_cls = add_utf8(cls_name)
+    u_name = add_utf8(method_name)
+    u_desc = add_utf8(method_desc)
     c_idx = add_class(u_cls)
+    nat_idx = add_nat(u_name, u_desc)
+    mref_idx = add_methodref(c_idx, nat_idx)
+    return mref_idx, next_idx
 
-    # sts/GoldMod.scale:(I)I
-    u_scale = add_utf8("scale")
-    u_scale_desc = add_utf8("(I)I")
-    mref_scale = add_methodref(c_idx, add_nat(u_scale, u_scale_desc))
 
-    # sts/GoldMod.onInitPlayer:(Lcom/megacrit/cardcrawl/characters/AbstractPlayer;)V
-    u_init = add_utf8("onInitPlayer")
-    u_init_desc = add_utf8("(Lcom/megacrit/cardcrawl/characters/AbstractPlayer;)V")
-    mref_init = add_methodref(c_idx, add_nat(u_init, u_init_desc))
-
-    body = bytearray()
+def _skip_header_and_fields(cls_bytes, off):
     head_start = off
     off += 6  # access, this, super
     if_count = struct.unpack_from(">H", cls_bytes, off)[0]
@@ -128,7 +125,27 @@ def patch_abstract_player_class(cls_bytes):
         for _ in range(ac):
             _, alen = struct.unpack_from(">HI", cls_bytes, off)
             off += 6 + alen
-    body.extend(cls_bytes[head_start:off])
+    return cls_bytes[head_start:off], off
+
+
+def patch_abstract_player_class(cls_bytes):
+    magic, minor, major, cp_count = struct.unpack_from(">IHHH", cls_bytes, 0)
+    assert magic == 0xCAFEBABE, "Not a valid Java class file"
+    cp, off = parse_cp(cls_bytes, 10, cp_count)
+
+    for e in cp:
+        if e and e[0] == 1 and e[2] == "sts/GoldMod":
+            return None  # Already patched
+
+    new_cp_bytes = bytearray(cls_bytes[10:off])
+    mref_scale, next_idx = _append_methodref(new_cp_bytes, cp_count, "sts/GoldMod", "scale", "(I)I")
+    mref_init, next_idx = _append_methodref(
+        new_cp_bytes, next_idx, "sts/GoldMod", "onInitPlayer", "(Lcom/megacrit/cardcrawl/characters/AbstractPlayer;)V"
+    )
+
+    body = bytearray()
+    hdr_fields, off = _skip_header_and_fields(cls_bytes, off)
+    body.extend(hdr_fields)
 
     methods_count = struct.unpack_from(">H", cls_bytes, off)[0]
     body.extend(cls_bytes[off:off + 2])
@@ -228,7 +245,6 @@ def patch_abstract_player_class(cls_bytes):
                 max_stack, max_locals, code_len = struct.unpack_from(">HHI", adata, 0)
                 orig_code = adata[8:8 + code_len]
                 assert orig_code[-1] == 0xB1, "Expected initializeClass to end with return (0xB1)"
-                # Append before final return: aload_0 (0x2A); invokestatic mref_init (0xB8 hi lo); return (0xB1)
                 suffix = struct.pack(">BBHB", 0x2A, 0xB8, mref_init, 0xB1)
                 new_code = orig_code[:-1] + suffix
                 delta = len(suffix) - 1  # 4
@@ -274,6 +290,146 @@ def patch_abstract_player_class(cls_bytes):
     return struct.pack(">IHHH", magic, minor, major, next_idx) + bytes(new_cp_bytes) + bytes(body)
 
 
+def patch_desktop_launcher_class(cls_bytes):
+    """Set LwjglApplicationConfiguration.resizable = true (iconst_0 -> iconst_1)."""
+    magic, minor, major, cp_count = struct.unpack_from(">IHHH", cls_bytes, 0)
+    assert magic == 0xCAFEBABE
+    cp, off = parse_cp(cls_bytes, 10, cp_count)
+
+    resizable_fref = None
+    for idx in range(1, len(cp)):
+        e = cp[idx]
+        if e and e[0] == 9:
+            cls_idx, nat_idx = struct.unpack_from(">HH", e[1], 1)
+            cname_idx = struct.unpack_from(">H", cp[cls_idx][1], 1)[0]
+            fname_idx, fdesc_idx = struct.unpack_from(">HH", cp[nat_idx][1], 1)
+            if (cp[cname_idx][2] == "com/badlogic/gdx/backends/lwjgl/LwjglApplicationConfiguration"
+                    and cp[fname_idx][2] == "resizable" and cp[fdesc_idx][2] == "Z"):
+                resizable_fref = idx
+                break
+    assert resizable_fref is not None, "Could not find LwjglApplicationConfiguration.resizable Fieldref"
+
+    target_pat = struct.pack(">BBH", 0x03, 0xB5, resizable_fref)
+    already_pat = struct.pack(">BBH", 0x04, 0xB5, resizable_fref)
+    out = bytearray(cls_bytes)
+    pos = out.find(target_pat, off)
+    if pos == -1:
+        if out.find(already_pat, off) != -1:
+            return None
+        raise AssertionError("Could not find `config.resizable = false` bytecode")
+    out[pos] = 0x04
+    return bytes(out)
+
+
+def patch_card_crawl_game_class(cls_bytes):
+    """Replace empty CardCrawlGame.resize(II)V with `GoldMod.onResize(w, h); return;`."""
+    magic, minor, major, cp_count = struct.unpack_from(">IHHH", cls_bytes, 0)
+    assert magic == 0xCAFEBABE
+    cp, off = parse_cp(cls_bytes, 10, cp_count)
+
+    for e in cp:
+        if e and e[0] == 1 and e[2] == "sts/GoldMod":
+            return None
+
+    new_cp_bytes = bytearray(cls_bytes[10:off])
+    mref_idx, next_idx = _append_methodref(new_cp_bytes, cp_count, "sts/GoldMod", "onResize", "(II)V")
+
+    body = bytearray()
+    hdr_fields, off = _skip_header_and_fields(cls_bytes, off)
+    body.extend(hdr_fields)
+
+    methods_count = struct.unpack_from(">H", cls_bytes, off)[0]
+    body.extend(cls_bytes[off:off + 2])
+    off += 2
+    patched = False
+
+    for _ in range(methods_count):
+        m_start = off
+        acc, name_idx, desc_idx, attr_count = struct.unpack_from(">HHHH", cls_bytes, off)
+        m_name = cp[name_idx][2]
+        m_desc = cp[desc_idx][2]
+        off += 8
+        is_target = (m_name == "resize" and m_desc == "(II)V")
+        body.extend(cls_bytes[m_start:off])
+
+        for _ in range(attr_count):
+            aname_idx, alen = struct.unpack_from(">HI", cls_bytes, off)
+            aname = cp[aname_idx][2]
+            adata = cls_bytes[off + 6:off + 6 + alen]
+            off += 6 + alen
+
+            if is_target and aname == "Code":
+                max_stack, max_locals, code_len = struct.unpack_from(">HHI", adata, 0)
+                new_code = struct.pack(">BBBHB", 0x1B, 0x1C, 0xB8, mref_idx, 0xB1)
+                new_code_attr = (
+                    struct.pack(">HHI", max(max_stack, 2), max(max_locals, 3), len(new_code))
+                    + new_code
+                    + struct.pack(">HH", 0, 0)
+                )
+                body.extend(struct.pack(">HI", aname_idx, len(new_code_attr)) + new_code_attr)
+                patched = True
+            else:
+                body.extend(struct.pack(">HI", aname_idx, alen) + adata)
+
+    assert patched, "Could not find CardCrawlGame.resize(II)V"
+    body.extend(cls_bytes[off:])
+    return struct.pack(">IHHH", magic, minor, major, next_idx) + bytes(new_cp_bytes) + bytes(body)
+
+
+def patch_input_helper_class(cls_bytes):
+    """Append `GoldMod.fixMouse()` right before the final `return` of InputHelper.updateFirst()V."""
+    magic, minor, major, cp_count = struct.unpack_from(">IHHH", cls_bytes, 0)
+    assert magic == 0xCAFEBABE
+    cp, off = parse_cp(cls_bytes, 10, cp_count)
+
+    for e in cp:
+        if e and e[0] == 1 and e[2] == "sts/GoldMod":
+            return None
+
+    new_cp_bytes = bytearray(cls_bytes[10:off])
+    mref_idx, next_idx = _append_methodref(new_cp_bytes, cp_count, "sts/GoldMod", "fixMouse", "()V")
+
+    body = bytearray()
+    hdr_fields, off = _skip_header_and_fields(cls_bytes, off)
+    body.extend(hdr_fields)
+
+    methods_count = struct.unpack_from(">H", cls_bytes, off)[0]
+    body.extend(cls_bytes[off:off + 2])
+    off += 2
+    patched = False
+
+    for _ in range(methods_count):
+        m_start = off
+        acc, name_idx, desc_idx, attr_count = struct.unpack_from(">HHHH", cls_bytes, off)
+        m_name = cp[name_idx][2]
+        m_desc = cp[desc_idx][2]
+        off += 8
+        is_target = (m_name == "updateFirst" and m_desc == "()V")
+        body.extend(cls_bytes[m_start:off])
+
+        for _ in range(attr_count):
+            aname_idx, alen = struct.unpack_from(">HI", cls_bytes, off)
+            aname = cp[aname_idx][2]
+            adata = cls_bytes[off + 6:off + 6 + alen]
+            off += 6 + alen
+
+            if is_target and aname == "Code":
+                max_stack, max_locals, code_len = struct.unpack_from(">HHI", adata, 0)
+                orig_code = adata[8:8 + code_len]
+                assert orig_code[-1] == 0xB1, "Expected updateFirst() to end with return (0xB1)"
+                new_code = orig_code[:-1] + struct.pack(">BHB", 0xB8, mref_idx, 0xB1)
+                tail = adata[8 + code_len:]
+                new_code_attr = struct.pack(">HHI", max_stack, max_locals, len(new_code)) + new_code + tail
+                body.extend(struct.pack(">HI", aname_idx, len(new_code_attr)) + new_code_attr)
+                patched = True
+            else:
+                body.extend(struct.pack(">HI", aname_idx, alen) + adata)
+
+    assert patched, "Could not find InputHelper.updateFirst()V"
+    body.extend(cls_bytes[off:])
+    return struct.pack(">IHHH", magic, minor, major, next_idx) + bytes(new_cp_bytes) + bytes(body)
+
+
 def main():
     args = sys.argv[1:]
     restore = False
@@ -296,12 +452,19 @@ def main():
         return
 
     with zipfile.ZipFile(jar_path, "r") as zin:
-        orig_cls = zin.read(TARGET_CLASS)
+        p_cls = patch_abstract_player_class(zin.read(PLAYER_CLASS))
+        l_cls = patch_desktop_launcher_class(zin.read(LAUNCHER_CLASS))
+        g_cls = patch_card_crawl_game_class(zin.read(GAME_CLASS))
+        i_cls = patch_input_helper_class(zin.read(INPUT_CLASS))
 
-    new_cls = patch_abstract_player_class(orig_cls)
-    if new_cls is None:
-        print("Already patched!")
-        return
+    overrides = {}
+    if p_cls is not None: overrides[PLAYER_CLASS] = p_cls
+    if l_cls is not None: overrides[LAUNCHER_CLASS] = l_cls
+    if g_cls is not None: overrides[GAME_CLASS] = g_cls
+    if i_cls is not None: overrides[INPUT_CLASS] = i_cls
+
+    if not overrides:
+        print("All patches already applied! Updating sts/GoldMod.class only.")
 
     if not os.path.exists(bak_path):
         shutil.copy2(jar_path, bak_path)
@@ -310,8 +473,8 @@ def main():
     tmp_path = jar_path + ".tmp"
     with zipfile.ZipFile(jar_path, "r") as zin, zipfile.ZipFile(tmp_path, "w") as zout:
         for item in zin.infolist():
-            if item.filename == TARGET_CLASS:
-                zout.writestr(item, new_cls)
+            if item.filename in overrides:
+                zout.writestr(item, overrides[item.filename])
             elif item.filename == HELPER_CLASS:
                 continue
             else:
@@ -319,8 +482,8 @@ def main():
         zout.writestr(HELPER_CLASS, HELPER_BYTES, compress_type=zipfile.ZIP_DEFLATED)
 
     os.replace(tmp_path, jar_path)
-    print(f"Successfully patched {jar_path}!")
-    print("Put sts_gold.ini next to desktop-1.0.jar to configure gold_multiplier, starting_potion_slots, and cards_per_turn.")
+    print(f"Successfully patched {jar_path} ({len(overrides)} class(es) + {HELPER_CLASS})!")
+    print("Put sts_cheat.ini next to the jar to configure gold_multiplier, starting_potion_slots, and cards_per_turn.")
 
 
 if __name__ == "__main__":

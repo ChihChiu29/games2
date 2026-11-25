@@ -1,14 +1,18 @@
-# Slay the Spire 2 (Android APK v0.111.0) Gold Multiplier Mod
+# Slay the Spire 2 (Android APK v0.111.0) Mod
 
-Patches `MegaCrit.Sts2.Core.Hooks.Hook.ModifyGoldGained` inside `assets/payload/SlayTheSpire2.zip` → `data_sts2_windows_x86_64/sts2.dll` (relocated to `.text` padding at `RVA 0x94FAC0`, multiplying the returned `System.Decimal` by `mult`), repacks with 4KB alignment, and signs with **APK Signature Scheme v2** (Android 7.0–16+).
+Version is tracked in `VERSION` (currently `1.2`).
+
+## Changelog
+- **1.1:** 3x Gold (`Hook.ModifyGoldGained` relocated to `0x94FAC0`).
+- **1.2:** Added **5 starting potion slots** (`Player.CreateForNewRun` @ `0x114D56`) and **6 cards drawn per turn** (`Hook.ModifyHandDraw` caller @ `0x3F5181`).
 
 ## Built APK
-- `release/SlayTheSpire2_v0.111.0_3xGold.apk` (3x Gold)
+- `release/SlayTheSpire2_v0.111.0_mod1.2.apk` (3x Gold, 5 starting potion slots, 6 cards/turn; 4KB-aligned & APK v2 signed)
 
-## Rebuild for any multiplier (e.g. 3x or 5x)
+## Rebuild with Custom Values
 ```bash
-python3 patch_sts2_apk.py --mult 5
+python3 patch_sts2_apk.py --mult 3 --potions 5 --draw 6
 ```
 
 ## Installing on Android
-Because the APK is re-signed with a new key, uninstall the existing StS2 app first (back up your save if needed), then install `release/SlayTheSpire2_v0.111.0_3xGold.apk`.
+Uninstall the existing StS2 app first (back up your save if needed), then install `release/SlayTheSpire2_v0.111.0_mod1.2.apk`.

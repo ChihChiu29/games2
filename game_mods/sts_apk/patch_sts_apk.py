@@ -1,32 +1,32 @@
 #!/usr/bin/env python3
-"""Patch Slay the Spire Android APK (v2.6.1) for 2x, 3x, or 5x Gold gain.
+"""Patch Slay the Spire Android APK (v2.6.1) with:
+  - Gold multiplier (default 3x)
+  - Starting potion slots (default 5; vanilla 3)
+  - Cards drawn per turn (default 6; vanilla 5)
 
 Also replaces the ApkVision Dex2C wrapper in `classes4.dex` (which aborts on
 re-signed APKs) with a clean `MyLoaderActivity` + `SpireLicensingServiceCallback`
 and signs with official Android SDK `apksigner` (v1 + v2 + v3).
 
 Verified in lib/arm64-v8a/libSpire_ANDROID.so:
-  Symbol: _ZN3com8megacrit9cardcrawl10characters29AbstractPlayer$_gainGold_VoidEPNS2_14AbstractPlayerEi
-  VA = 0x27288BC, file_off = 0x27248BC
-  At VA 0x27288D0 (file_off 0x27248D0):
-    Original: mov w20, w1               (0x2A0103F4 -> f4 03 01 2a)
-    2x Gold:  add w20, w1, w1           (0x0B010034 -> 34 00 01 0b)
-    3x Gold:  add w20, w1, w1, lsl #1   (0x0B010434 -> 34 04 01 0b)
-    5x Gold:  add w20, w1, w1, lsl #2   (0x0B010834 -> 34 08 01 0b)
+  - 0x27248D0 (AbstractPlayer::gainGold):        mov w20, w1         -> add w20, w1, w1, lsl #1 (3x) / #2 (5x)
+  - 0x271F230 (AbstractPlayer::<init>):          mov w23, #3         -> mov w23, #<potions>
+  - 0x2720088 (AbstractPlayer::initializeClass): ldr w8, [x20, #0x38]-> mov w8, #<draw>
 
 Usage:
-    python3 patch_sts_apk.py [--mult 2|3|5]
+    python3 patch_sts_apk.py [--mult 1|2|3|5] [--potions 5] [--draw 6]
 """
 import argparse
 import glob
 import os
+import struct
 import subprocess
-import sys
 import tempfile
 import zipfile
 
-SRC_APK = "/home/chih/Workspace/git/games2/game_mods/sts_apk/Slay-the-Spire-v2.6.1-full-apkvision.apk"
-OUT_DIR = "/home/chih/Workspace/git/games2/game_mods/sts_apk/release"
+DIR = os.path.dirname(os.path.abspath(__file__))
+SRC_APK = os.path.join(DIR, "Slay-the-Spire-v2.6.1-full-apkvision.apk")
+OUT_DIR = os.path.join(DIR, "release")
 KEY_DIR = "/home/chih/Workspace/git/games2/game_mods/common"
 
 SDK_ROOT = "/home/chih/Android/Sdk"
@@ -35,14 +35,21 @@ ANDROID_JAR = os.path.join(SDK_ROOT, "platforms/android-35/android.jar")
 JAVA_HOME = "/home/chih/Tools/android-studio/jbr"
 
 SO_NAME = "lib/arm64-v8a/libSpire_ANDROID.so"
-PATCH_OFF = 0x27248D0
-ORIG_INSN = bytes.fromhex("f403012a")  # mov w20, w1
+GOLD_OFF = 0x27248D0
+GOLD_ORIG = bytes.fromhex("f403012a")  # mov w20, w1
 
 MULT_INSNS = {
+    1: bytes.fromhex("f403012a"),  # mov w20, w1 (1x)
     2: bytes.fromhex("3400010b"),  # add w20, w1, w1 (w1 * 2)
     3: bytes.fromhex("3404010b"),  # add w20, w1, w1, lsl #1 (w1 * 3)
     5: bytes.fromhex("3408010b"),  # add w20, w1, w1, lsl #2 (w1 * 5)
 }
+
+POTION_OFF = 0x271F230
+POTION_ORIG = bytes.fromhex("77008052")  # mov w23, #3
+
+DRAW_OFF = 0x2720088
+DRAW_ORIG = bytes.fromhex("883a40b9")  # ldr w8, [x20, #0x38]
 
 STUB_INTERFACE_JAVA = """\
 package com.google.licensingservicehelper;
@@ -95,6 +102,11 @@ class SpireLicensingServiceCallback implements LicensingServiceCallback {
 """
 
 
+def encode_movz_w(rd: int, imm16: int) -> bytes:
+    assert 0 <= rd <= 30 and 0 <= imm16 <= 0xFFFF
+    return struct.pack("<I", 0x52800000 | (imm16 << 5) | rd)
+
+
 def _java_env():
     env = os.environ.copy()
     env["JAVA_HOME"] = JAVA_HOME
@@ -133,7 +145,6 @@ def build_clean_classes4_dex() -> bytes:
             env=env,
         )
 
-        # Only include com.humble.SlayTheSpire classes (LicensingServiceCallback is already in classes.dex)
         sts_classes = glob.glob(os.path.join(cls_dir, "com/humble/SlayTheSpire/*.class"))
         subprocess.run(
             [
@@ -192,25 +203,43 @@ def repack_apk_raw(src_apk: str, out_apk: str, overrides: dict, remove_files: se
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mult", type=int, choices=[2, 3, 5], default=3)
+    ap.add_argument("--mult", type=int, choices=[1, 2, 3, 5], default=3)
+    ap.add_argument("--potions", type=int, default=5)
+    ap.add_argument("--draw", type=int, default=6)
     args = ap.parse_args()
+    assert 1 <= args.potions <= 12 and 1 <= args.draw <= 10
+
+    with open(os.path.join(DIR, "VERSION"), "r", encoding="utf-8") as f:
+        version = f.read().strip()
 
     os.makedirs(OUT_DIR, exist_ok=True)
     with zipfile.ZipFile(SRC_APK, "r") as z:
         so = bytearray(z.read(SO_NAME))
 
-    cur = bytes(so[PATCH_OFF : PATCH_OFF + 4])
-    assert cur == ORIG_INSN, f"Unexpected bytes at {PATCH_OFF:#x}: {cur.hex()} != {ORIG_INSN.hex()}"
-    so[PATCH_OFF : PATCH_OFF + 4] = MULT_INSNS[args.mult]
-    print(f"Patched {SO_NAME} @ {PATCH_OFF:#x}: {ORIG_INSN.hex()} -> {MULT_INSNS[args.mult].hex()} ({args.mult}x gold)")
+    # 1. Gold multiplier
+    cur = bytes(so[GOLD_OFF : GOLD_OFF + 4])
+    assert cur == GOLD_ORIG, f"Unexpected bytes at {GOLD_OFF:#x}: {cur.hex()} != {GOLD_ORIG.hex()}"
+    so[GOLD_OFF : GOLD_OFF + 4] = MULT_INSNS[args.mult]
+
+    # 2. Starting potion slots
+    cur_p = bytes(so[POTION_OFF : POTION_OFF + 4])
+    assert cur_p == POTION_ORIG, f"Unexpected bytes at {POTION_OFF:#x}: {cur_p.hex()} != {POTION_ORIG.hex()}"
+    so[POTION_OFF : POTION_OFF + 4] = encode_movz_w(23, args.potions)
+
+    # 3. Cards drawn per turn
+    cur_d = bytes(so[DRAW_OFF : DRAW_OFF + 4])
+    assert cur_d == DRAW_ORIG, f"Unexpected bytes at {DRAW_OFF:#x}: {cur_d.hex()} != {DRAW_ORIG.hex()}"
+    so[DRAW_OFF : DRAW_OFF + 4] = encode_movz_w(8, args.draw)
+
+    print(f"Patched {SO_NAME} (v{version}): {args.mult}x gold, {args.potions} potion slots, {args.draw} cards/turn")
 
     print("Building clean classes4.dex (removing ApkVision Dex2C anti-tamper wrapper)...")
     clean_dex4 = build_clean_classes4_dex()
     print(f"  Built clean classes4.dex ({len(clean_dex4):,} bytes)")
 
-    raw_apk = os.path.join(OUT_DIR, f".tmp_sts1_{args.mult}x_raw.apk")
-    aligned_apk = os.path.join(OUT_DIR, f".tmp_sts1_{args.mult}x_aligned.apk")
-    signed_apk = os.path.join(OUT_DIR, f"SlayTheSpire_v2.6.1_{args.mult}xGold.apk")
+    raw_apk = os.path.join(OUT_DIR, f".tmp_sts1_mod{version}_raw.apk")
+    aligned_apk = os.path.join(OUT_DIR, f".tmp_sts1_mod{version}_aligned.apk")
+    signed_apk = os.path.join(OUT_DIR, f"SlayTheSpire_v2.6.1_mod{version}.apk")
 
     remove_files = {
         "lib/arm64-v8a/libAPKVISION.so",

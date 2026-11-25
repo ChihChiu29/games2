@@ -1,14 +1,18 @@
-# Slay the Spire (Android APK v2.6.1) Gold Multiplier Mod
+# Slay the Spire (Android APK v2.6.1) Mod
 
-Patches `AbstractPlayer::gainGold` (`_ZN3com8megacrit9cardcrawl10characters29AbstractPlayer$_gainGold_VoidEPNS2_14AbstractPlayerEi`, file offset `0x27248D0`) inside `lib/arm64-v8a/libSpire_ANDROID.so` with a single ARM64 multiply instruction, repacks with 4KB `.so` alignment, and signs with **APK Signature Scheme v2** (Android 7.0–16+).
+Version is tracked in `VERSION` (currently `1.2`).
+
+## Changelog
+- **1.1:** 3x Gold (`AbstractPlayer::gainGold` @ `0x27248D0`).
+- **1.2:** Added **5 starting potion slots** (`AbstractPlayer::<init>` @ `0x271F230`) and **6 cards drawn per turn** (`AbstractPlayer::initializeClass` @ `0x2720088`).
 
 ## Built APK
-- `release/SlayTheSpire_v2.6.1_3xGold.apk` (3x Gold)
+- `release/SlayTheSpire_v2.6.1_mod1.2.apk` (3x Gold, 5 starting potion slots, 6 cards/turn; 4KB-aligned & APK v2 signed)
 
-## Rebuild for 2x, 3x, or 5x Gold
+## Rebuild with Custom Values
 ```bash
-python3 patch_sts_apk.py --mult 5
+python3 patch_sts_apk.py --mult 3 --potions 5 --draw 6
 ```
 
 ## Installing on Android
-Because the APK is re-signed with a new key, uninstall the existing StS app first (back up your save if needed), then install `release/SlayTheSpire_v2.6.1_3xGold.apk`.
+Uninstall the existing StS app first (back up your save if needed), then install `release/SlayTheSpire_v2.6.1_mod1.2.apk`.

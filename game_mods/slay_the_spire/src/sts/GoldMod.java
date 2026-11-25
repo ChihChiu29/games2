@@ -1,11 +1,7 @@
 package sts;
 
-import com.badlogic.gdx.Gdx;
-import com.badlogic.gdx.math.Vector2;
-import com.badlogic.gdx.utils.viewport.FitViewport;
-import com.megacrit.cardcrawl.core.CardCrawlGame;
-import com.megacrit.cardcrawl.core.Settings;
-import com.megacrit.cardcrawl.helpers.input.InputHelper;
+import com.megacrit.cardcrawl.characters.AbstractPlayer;
+import com.megacrit.cardcrawl.potions.PotionSlot;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
@@ -13,9 +9,11 @@ import java.io.FileWriter;
 import java.io.PrintWriter;
 
 public final class GoldMod {
-    private static volatile double multiplier = 3.0;
+    public static final String MOD_VERSION = "1.2";
+    private static volatile double goldMultiplier = 3.0;
+    private static volatile int startingPotionSlots = 5;
+    private static volatile int cardsPerTurn = 6;
     private static boolean initialized = false;
-    private static final Vector2 TMP_MOUSE = new Vector2();
 
     private static synchronized void init() {
         if (initialized) return;
@@ -39,7 +37,17 @@ public final class GoldMod {
                     if ("gold_multiplier".equalsIgnoreCase(key)) {
                         double parsed = Double.parseDouble(val);
                         if (parsed > 0.0 && parsed <= 1000.0) {
-                            multiplier = parsed;
+                            goldMultiplier = parsed;
+                        }
+                    } else if ("starting_potion_slots".equalsIgnoreCase(key)) {
+                        int parsed = Integer.parseInt(val);
+                        if (parsed >= 1 && parsed <= 12) {
+                            startingPotionSlots = parsed;
+                        }
+                    } else if ("cards_per_turn".equalsIgnoreCase(key)) {
+                        int parsed = Integer.parseInt(val);
+                        if (parsed >= 1 && parsed <= 10) {
+                            cardsPerTurn = parsed;
                         }
                     }
                 }
@@ -52,7 +60,10 @@ public final class GoldMod {
                 ? new File(ini.getParentFile(), "sts_gold.log")
                 : new File("sts_gold.log");
             try (PrintWriter pw = new PrintWriter(new FileWriter(logFile, true))) {
-                pw.println("[StS GoldMod] Loaded gold_multiplier=" + multiplier + " (from " + source + ")");
+                pw.println("[StS Mod v" + MOD_VERSION + "] gold_multiplier=" + goldMultiplier
+                    + ", starting_potion_slots=" + startingPotionSlots
+                    + ", cards_per_turn=" + cardsPerTurn
+                    + " (from " + source + ")");
             }
         } catch (Throwable ignored) {
         }
@@ -76,41 +87,30 @@ public final class GoldMod {
     public static int scale(int amount) {
         if (!initialized) init();
         if (amount <= 0) return amount;
-        long scaled = Math.round((double) amount * multiplier);
+        long scaled = Math.round((double) amount * goldMultiplier);
         if (scaled < 1L) return 1;
         if (scaled > Integer.MAX_VALUE) return Integer.MAX_VALUE;
         return (int) scaled;
     }
 
-    public static void onResize(int width, int height) {
-        if (width <= 0 || height <= 0) return;
-        Settings.M_W = width;
-        Settings.M_H = height;
-        FitViewport vp = CardCrawlGame.viewport;
-        if (vp != null) {
-            vp.update(width, height, false);
-        }
-    }
+    public static void onInitPlayer(AbstractPlayer p) {
+        if (!initialized) init();
+        if (p == null) return;
 
-    public static void fixMouse() {
-        FitViewport vp = CardCrawlGame.viewport;
-        if (vp == null || Gdx.input == null) return;
-        int sw = vp.getScreenWidth();
-        int sh = vp.getScreenHeight();
-        if (sw <= 0 || sh <= 0) return;
-        if (sw == Settings.WIDTH && sh == Settings.HEIGHT
-                && vp.getScreenX() == 0 && vp.getScreenY() == 0) {
-            return;
+        // Starting cards drawn per turn (vanilla = 5)
+        if (cardsPerTurn > 0) {
+            p.masterHandSize = cardsPerTurn;
+            p.gameHandSize = cardsPerTurn;
         }
-        TMP_MOUSE.set((float) Gdx.input.getX(), (float) Gdx.input.getY());
-        vp.unproject(TMP_MOUSE);
-        int x = Math.round(TMP_MOUSE.x);
-        int y = Math.round(TMP_MOUSE.y);
-        if (x < 0) x = 0;
-        else if (x > Settings.WIDTH) x = Settings.WIDTH;
-        if (y < 1) y = 1;
-        else if (y > Settings.HEIGHT) y = Settings.HEIGHT;
-        InputHelper.mX = x;
-        InputHelper.mY = y;
+
+        // Starting potion slots (vanilla = 3)
+        if (startingPotionSlots > 0 && p.potions != null) {
+            p.potionSlots = startingPotionSlots;
+            p.potions.clear();
+            for (int i = 0; i < startingPotionSlots; i++) {
+                p.potions.add(new PotionSlot(i));
+            }
+            p.adjustPotionPositions();
+        }
     }
 }

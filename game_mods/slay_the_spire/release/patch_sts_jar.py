@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Patch Slay the Spire (desktop-1.0.jar) with:
-  - Configurable gold multiplier (sts_gold.ini)
-  - Resizable windowed mode (preserving aspect ratio via FitViewport + accurate mouse mapping)
+"""Patch Slay the Spire (desktop-1.0.jar) with configurable gold multiplier,
+starting potion slots, and cards drawn per turn (configured via sts_gold.ini).
 
 Usage:
     python patch_sts_jar.py /path/to/desktop-1.0.jar
@@ -14,12 +13,9 @@ import struct
 import sys
 import zipfile
 
-PLAYER_CLASS = "com/megacrit/cardcrawl/characters/AbstractPlayer.class"
-LAUNCHER_CLASS = "com/megacrit/cardcrawl/desktop/DesktopLauncher.class"
-GAME_CLASS = "com/megacrit/cardcrawl/core/CardCrawlGame.class"
-INPUT_CLASS = "com/megacrit/cardcrawl/helpers/input/InputHelper.class"
+TARGET_CLASS = "com/megacrit/cardcrawl/characters/AbstractPlayer.class"
 HELPER_CLASS = "sts/GoldMod.class"
-HELPER_BYTES = base64.b64decode("yv66vgAAADQBHgoAAgADBwAEDAAFAAYBABBqYXZhL2xhbmcvT2JqZWN0AQAGPGluaXQ+AQADKClWCQAIAAkHAAoMAAsADAEAC3N0cy9Hb2xkTW9kAQALaW5pdGlhbGl6ZWQBAAFaCgAIAA4MAA8AEAEADmZpbmRDb25maWdGaWxlAQAQKClMamF2YS9pby9GaWxlOwgAEgEAB2RlZmF1bHQKABQAFQcAFgwAFwAYAQAMamF2YS9pby9GaWxlAQAGaXNGaWxlAQADKClaCgAUABoMABsAHAEAD2dldEFic29sdXRlUGF0aAEAFCgpTGphdmEvbGFuZy9TdHJpbmc7BwAeAQAWamF2YS9pby9CdWZmZXJlZFJlYWRlcgcAIAEAEmphdmEvaW8vRmlsZVJlYWRlcgoAHwAiDAAFACMBABEoTGphdmEvaW8vRmlsZTspVgoAHQAlDAAFACYBABMoTGphdmEvaW8vUmVhZGVyOylWCgAdACgMACkAHAEACHJlYWRMaW5lCgArACwHAC0MAC4AHAEAEGphdmEvbGFuZy9TdHJpbmcBAAR0cmltCgArADAMADEAGAEAB2lzRW1wdHkIADMBAAEjCgArADUMADYANwEACnN0YXJ0c1dpdGgBABUoTGphdmEvbGFuZy9TdHJpbmc7KVoIADkBAAE7CAA7AQABWwoAKwA9DAA+AD8BAAdpbmRleE9mAQAEKEkpSQoAKwBBDABCAEMBAAlzdWJzdHJpbmcBABYoSUkpTGphdmEvbGFuZy9TdHJpbmc7CgArAEUMAEIARgEAFShJKUxqYXZhL2xhbmcvU3RyaW5nOwgASAEAD2dvbGRfbXVsdGlwbGllcgoAKwBKDABLADcBABBlcXVhbHNJZ25vcmVDYXNlCgBNAE4HAE8MAFAAUQEAEGphdmEvbGFuZy9Eb3VibGUBAAtwYXJzZURvdWJsZQEAFShMamF2YS9sYW5nL1N0cmluZzspRAZAj0AAAAAAAAkACABVDABWAFcBAAptdWx0aXBsaWVyAQABRAoAHQBZDABaAAYBAAVjbG9zZQcAXAEAE2phdmEvbGFuZy9UaHJvd2FibGUKAFsAXgwAXwBgAQANYWRkU3VwcHJlc3NlZAEAGChMamF2YS9sYW5nL1Rocm93YWJsZTspVgoAFABiDABjABABAA1nZXRQYXJlbnRGaWxlCABlAQAMc3RzX2dvbGQubG9nCgAUAGcMAAUAaAEAIyhMamF2YS9pby9GaWxlO0xqYXZhL2xhbmcvU3RyaW5nOylWCgAUAGoMAAUAawEAFShMamF2YS9sYW5nL1N0cmluZzspVgcAbQEAE2phdmEvaW8vUHJpbnRXcml0ZXIHAG8BABJqYXZhL2lvL0ZpbGVXcml0ZXIKAG4AcQwABQByAQASKExqYXZhL2lvL0ZpbGU7WilWCgBsAHQMAAUAdQEAEyhMamF2YS9pby9Xcml0ZXI7KVYHAHcBABdqYXZhL2xhbmcvU3RyaW5nQnVpbGRlcgoAdgADCAB6AQAlW1N0UyBHb2xkTW9kXSBMb2FkZWQgZ29sZF9tdWx0aXBsaWVyPQoAdgB8DAB9AH4BAAZhcHBlbmQBAC0oTGphdmEvbGFuZy9TdHJpbmc7KUxqYXZhL2xhbmcvU3RyaW5nQnVpbGRlcjsKAHYAgAwAfQCBAQAcKEQpTGphdmEvbGFuZy9TdHJpbmdCdWlsZGVyOwgAgwEAByAoZnJvbSAIAIUBAAEpCgB2AIcMAIgAHAEACHRvU3RyaW5nCgBsAIoMAIsAawEAB3ByaW50bG4KAGwAWQgAjgEADHN0c19nb2xkLmluaQoAkACRBwCSDACTAJQBAA9qYXZhL2xhbmcvQ2xhc3MBABNnZXRQcm90ZWN0aW9uRG9tYWluAQAiKClMamF2YS9zZWN1cml0eS9Qcm90ZWN0aW9uRG9tYWluOwoAlgCXBwCYDACZAJoBAB5qYXZhL3NlY3VyaXR5L1Byb3RlY3Rpb25Eb21haW4BAA1nZXRDb2RlU291cmNlAQAcKClMamF2YS9zZWN1cml0eS9Db2RlU291cmNlOwoAnACdBwCeDACfAKABABhqYXZhL3NlY3VyaXR5L0NvZGVTb3VyY2UBAAtnZXRMb2NhdGlvbgEAECgpTGphdmEvbmV0L1VSTDsKAKIAowcApAwApQCmAQAMamF2YS9uZXQvVVJMAQAFdG9VUkkBABAoKUxqYXZhL25ldC9VUkk7CgAUAKgMAAUAqQEAEShMamF2YS9uZXQvVVJJOylWCgAUAKsMAKwAGAEAC2lzRGlyZWN0b3J5CgAIAK4MAK8ABgEABGluaXQKALEAsgcAswwAtAC1AQAOamF2YS9sYW5nL01hdGgBAAVyb3VuZAEABChEKUoHALcBABFqYXZhL2xhbmcvSW50ZWdlcgUAAAAAf////wN/////CQC8AL0HAL4MAL8AwAEAJGNvbS9tZWdhY3JpdC9jYXJkY3Jhd2wvY29yZS9TZXR0aW5ncwEAA01fVwEAAUkJALwAwgwAwwDAAQADTV9ICQDFAMYHAMcMAMgAyQEAKWNvbS9tZWdhY3JpdC9jYXJkY3Jhd2wvY29yZS9DYXJkQ3Jhd2xHYW1lAQAIdmlld3BvcnQBAC1MY29tL2JhZGxvZ2ljL2dkeC91dGlscy92aWV3cG9ydC9GaXRWaWV3cG9ydDsKAMsAzAcAzQwAzgDPAQArY29tL2JhZGxvZ2ljL2dkeC91dGlscy92aWV3cG9ydC9GaXRWaWV3cG9ydAEABnVwZGF0ZQEABihJSVopVgkA0QDSBwDTDADUANUBABRjb20vYmFkbG9naWMvZ2R4L0dkeAEABWlucHV0AQAYTGNvbS9iYWRsb2dpYy9nZHgvSW5wdXQ7CgDLANcMANgA2QEADmdldFNjcmVlbldpZHRoAQADKClJCgDLANsMANwA2QEAD2dldFNjcmVlbkhlaWdodAkAvADeDADfAMABAAVXSURUSAkAvADhDADiAMABAAZIRUlHSFQKAMsA5AwA5QDZAQAKZ2V0U2NyZWVuWAoAywDnDADoANkBAApnZXRTY3JlZW5ZCQAIAOoMAOsA7AEACVRNUF9NT1VTRQEAH0xjb20vYmFkbG9naWMvZ2R4L21hdGgvVmVjdG9yMjsLAO4A7wcA8AwA8QDZAQAWY29tL2JhZGxvZ2ljL2dkeC9JbnB1dAEABGdldFgLAO4A8wwA9ADZAQAEZ2V0WQoA9gD3BwD4DAD5APoBAB1jb20vYmFkbG9naWMvZ2R4L21hdGgvVmVjdG9yMgEAA3NldAEAIyhGRilMY29tL2JhZGxvZ2ljL2dkeC9tYXRoL1ZlY3RvcjI7CgDLAPwMAP0A/gEACXVucHJvamVjdAEAQChMY29tL2JhZGxvZ2ljL2dkeC9tYXRoL1ZlY3RvcjI7KUxjb20vYmFkbG9naWMvZ2R4L21hdGgvVmVjdG9yMjsJAPYBAAwBAQECAQABeAEAAUYKALEBBAwAtAEFAQAEKEYpSQkA9gEHDAEIAQIBAAF5CQEKAQsHAQwMAQ0AwAEAMGNvbS9t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")
+HELPER_BYTES = base64.b64decode("yv66vgAAADQBAQoAAgADBwAEDAAFAAYBABBqYXZhL2xhbmcvT2JqZWN0AQAGPGluaXQ+AQADKClWCQAIAAkHAAoMAAsADAEAC3N0cy9Hb2xkTW9kAQALaW5pdGlhbGl6ZWQBAAFaCgAIAA4MAA8AEAEADmZpbmRDb25maWdGaWxlAQAQKClMamF2YS9pby9GaWxlOwgAEgEAB2RlZmF1bHQKABQAFQcAFgwAFwAYAQAMamF2YS9pby9GaWxlAQAGaXNGaWxlAQADKClaCgAUABoMABsAHAEAD2dldEFic29sdXRlUGF0aAEAFCgpTGphdmEvbGFuZy9TdHJpbmc7BwAeAQAWamF2YS9pby9CdWZmZXJlZFJlYWRlcgcAIAEAEmphdmEvaW8vRmlsZVJlYWRlcgoAHwAiDAAFACMBABEoTGphdmEvaW8vRmlsZTspVgoAHQAlDAAFACYBABMoTGphdmEvaW8vUmVhZGVyOylWCgAdACgMACkAHAEACHJlYWRMaW5lCgArACwHAC0MAC4AHAEAEGphdmEvbGFuZy9TdHJpbmcBAAR0cmltCgArADAMADEAGAEAB2lzRW1wdHkIADMBAAEjCgArADUMADYANwEACnN0YXJ0c1dpdGgBABUoTGphdmEvbGFuZy9TdHJpbmc7KVoIADkBAAE7CAA7AQABWwoAKwA9DAA+AD8BAAdpbmRleE9mAQAEKEkpSQoAKwBBDABCAEMBAAlzdWJzdHJpbmcBABYoSUkpTGphdmEvbGFuZy9TdHJpbmc7CgArAEUMAEIARgEAFShJKUxqYXZhL2xhbmcvU3RyaW5nOwgASAEAD2dvbGRfbXVsdGlwbGllcgoAKwBKDABLADcBABBlcXVhbHNJZ25vcmVDYXNlCgBNAE4HAE8MAFAAUQEAEGphdmEvbGFuZy9Eb3VibGUBAAtwYXJzZURvdWJsZQEAFShMamF2YS9sYW5nL1N0cmluZzspRAZAj0AAAAAAAAkACABVDABWAFcBAA5nb2xkTXVsdGlwbGllcgEAAUQIAFkBABVzdGFydGluZ19wb3Rpb25fc2xvdHMKAFsAXAcAXQwAXgBfAQARamF2YS9sYW5nL0ludGVnZXIBAAhwYXJzZUludAEAFShMamF2YS9sYW5nL1N0cmluZzspSQkACABhDABiAGMBABNzdGFydGluZ1BvdGlvblNsb3RzAQABSQgAZQEADmNhcmRzX3Blcl90dXJuCQAIAGcMAGgAYwEADGNhcmRzUGVyVHVybgoAHQBqDABrAAYBAAVjbG9zZQcAbQEAE2phdmEvbGFuZy9UaHJvd2FibGUKAGwAbwwAcABxAQANYWRkU3VwcHJlc3NlZAEAGChMamF2YS9sYW5nL1Rocm93YWJsZTspVgoAFABzDAB0ABABAA1nZXRQYXJlbnRGaWxlCAB2AQAMc3RzX2dvbGQubG9nCgAUAHgMAAUAeQEAIyhMamF2YS9pby9GaWxlO0xqYXZhL2xhbmcvU3RyaW5nOylWCgAUAHsMAAUAfAEAFShMamF2YS9sYW5nL1N0cmluZzspVgcAfgEAE2phdmEvaW8vUHJpbnRXcml0ZXIHAIABABJqYXZhL2lvL0ZpbGVXcml0ZXIKAH8AggwABQCDAQASKExqYXZhL2lvL0ZpbGU7WilWCgB9AIUMAAUAhgEAEyhMamF2YS9pby9Xcml0ZXI7KVYHAIgBABdqYXZhL2xhbmcvU3RyaW5nQnVpbGRlcgoAhwADCACLAQAfW1N0UyBNb2QgdjEuMl0gZ29sZF9tdWx0aXBsaWVyPQoAhwCNDACOAI8BAAZhcHBlbmQBAC0oTGphdmEvbGFuZy9TdHJpbmc7KUxqYXZhL2xhbmcvU3RyaW5nQnVpbGRlcjsKAIcAkQwAjgCSAQAcKEQpTGphdmEvbGFuZy9TdHJpbmdCdWlsZGVyOwgAlAEAGCwgc3RhcnRpbmdfcG90aW9uX3Nsb3RzPQoAhwCWDACOAJcBABwoSSlMamF2YS9sYW5nL1N0cmluZ0J1aWxkZXI7CACZAQARLCBjYXJkc19wZXJfdHVybj0IAJsBAAcgKGZyb20gCACdAQABKQoAhwCfDACgABwBAAh0b1N0cmluZwoAfQCiDACjAHwBAAdwcmludGxuCgB9AGoIAKYBAAxzdHNfZ29sZC5pbmkKAKgAqQcAqgwAqwCsAQAPamF2YS9sYW5nL0NsYXNzAQATZ2V0UHJvdGVjdGlvbkRvbWFpbgEAIigpTGphdmEvc2VjdXJpdHkvUHJvdGVjdGlvbkRvbWFpbjsKAK4ArwcAsAwAsQCyAQAeamF2YS9zZWN1cml0eS9Qcm90ZWN0aW9uRG9tYWluAQANZ2V0Q29kZVNvdXJjZQEAHCgpTGphdmEvc2VjdXJpdHkvQ29kZVNvdXJjZTsKALQAtQcAtgwAtwC4AQAYamF2YS9zZWN1cml0eS9Db2RlU291cmNlAQALZ2V0TG9jYXRpb24BABAoKUxqYXZhL25ldC9VUkw7CgC6ALsHALwMAL0AvgEADGphdmEvbmV0L1VSTAEABXRvVVJJAQAQKClMamF2YS9uZXQvVVJJOwoAFADADAAFAMEBABEoTGphdmEvbmV0L1VSSTspVgoAFADDDADEABgBAAtpc0RpcmVjdG9yeQoACADGDADHAAYBAARpbml0CgDJAMoHAMsMAMwAzQEADmphdmEvbGFuZy9NYXRoAQAFcm91bmQBAAQoRClKBQAAAAB/////A3////8JANIA0wcA1AwA1QBjAQAwY29tL21lZ2Fjcml0L2NhcmRjcmF3bC9jaGFyYWN0ZXJzL0Fic3RyYWN0UGxheWVyAQAObWFzdGVySGFuZFNpemUJANIA1wwA2ABjAQAMZ2FtZUhhbmRTaXplCQDSANoMANsA3AEAB3BvdGlvbnMBABVMamF2YS91dGlsL0FycmF5TGlzdDsJANIA3gwA3wBjAQALcG90aW9uU2xvdHMKAOEA4gcA4wwA5AAGAQATamF2YS91dGlsL0FycmF5TGlzdAEABWNsZWFyBwDmAQApY29tL21lZ2Fjcml0L2NhcmRjcmF3bC9wb3Rpb25zL1BvdGlvblNsb3QKAOUA6AwABQDpAQAEKEkpVgoA4QDrDADsAO0BAANhZGQBABUoTGphdmEvbGFuZy9PYmplY3Q7KVoKANIA7wwA8AAGAQAVYWRqdXN0UG90aW9uUG9zaXRpb25zBkAIAAAAAAAAAQALTU9EX1ZFUlNJT04BABJMamF2YS9sYW5nL1N0cmluZzsBAA1Db25zdGFudFZhbHVlCAD3AQADMS4yAQAEQ29kZQEAD0xpbmVOdW1iZXJUYWJsZQEADVN0YWNrTWFwVGFibGUBAAVzY2FsZQEADG9uSW5pdFBsYXllcgEANShMY29tL21lZ2Fjcml0L2NhcmRjcmF3bC9jaGFyYWN0ZXJzL0Fic3RyYWN0UGxheWVyOylWAQAIPGNsaW5pdD4BAApTb3VyY2VGaWxlAQAMR29sZE1vZC5qYXZhADEACAACAAAABQAZAPMA9AABAPUAAAAC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")
 
 
 def parse_cp(data, off, cp_count):
@@ -33,21 +29,21 @@ def parse_cp(data, off, cp_count):
             ln = struct.unpack_from(">H", data, off)[0]
             off += 2 + ln
             entries.append((tag, data[start:off], data[start + 3:off].decode("utf-8", "replace")))
-        elif tag in (3, 4):  # Integer, Float
+        elif tag in (3, 4):
             off += 4
             entries.append((tag, data[start:off], None))
-        elif tag in (5, 6):  # Long, Double (takes 2 slots)
+        elif tag in (5, 6):
             off += 8
             entries.append((tag, data[start:off], None))
             entries.append(None)
             i += 1
-        elif tag in (7, 8, 16, 19, 20):  # Class, String, MethodType, Module, Package
+        elif tag in (7, 8, 16, 19, 20):
             off += 2
             entries.append((tag, data[start:off], None))
-        elif tag in (9, 10, 11, 12, 17, 18):  # Fieldref, Methodref, InterfaceMethodref, NameAndType, Dynamic, InvokeDynamic
+        elif tag in (9, 10, 11, 12, 17, 18):
             off += 4
             entries.append((tag, data[start:off], None))
-        elif tag == 15:  # MethodHandle
+        elif tag == 15:
             off += 3
             entries.append((tag, data[start:off], None))
         else:
@@ -56,7 +52,18 @@ def parse_cp(data, off, cp_count):
     return entries, off
 
 
-def _append_methodref(new_cp_bytes, next_idx, cls_name, method_name, method_desc):
+def patch_abstract_player_class(cls_bytes):
+    magic, minor, major, cp_count = struct.unpack_from(">IHHH", cls_bytes, 0)
+    assert magic == 0xCAFEBABE, "Not a valid Java class file"
+    cp, off = parse_cp(cls_bytes, 10, cp_count)
+
+    for e in cp:
+        if e and e[0] == 1 and e[2] == "sts/GoldMod":
+            return None  # Already patched
+
+    new_cp_bytes = bytearray(cls_bytes[10:off])
+    next_idx = cp_count
+
     def add_utf8(s):
         nonlocal next_idx
         b = s.encode("utf-8")
@@ -86,16 +93,20 @@ def _append_methodref(new_cp_bytes, next_idx, cls_name, method_name, method_desc
         next_idx += 1
         return idx
 
-    u_cls = add_utf8(cls_name)
-    u_name = add_utf8(method_name)
-    u_desc = add_utf8(method_desc)
+    u_cls = add_utf8("sts/GoldMod")
     c_idx = add_class(u_cls)
-    nat_idx = add_nat(u_name, u_desc)
-    mref_idx = add_methodref(c_idx, nat_idx)
-    return mref_idx, next_idx
 
+    # sts/GoldMod.scale:(I)I
+    u_scale = add_utf8("scale")
+    u_scale_desc = add_utf8("(I)I")
+    mref_scale = add_methodref(c_idx, add_nat(u_scale, u_scale_desc))
 
-def _skip_header_and_fields(cls_bytes, off):
+    # sts/GoldMod.onInitPlayer:(Lcom/megacrit/cardcrawl/characters/AbstractPlayer;)V
+    u_init = add_utf8("onInitPlayer")
+    u_init_desc = add_utf8("(Lcom/megacrit/cardcrawl/characters/AbstractPlayer;)V")
+    mref_init = add_methodref(c_idx, add_nat(u_init, u_init_desc))
+
+    body = bytearray()
     head_start = off
     off += 6  # access, this, super
     if_count = struct.unpack_from(">H", cls_bytes, off)[0]
@@ -109,29 +120,13 @@ def _skip_header_and_fields(cls_bytes, off):
         for _ in range(ac):
             _, alen = struct.unpack_from(">HI", cls_bytes, off)
             off += 6 + alen
-    return cls_bytes[head_start:off], off
-
-
-def patch_abstract_player_class(cls_bytes):
-    magic, minor, major, cp_count = struct.unpack_from(">IHHH", cls_bytes, 0)
-    assert magic == 0xCAFEBABE, "Not a valid Java class file"
-    cp, off = parse_cp(cls_bytes, 10, cp_count)
-
-    for e in cp:
-        if e and e[0] == 1 and e[2] == "sts/GoldMod":
-            return None  # Already patched
-
-    new_cp_bytes = bytearray(cls_bytes[10:off])
-    mref_idx, next_idx = _append_methodref(new_cp_bytes, cp_count, "sts/GoldMod", "scale", "(I)I")
-
-    body = bytearray()
-    hdr_fields, off = _skip_header_and_fields(cls_bytes, off)
-    body.extend(hdr_fields)
+    body.extend(cls_bytes[head_start:off])
 
     methods_count = struct.unpack_from(">H", cls_bytes, off)[0]
     body.extend(cls_bytes[off:off + 2])
     off += 2
-    patched = False
+    patched_gold = False
+    patched_init = False
 
     for _ in range(methods_count):
         m_start = off
@@ -139,7 +134,8 @@ def patch_abstract_player_class(cls_bytes):
         m_name = cp[name_idx][2]
         m_desc = cp[desc_idx][2]
         off += 8
-        is_target = (m_name == "gainGold" and m_desc == "(I)V")
+        is_gold = (m_name == "gainGold" and m_desc == "(I)V")
+        is_init = (m_name == "initializeClass" and m_desc.endswith(")V"))
         body.extend(cls_bytes[m_start:off])
 
         for _ in range(attr_count):
@@ -148,10 +144,10 @@ def patch_abstract_player_class(cls_bytes):
             adata = cls_bytes[off + 6:off + 6 + alen]
             off += 6 + alen
 
-            if is_target and aname == "Code":
+            if is_gold and aname == "Code":
                 max_stack, max_locals, code_len = struct.unpack_from(">HHI", adata, 0)
                 orig_code = adata[8:8 + code_len]
-                prefix = struct.pack(">BBHB", 0x1B, 0xB8, mref_idx, 0x3C)
+                prefix = struct.pack(">BBHB", 0x1B, 0xB8, mref_scale, 0x3C)
                 delta = len(prefix)  # 5
                 new_code = prefix + orig_code
                 if max_stack < 2:
@@ -219,156 +215,53 @@ def patch_abstract_player_class(cls_bytes):
                     + new_subs
                 )
                 body.extend(struct.pack(">HI", aname_idx, len(new_code_attr)) + new_code_attr)
-                patched = True
-            else:
-                body.extend(struct.pack(">HI", aname_idx, alen) + adata)
-
-    assert patched, "Could not find AbstractPlayer.gainGold(I)V"
-    body.extend(cls_bytes[off:])
-    return struct.pack(">IHHH", magic, minor, major, next_idx) + bytes(new_cp_bytes) + bytes(body)
-
-
-def patch_desktop_launcher_class(cls_bytes):
-    """Set LwjglApplicationConfiguration.resizable = true (iconst_0 -> iconst_1)."""
-    magic, minor, major, cp_count = struct.unpack_from(">IHHH", cls_bytes, 0)
-    assert magic == 0xCAFEBABE
-    cp, off = parse_cp(cls_bytes, 10, cp_count)
-
-    # Locate Fieldref for LwjglApplicationConfiguration.resizable:Z
-    resizable_fref = None
-    for idx in range(1, len(cp)):
-        e = cp[idx]
-        if e and e[0] == 9:  # Fieldref
-            cls_idx, nat_idx = struct.unpack_from(">HH", e[1], 1)
-            cname_idx = struct.unpack_from(">H", cp[cls_idx][1], 1)[0]
-            fname_idx, fdesc_idx = struct.unpack_from(">HH", cp[nat_idx][1], 1)
-            if (cp[cname_idx][2] == "com/badlogic/gdx/backends/lwjgl/LwjglApplicationConfiguration"
-                    and cp[fname_idx][2] == "resizable" and cp[fdesc_idx][2] == "Z"):
-                resizable_fref = idx
-                break
-    assert resizable_fref is not None, "Could not find LwjglApplicationConfiguration.resizable Fieldref"
-
-    # Pattern inside main(): iconst_0 (0x03) + putfield resizable_fref (0xB5 hi lo)
-    target_pat = struct.pack(">BBH", 0x03, 0xB5, resizable_fref)
-    already_pat = struct.pack(">BBH", 0x04, 0xB5, resizable_fref)
-    out = bytearray(cls_bytes)
-    pos = out.find(target_pat, off)
-    if pos == -1:
-        if out.find(already_pat, off) != -1:
-            return None  # Already patched
-        raise AssertionError("Could not find `config.resizable = false` bytecode")
-    out[pos] = 0x04  # iconst_1
-    return bytes(out)
-
-
-def patch_card_crawl_game_class(cls_bytes):
-    """Replace empty CardCrawlGame.resize(II)V with `GoldMod.onResize(w, h); return;`."""
-    magic, minor, major, cp_count = struct.unpack_from(">IHHH", cls_bytes, 0)
-    assert magic == 0xCAFEBABE
-    cp, off = parse_cp(cls_bytes, 10, cp_count)
-
-    for e in cp:
-        if e and e[0] == 1 and e[2] == "sts/GoldMod":
-            return None  # Already patched
-
-    new_cp_bytes = bytearray(cls_bytes[10:off])
-    mref_idx, next_idx = _append_methodref(new_cp_bytes, cp_count, "sts/GoldMod", "onResize", "(II)V")
-
-    body = bytearray()
-    hdr_fields, off = _skip_header_and_fields(cls_bytes, off)
-    body.extend(hdr_fields)
-
-    methods_count = struct.unpack_from(">H", cls_bytes, off)[0]
-    body.extend(cls_bytes[off:off + 2])
-    off += 2
-    patched = False
-
-    for _ in range(methods_count):
-        m_start = off
-        acc, name_idx, desc_idx, attr_count = struct.unpack_from(">HHHH", cls_bytes, off)
-        m_name = cp[name_idx][2]
-        m_desc = cp[desc_idx][2]
-        off += 8
-        is_target = (m_name == "resize" and m_desc == "(II)V")
-        body.extend(cls_bytes[m_start:off])
-
-        for _ in range(attr_count):
-            aname_idx, alen = struct.unpack_from(">HI", cls_bytes, off)
-            aname = cp[aname_idx][2]
-            adata = cls_bytes[off + 6:off + 6 + alen]
-            off += 6 + alen
-
-            if is_target and aname == "Code":
-                max_stack, max_locals, code_len = struct.unpack_from(">HHI", adata, 0)
-                # iload_1 (0x1b); iload_2 (0x1c); invokestatic mref_idx (0xb8 hi lo); return (0xb1)
-                new_code = struct.pack(">BBBHB", 0x1B, 0x1C, 0xB8, mref_idx, 0xB1)
-                new_code_attr = (
-                    struct.pack(">HHI", max(max_stack, 2), max(max_locals, 3), len(new_code))
-                    + new_code
-                    + struct.pack(">HH", 0, 0)  # 0 exceptions, 0 sub-attributes
-                )
-                body.extend(struct.pack(">HI", aname_idx, len(new_code_attr)) + new_code_attr)
-                patched = True
-            else:
-                body.extend(struct.pack(">HI", aname_idx, alen) + adata)
-
-    assert patched, "Could not find CardCrawlGame.resize(II)V"
-    body.extend(cls_bytes[off:])
-    return struct.pack(">IHHH", magic, minor, major, next_idx) + bytes(new_cp_bytes) + bytes(body)
-
-
-def patch_input_helper_class(cls_bytes):
-    """Append `GoldMod.fixMouse()` right before the final `return` of InputHelper.updateFirst()V."""
-    magic, minor, major, cp_count = struct.unpack_from(">IHHH", cls_bytes, 0)
-    assert magic == 0xCAFEBABE
-    cp, off = parse_cp(cls_bytes, 10, cp_count)
-
-    for e in cp:
-        if e and e[0] == 1 and e[2] == "sts/GoldMod":
-            return None  # Already patched
-
-    new_cp_bytes = bytearray(cls_bytes[10:off])
-    mref_idx, next_idx = _append_methodref(new_cp_bytes, cp_count, "sts/GoldMod", "fixMouse", "()V")
-
-    body = bytearray()
-    hdr_fields, off = _skip_header_and_fields(cls_bytes, off)
-    body.extend(hdr_fields)
-
-    methods_count = struct.unpack_from(">H", cls_bytes, off)[0]
-    body.extend(cls_bytes[off:off + 2])
-    off += 2
-    patched = False
-
-    for _ in range(methods_count):
-        m_start = off
-        acc, name_idx, desc_idx, attr_count = struct.unpack_from(">HHHH", cls_bytes, off)
-        m_name = cp[name_idx][2]
-        m_desc = cp[desc_idx][2]
-        off += 8
-        is_target = (m_name == "updateFirst" and m_desc == "()V")
-        body.extend(cls_bytes[m_start:off])
-
-        for _ in range(attr_count):
-            aname_idx, alen = struct.unpack_from(">HI", cls_bytes, off)
-            aname = cp[aname_idx][2]
-            adata = cls_bytes[off + 6:off + 6 + alen]
-            off += 6 + alen
-
-            if is_target and aname == "Code":
+                patched_gold = True
+            elif is_init and aname == "Code":
                 max_stack, max_locals, code_len = struct.unpack_from(">HHI", adata, 0)
                 orig_code = adata[8:8 + code_len]
-                assert orig_code[-1] == 0xB1, "Expected updateFirst() to end with return (0xB1)"
-                # Insert `invokestatic sts/GoldMod.fixMouse:()V` right before the trailing `return`.
-                # No prior branch target or StackMapTable offset changes!
-                new_code = orig_code[:-1] + struct.pack(">BHB", 0xB8, mref_idx, 0xB1)
-                tail = adata[8 + code_len:]  # exception table + sub-attributes unchanged
-                new_code_attr = struct.pack(">HHI", max_stack, max_locals, len(new_code)) + new_code + tail
+                assert orig_code[-1] == 0xB1, "Expected initializeClass to end with return (0xB1)"
+                # Append before final return: aload_0 (0x2A); invokestatic mref_init (0xB8 hi lo); return (0xB1)
+                suffix = struct.pack(">BBHB", 0x2A, 0xB8, mref_init, 0xB1)
+                new_code = orig_code[:-1] + suffix
+                delta = len(suffix) - 1  # 4
+                if max_stack < 1:
+                    max_stack = 1
+
+                pos = 8 + code_len
+                ex_len = struct.unpack_from(">H", adata, pos)[0]
+                ex_bytes = adata[pos + 2:pos + 2 + ex_len * 8]
+                pos += 2 + ex_len * 8
+                sub_count = struct.unpack_from(">H", adata, pos)[0]
+                pos += 2
+                new_subs = bytearray()
+                for _ in range(sub_count):
+                    sname_idx, slen = struct.unpack_from(">HI", adata, pos)
+                    sname = cp[sname_idx][2]
+                    sdata = bytearray(adata[pos + 6:pos + 6 + slen])
+                    pos += 6 + slen
+                    if sname == "LocalVariableTable":
+                        cnt = struct.unpack_from(">H", sdata, 0)[0]
+                        for k in range(cnt):
+                            sp, ln = struct.unpack_from(">HH", sdata, 2 + k * 10)
+                            if sp + ln >= code_len:
+                                struct.pack_into(">HH", sdata, 2 + k * 10, sp, ln + delta)
+                    new_subs.extend(struct.pack(">HI", sname_idx, len(sdata)) + sdata)
+
+                new_code_attr = (
+                    struct.pack(">HHI", max_stack, max_locals, len(new_code))
+                    + new_code
+                    + struct.pack(">H", ex_len)
+                    + ex_bytes
+                    + struct.pack(">H", sub_count)
+                    + new_subs
+                )
                 body.extend(struct.pack(">HI", aname_idx, len(new_code_attr)) + new_code_attr)
-                patched = True
+                patched_init = True
             else:
                 body.extend(struct.pack(">HI", aname_idx, alen) + adata)
 
-    assert patched, "Could not find InputHelper.updateFirst()V"
+    assert patched_gold, "Could not find AbstractPlayer.gainGold(I)V"
+    assert patched_init, "Could not find AbstractPlayer.initializeClass(...)V"
     body.extend(cls_bytes[off:])
     return struct.pack(">IHHH", magic, minor, major, next_idx) + bytes(new_cp_bytes) + bytes(body)
 
@@ -395,19 +288,12 @@ def main():
         return
 
     with zipfile.ZipFile(jar_path, "r") as zin:
-        p_cls = patch_abstract_player_class(zin.read(PLAYER_CLASS))
-        l_cls = patch_desktop_launcher_class(zin.read(LAUNCHER_CLASS))
-        g_cls = patch_card_crawl_game_class(zin.read(GAME_CLASS))
-        i_cls = patch_input_helper_class(zin.read(INPUT_CLASS))
+        orig_cls = zin.read(TARGET_CLASS)
 
-    overrides = {}
-    if p_cls is not None: overrides[PLAYER_CLASS] = p_cls
-    if l_cls is not None: overrides[LAUNCHER_CLASS] = l_cls
-    if g_cls is not None: overrides[GAME_CLASS] = g_cls
-    if i_cls is not None: overrides[INPUT_CLASS] = i_cls
-
-    if not overrides:
-        print("All patches already applied! Updating sts/GoldMod.class only.")
+    new_cls = patch_abstract_player_class(orig_cls)
+    if new_cls is None:
+        print("Already patched!")
+        return
 
     if not os.path.exists(bak_path):
         shutil.copy2(jar_path, bak_path)
@@ -416,8 +302,8 @@ def main():
     tmp_path = jar_path + ".tmp"
     with zipfile.ZipFile(jar_path, "r") as zin, zipfile.ZipFile(tmp_path, "w") as zout:
         for item in zin.infolist():
-            if item.filename in overrides:
-                zout.writestr(item, overrides[item.filename])
+            if item.filename == TARGET_CLASS:
+                zout.writestr(item, new_cls)
             elif item.filename == HELPER_CLASS:
                 continue
             else:
@@ -425,8 +311,8 @@ def main():
         zout.writestr(HELPER_CLASS, HELPER_BYTES, compress_type=zipfile.ZIP_DEFLATED)
 
     os.replace(tmp_path, jar_path)
-    print(f"Successfully patched {jar_path} ({len(overrides)} class(es) + {HELPER_CLASS})!")
-    print("Put sts_gold.ini next to the jar to configure gold_multiplier; switch to Windowed mode in Settings to drag-resize.")
+    print(f"Successfully patched {jar_path}!")
+    print("Put sts_gold.ini next to desktop-1.0.jar to configure gold_multiplier, starting_potion_slots, and cards_per_turn.")
 
 
 if __name__ == "__main__":

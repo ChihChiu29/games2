@@ -7,7 +7,8 @@ Universal conventions for all projects and game mods in this repository. Project
 - Never overwrite files from memory—changes may have been made and committed in another session.
 
 ## 2. Standard Project Structure
-Keep each mod/project self-contained with a consistent layout:
+- **Place new game mods under `game_mods/<game>/` by default.**
+- Keep each mod/project self-contained with a consistent layout:
 - `VERSION` — plain-text version number (e.g., `1.3`).
 - `build.sh` (and/or patcher script) — reads `VERSION` and builds reproducible outputs into `release/`.
 - `release/` — built artifacts (e.g., `desktop-<VERSION>.jar`, `*_mod<VERSION>.apk`, `dinput8.dll`), standalone patchers, and user-facing `.ini` config files.
@@ -29,5 +30,5 @@ Never report a build as "done" without verifying the actual generated artifact:
 - Download needed files directly into their corresponding project subdirectory.
 
 ## 6. Git Hygiene
-- **Never commit `.jar`, `.apk`, `.APK`, `.idsig`, `.exe`, `.EXE`, or `eboot*.bin` files.** Always keep large game binaries and built archives untracked via `.gitignore`.
+- **Never commit `.jar`, `.apk`, `.APK`, `.idsig`, `.exe`, `.EXE`, `.nds`, or `eboot*.bin` files.** Always keep large game binaries and built archives untracked via `.gitignore`.
 - Clean up temporary test files/logs (e.g., `info.displayconfig`, `sts_cheat.log`) before committing.

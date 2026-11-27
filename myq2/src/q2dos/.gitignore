@@ -1,0 +1,45 @@
+# ignore all make dependency files
+*.d
+*.o
+*.ncb
+*.opt
+*.plg
+*.suo
+*.user
+*.aps
+*.idb
+*.pdb
+*.dbg
+*.dxe
+*.clwbin/
+# ignore all the windows binaries - they shouldn't be committed! 
+.vs/
+_build/
+Debug/
+Dedicated_Debug/
+Release/
+Dedicated_Release/
+win32/q2.res
+out.txt
+q2*.exe
+Q2DOS_*.7z
+q2dos_*.7z
+q2
+q2ace
+q2rogue
+q2xatrix
+q2zaero
+q2dxe
+q2sse
+# glide3x leftovers that are generated during compile
+fxgasm.h
+fxbldno.h
+fxgasm.exe
+fsbldno.exe
+fxinline.h
+gendate.h
+# save game header make stuff
+makeheaders.bat
+extractfuncts.exe
+# PVS Studio
+*.PVS-Studio.*

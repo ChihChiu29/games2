@@ -1,0 +1,5 @@
+*.apk
+*.APK
+*.idsig
+work/
+release/*.apk

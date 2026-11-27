@@ -7,12 +7,15 @@ Universal conventions for all projects and game mods in this repository. Project
 - Never overwrite files from memory—changes may have been made and committed in another session.
 
 ## 2. Standard Project Structure
-- **Place new game mods under `game_mods/<game>/` by default.**
-- Keep each mod/project self-contained with a consistent layout:
-- `VERSION` — plain-text version number (e.g., `1.3`).
-- `build.sh` (and/or patcher script) — reads `VERSION` and builds reproducible outputs into `release/`.
-- `release/` — built artifacts (e.g., `desktop-<VERSION>.jar`, `*_mod<VERSION>.apk`, `dinput8.dll`), standalone patchers, and user-facing `.ini` config files.
-- `README.md` — per-project usage, changelog, offsets/hooks, and build notes.
+- **Game mods (`game_mods/<game>/`):** Place new binary/patch game mods under `game_mods/<game>/` by default.
+- **Standalone / non-`game_mods` projects (`<short_game_name>/`):** Place standalone builds/ports/reimplementations in a short game-named directory at the repo root with this layout:
+  - `VERSION` — plain-text current version number (e.g., `1.3`).
+  - `build.sh` — builds the next version and packages reproducible outputs into `release/`.
+  - `src/` — project source code.
+  - `release/` — built artifacts (e.g., `desktop-<VERSION>.jar`, `*_mod<VERSION>.apk`, `dinput8.dll`, DOSBox-Pure `.zip` packs), standalone patchers, and user-facing `.ini` config files.
+  - `README.md` — per-project usage, changelog, offsets/hooks, and build notes.
+  - Additional project-specific directories as needed (e.g., `original_paks/`, `maps/`, `tools/`).
+- Keep `game_mods/<game>/` projects self-contained with the same `VERSION`, `build.sh` (and/or patcher script), `release/`, and `README.md` conventions.
 
 ## 3. Versioning
 - **Bump `VERSION` on every change** (code, patches, or config filename/schema changes).

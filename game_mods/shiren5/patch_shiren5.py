@@ -200,6 +200,45 @@ def build_itembag_bracelet_check_helper() -> bytes:
     )
 
 
+def build_waitframes_skip_helper() -> bytes:
+    """
+    Thumb-1 helper at RAM 0x020D88B0 called from WaitFrames (0x02009A5A).
+    Replaces `adds r5, r0, #0; movs r4, #0`. If not in a dungeon scene
+    (scene_id != 2 and scene_id != 3) and L or R is held in REG_KEYINPUT
+    (0x04000130, active-low bits 8/9), clamps wait duration r5 to 1 frame
+    so opening logos, cutscene animations, and scripted pauses skip cleanly.
+    """
+    return struct.pack(
+        "<24HII",
+        0x1C05,  # +00: adds r5, r0, #0
+        0x2400,  # +02: movs r4, #0
+        0x2D01,  # +04: cmp  r5, #1
+        0xDD11,  # +06: ble  +0x2c (bx lr)
+        0x4809,  # +08: ldr  r0, [pc, #0x24] -> +0x30 (0x0210E68C g_SceneManager*)
+        0x6800,  # +0a: ldr  r0, [r0]
+        0x2800,  # +0c: cmp  r0, #0
+        0xD005,  # +0e: beq  +0x1c (early boot/logo -> allow skip!)
+        0x3088,  # +10: adds r0, #0x88
+        0x7800,  # +12: ldrb r0, [r0]
+        0x2802,  # +14: cmp  r0, #2          (dungeon scene 2)
+        0xD009,  # +16: beq  +0x2c (bx lr)
+        0x2803,  # +18: cmp  r0, #3          (dungeon scene 3)
+        0xD007,  # +1a: beq  +0x2c (bx lr)
+        0x4805,  # +1c: ldr  r0, [pc, #0x14] -> +0x34 (0x04000130 REG_KEYINPUT)
+        0x8801,  # +1e: ldrh r1, [r0]
+        0x43C9,  # +20: mvns r1, r1          (active-low -> active-high)
+        0x2003,  # +22: movs r0, #3
+        0x0200,  # +24: lsls r0, r0, #8      (0x0300 = R | L)
+        0x4201,  # +26: tst  r1, r0
+        0xD000,  # +28: beq  +0x2c (bx lr)
+        0x2501,  # +2a: movs r5, #1
+        0x4770,  # +2c: bx   lr
+        0x46C0,  # +2e: nop  (4-byte align)
+        0x0210E68C,  # +30: g_SceneManager*
+        0x04000130,  # +34: REG_KEYINPUT
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Patch Shiren 5 NDS (melonDS boot fix + No Night + 3x Gold + Expanded Backpack)"
@@ -209,6 +248,7 @@ def main():
     parser.add_argument("--keep-night", action="store_true", help="Keep Night Mode enabled")
     parser.add_argument("--gold-mult", type=int, default=3, help="Gold (Gitan) earn multiplier (default: 3; 1=vanilla)")
     parser.add_argument("--bag-size", type=int, default=72, help="Backpack slot count (default: 72 = 3x; 48 = 2x; 24 = vanilla)")
+    parser.add_argument("--no-lr-skip", action="store_true", help="Disable L/R dialogue fast-forward skip")
     args = parser.parse_args()
 
     if not (1 <= args.gold_mult <= 10):
@@ -426,7 +466,51 @@ def main():
             "ItemBag::Serialize: no-bracelet sentinel #2 -> 0xFF",
         )
 
-    # 5. Update total used ROM size header field (0x80) and pad to 64 MiB (0x04000000)
+    # 5. L/R/X Dialogue Skip (fast-forward any conversation while holding L, R, or X)
+    if not args.no_lr_skip:
+        print("\n[5] Applying L/R/X conversation skip patch...")
+        patch_bytes(
+            rom,
+            ram_to_file(0x0201E806, arm9_off, arm9_ram),
+            b"\x28\x78",  # ldrb r0, [r5]
+            b"\x0c\xe0",  # b #0x201e822 (bypass scene/enable restrictions)
+            "IsDialogueSkipHeld: enable in all conversations & scenes",
+        )
+        patch_bytes(
+            rom,
+            ram_to_file(0x0201E84C, arm9_off, arm9_ram),
+            b"\x01\x20\x80\x02",  # movs r0, #1; lsls r0, r0, #0xa (0x0400 = X)
+            b"\x07\x20\x00\x02",  # movs r0, #7; lsls r0, r0, #8   (0x0700 = R|L|X)
+            "IsDialogueSkipHeld: accept L, R, or X button",
+        )
+        # Reduce the 30-frame (0.5s) pause between skipped dialogue pages/boxes -> 1 frame
+        for idx, addr in enumerate((0x02067C4E, 0x02067DF4, 0x0206805E, 0x0206846E), 1):
+            patch_bytes(
+                rom,
+                ram_to_file(addr, arm9_off, arm9_ram),
+                b"\x1e\x20",  # movs r0, #0x1e (30 frames)
+                b"\x01\x20",  # movs r0, #1    (1 frame)
+                f"Dialogue skip pause #{idx} ({addr:#x}): 30 frames -> 1 frame",
+            )
+        # Hook WaitFrames (0x02009A5A) to fast-forward opening/cutscene waits when L or R is held outside dungeons
+        wf_helper_ram = 0x020D88B0
+        wf_helper = build_waitframes_skip_helper()
+        patch_bytes(
+            rom,
+            ram_to_file(wf_helper_ram, arm9_off, arm9_ram),
+            b"\x00" * len(wf_helper),
+            wf_helper,
+            f"Install WaitFrames L/R cutscene-skip helper at {wf_helper_ram:#x}",
+        )
+        patch_bytes(
+            rom,
+            ram_to_file(0x02009A5A, arm9_off, arm9_ram),
+            b"\x05\x1c\x00\x24",  # adds r5, r0, #0; movs r4, #0
+            encode_thumb_bl(0x02009A5A, wf_helper_ram),
+            "Hook WaitFrames (0x02009A5A) for L/R opening/cutscene skip",
+        )
+
+    # 6. Update total used ROM size header field (0x80) and pad to 64 MiB (0x04000000)
     used_size = len(rom)
     target_size = 0x04000000
     if used_size > target_size:
